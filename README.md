@@ -2,11 +2,11 @@
 
 A Windows setup app for installing the native ARM64/OpenXR Halo: Combat Evolved port on Steam Frame. It guides you through SSH, copies your own original Xbox game data, builds the native VR executable on the Frame, applies Xbox-style controls, and adds a VR shortcut to Steam.
 
-**Experimental preview.** The underlying VR implementation is an open upstream pull request. The pinned build and controller changes ran on a real Steam Frame, with the menu and controllers confirmed by its user. This installer has automated component tests; its complete first-install wizard still needs a fresh-device hardware test. Performance varies by scene and device. This is an independent community project, unaffiliated with Microsoft, Bungie, or Valve.
+**Version 1.0 — experimental VR support.** The underlying VR implementation is an open upstream pull request. The pinned build and controller changes ran on a real Steam Frame, with the menu and controllers confirmed by its user. This installer has automated component tests; its complete first-install wizard still needs a fresh-device hardware test. Performance varies by scene and device. This is an independent community project, unaffiliated with Microsoft, Bungie, or Valve.
 
 ## Download and run
 
-Download **[HaloFrameSetup.exe](https://github.com/ClassicWasTaken/halo-steam-frame-installer/releases/tag/v0.1.0)** and its checksum from this repository's Releases page. Windows 10/11 x64 is supported; Python and an SSH library are included in the executable. You do not need administrator rights.
+Download **[HaloFrameSetup.exe](https://github.com/ClassicWasTaken/halo-steam-frame-installer/releases/download/v1.0.0/HaloFrameSetup.exe)** and the checksum from the **[version 1.0 release](https://github.com/ClassicWasTaken/halo-steam-frame-installer/releases/tag/v1.0.0)**. Windows 10/11 x64 is supported; Python and an SSH library are included in the executable. You do not need administrator rights.
 
 1. **Choose game data.** Select an original **Xbox** Halo CE `.iso` / `.xiso`, or its extracted `maps` folder, that you are authorized to use. Setup validates the retail Xbox map format and extracts only the required maps. Halo PC, Xbox 360 Anniversary, MCC, and Quest packages are not inputs for this build. The repository and executable contain no commercial game data or download links for it.
 2. **Connect your Frame.** Follow the app's instructions: enable Developer Mode, set the Frame's user password, keep both devices on the same network, and enter its hostname/IP. The login is `steamos`, normally at `frame`, port 22. Test the connection and approve the displayed host fingerprint only after identifying your device. Your password is used in memory and is never saved or logged.

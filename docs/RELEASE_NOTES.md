@@ -1,3 +1,7 @@
+# Halo Steam Frame Setup 1.0
+
+Download **HaloFrameSetup.exe** from this release's Assets to run the compiled Windows installer. Python and SSH dependencies are included; no separate installation is needed.
+
 Guided Windows setup for the experimental native ARM64/OpenXR Halo CE Steam Frame port.
 
 - Accepts an original Xbox Halo CE ISO/XISO or extracted retail maps supplied by the user.
@@ -6,8 +10,8 @@ Guided Windows setup for the experimental native ARM64/OpenXR Halo CE Steam Fram
 - Prevents duplicate controller input; repairs existing native program files and controls while preserving saves and unrelated settings. Explicit Repair can adopt a validated manual native install in the standard folder.
 - Includes source references, third-party notices/source, and SHA256 checksums.
 
-Download **HaloFrameSetup.exe** to run setup. **HaloFrameSetup-0.1.0-source.zip** contains corresponding installer source and notices for rebuilding.
+**HaloFrameSetup-1.0.0-source.zip** contains corresponding installer source and notices for rebuilding. **SHA256SUMS.txt** contains checksums for both downloads.
 
-Preview limitation: the native game was tested on a Frame, and installer components have automated tests. The complete first-install executable still needs fresh-device hardware validation. The executable is unsigned. No game ISO, commercial maps, keys, or game binary is included. Compatible native/OpenCE multiplayer is separate from legacy Halo PC/MCC servers.
+Validation limitation: the native game was tested on a Frame, and installer components have automated tests. The complete first-install executable still needs fresh-device hardware validation. The executable is unsigned. No game ISO, commercial maps, keys, or game binary is included. Compatible native/OpenCE multiplayer is separate from legacy Halo PC/MCC servers.
 
 See the repository README for requirements, SSH steps, controls, and troubleshooting.
