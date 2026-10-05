@@ -27,7 +27,8 @@ jobs:
       - run: python -m pytest -q
 
   build-container:
-    runs-on: ubuntu-24.04-arm
+    # Podman 4.9 in the 24.04 image has upstream issue #22078 for keep-id UID 0.
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -37,14 +38,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Verify package installation in the rootless build container
-        run: |
-          # A separate disposable test account avoids the hosted runner's
-          # overlapping subordinate group map. Podman itself stays unprivileged.
-          sudo useradd --create-home --user-group halo-build-check
-          sudo install -d -m 700 -o halo-build-check -g halo-build-check /home/halo-build-check/runtime
-          sudo install -D -m 644 scripts/check-build-container.py /home/halo-build-check/installer-check/scripts/check-build-container.py
-          sudo install -D -m 644 resources/remote_install.py /home/halo-build-check/installer-check/resources/remote_install.py
-          sudo -u halo-build-check env XDG_RUNTIME_DIR=/home/halo-build-check/runtime /usr/bin/python3 /home/halo-build-check/installer-check/scripts/check-build-container.py
+        run: python scripts/check-build-container.py
 
   windows-executable:
     needs: [test, build-container]
