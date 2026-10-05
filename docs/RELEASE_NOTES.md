@@ -8,6 +8,7 @@ Version 1.2.1 fixes dependency installation failing inside the native ARM64 buil
 - Error dialogs show a concise failure headline without internal `HFI_PROGRESS` protocol lines and direct users to **Show activity** or **Save log** for the full redacted details.
 - Adds an ARM64 Linux CI check using the same rootless container arguments as the Frame build. It exercises APT package installation, UID/GID and group changes, `chown`, and output ownership on the host before the workflow builds the Windows EXE.
 - Retains the original Xbox dashboard UI, in-app Halo CE cover, Steam portrait and landscape artwork, Master Chief executable icon, and local menu music at 12% sample amplitude with a mute toggle.
+- Replaces the GitHub installer screenshot with a fresh capture without the cursor.
 - Retains Xbox-style controls, the tutorial head-look fix, safe repairs that preserve saves and unrelated settings, and library-registration retry without rebuilding.
 
 If 1.2.0 failed during the compiler dependency step, close that installer, run this version, select the same original Xbox ISO/maps, and retry. Setup verifies retained map data before reusing it. The failed build does not replace an existing game.
