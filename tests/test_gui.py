@@ -102,6 +102,19 @@ def test_control_guide_matches_expected_layout():
                    'LB  Change grenade', 'RB  Flashlight', 'Both grips  Recenter'):
         assert action in CONTROLS
 
+
+@WINDOWS_GUI
+def test_long_build_failure_has_readable_dialog_and_complete_redacted_log(app):
+    app.password_to_redact = 'offline-secret'
+    details = 'Native build failed. The existing game was kept.\n' + ('compiler diagnostic offline-secret\n' * 200)
+    app.events.put(('error', details))
+    app._drain()
+    _, message = app._test_dialogs[-1]
+    assert message.startswith('Native build failed. The existing game was kept.')
+    assert len(message) < 600 and 'Show activity' in message and 'Save log' in message
+    assert 'offline-secret' not in message
+    assert '\n'.join(app.log_lines).count('compiler diagnostic [redacted]') == 200
+
 @WINDOWS_GUI
 def test_gui_offline_smoke():
     resources = Path(__file__).resolve().parents[1] / 'resources'

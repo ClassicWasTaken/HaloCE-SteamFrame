@@ -77,3 +77,30 @@ def test_authentication_error_does_not_include_secret(monkeypatch):
     with pytest.raises(SSHError) as error:
         SSHConnection(Settings("frame", "private password text")).connect()
     assert "private password text" not in str(error.value)
+
+
+@pytest.mark.parametrize('output,expected', [
+    (b'HFI_PROGRESS {"stage":"build","message":"Working"}\nHFI_ERROR Native build failed.\nE: setgroups failed\nprivate\n',
+     'Native build failed.\nE: setgroups failed\n[redacted]'),
+    (b'HFI_PROGRESS {}\nHFI_RESULT {}\n', 'Remote step failed (exit 1).'),
+    (b'connection helper failed\n', 'connection helper failed'),
+])
+def test_remote_failure_shows_diagnostic_without_progress_protocol(monkeypatch, output, expected):
+    client = Mock()
+    channel = Mock()
+    states = iter([True, False, False])
+    channel.recv_ready.side_effect = lambda: next(states)
+    channel.recv.return_value = output
+    channel.exit_status_ready.return_value = True
+    channel.recv_exit_status.return_value = 1
+    stdout = Mock(channel=channel)
+    client.exec_command.return_value = (Mock(), stdout, Mock())
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    connection = SSHConnection(Settings('frame', 'private'))
+    progress = Mock()
+    with pytest.raises(SSHError) as error:
+        connection.run(['python3', 'helper.py', 'build'], progress=progress)
+    assert str(error.value) == expected
+    assert all('HFI_PROGRESS' not in line for line in str(error.value).splitlines())
+    assert progress.called
+    channel.close.assert_called_once()

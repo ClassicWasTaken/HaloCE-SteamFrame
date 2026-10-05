@@ -160,7 +160,13 @@ class SSHConnection:
             status = channel.recv_exit_status()
             if status:
                 # Remote helper emits bounded, user-readable diagnostics. Redact defensively.
-                safe = result.replace(self.settings.password, "[redacted]")
+                lines = [line for line in result.splitlines()
+                         if not line.startswith(("HFI_PROGRESS ", "HFI_RESULT "))]
+                safe = "\n".join(lines)
+                marker = safe.find("HFI_ERROR ")
+                if marker >= 0:
+                    safe = safe[marker + len("HFI_ERROR "):]
+                safe = safe.replace(self.settings.password, "[redacted]")
                 raise SSHError(safe[-12000:].strip() or f"Remote step failed (exit {status}).")
             return result
         finally:

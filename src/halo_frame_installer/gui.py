@@ -865,7 +865,10 @@ class App(tk.Tk):
                     elif getattr(self, "operation", None) == "data":
                         self.asset_status.set("Couldn't validate this data. Choose an original Xbox image or maps folder.")
                     self._append(text)
-                    messagebox.showerror("Setup needs attention", text[-4000:], parent=self)
+                    summary = text.strip().splitlines()[0] if text.strip() else "Setup could not finish. You can retry."
+                    if len(summary) > 500 or "\n" in text:
+                        summary = summary[:500] + "\n\nOpen Show activity for the full details, or use Save log for troubleshooting."
+                    messagebox.showerror("Setup needs attention", summary, parent=self)
                 elif kind == "clear_password":
                     self.password.set(""); self.password_to_redact = ""
                 elif kind == "idle":

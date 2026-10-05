@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 import tempfile
 import threading
@@ -174,22 +175,35 @@ class Installer:
                 if prepared_info.get("uploadPath") != expected_upload:
                     raise SSHError("The Frame returned an unexpected upload path.")
                 if not use_existing:
-                    transferred = 0
-                    total = manifest["totalBytes"]
-                    progress("upload", "Sending your Xbox maps to the Frame over encrypted SSH...", 0)
-                    for entry in manifest["files"]:
-                        check_cancel()
-                        path = maps / Path(entry["path"]).name
-                        def uploaded(done, file_total):
-                            percent = 100 * (transferred + done) / total if total else 100
-                            progress("upload", "Uploading " + path.name, percent)
-                        connection.put(path, expected_upload + "/" + entry["path"],
-                                       callback=uploaded, cancel_event=cancel_event)
-                        transferred += entry["size"]
                     with tempfile.TemporaryDirectory(prefix="halo-frame-manifest-") as scratch:
                         manifest_path = Path(scratch) / "xbox-data-manifest.json"
                         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
                         connection.put(manifest_path, expected_upload + "/xbox-data-manifest.json", cancel_event=cancel_event)
+                    reused_upload = False
+                    if info.get("retainedUploadReuse") is True:
+                        progress("reuse", "Looking for verified Xbox maps from an earlier installation attempt...", None)
+                        cached = step("reuse-upload", run_id=True, timeout=900)
+                        reused_upload = cached.get("reusedUpload")
+                        if (type(reused_upload) is not bool or (reused_upload and
+                                (not isinstance(cached.get("mapsRun"), str)
+                                 or not re.fullmatch("[a-f0-9]{32}", cached["mapsRun"])
+                                 or cached["mapsRun"] == run_identifier))):
+                            raise SSHError("The Frame returned an invalid retained upload response.")
+                    if reused_upload:
+                        progress("reuse", "Verified the Xbox maps already on the Frame. Skipping their upload...", 100)
+                    else:
+                        transferred = 0
+                        total = manifest["totalBytes"]
+                        progress("upload", "Sending your Xbox maps to the Frame over encrypted SSH...", 0)
+                        for entry in manifest["files"]:
+                            check_cancel()
+                            path = maps / Path(entry["path"]).name
+                            def uploaded(done, file_total):
+                                percent = 100 * (transferred + done) / total if total else 100
+                                progress("upload", "Uploading " + path.name, percent)
+                            connection.put(path, expected_upload + "/" + entry["path"],
+                                           callback=uploaded, cancel_event=cancel_event)
+                            transferred += entry["size"]
                 step("build", run_id=True, timeout=7200)
                 check_cancel()
                 installed = step("finalize", run_id=True, timeout=600)

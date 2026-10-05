@@ -2,13 +2,13 @@
 
 A Windows setup app for installing the native ARM64/OpenXR Halo: Combat Evolved port on Steam Frame. Its original Xbox dashboard-inspired interface uses dark panels, luminous green accents, and beveled controls to guide you through choosing game data, connecting over SSH, and installing or repairing the game. Setup copies your own original Xbox data, builds the native VR executable on the Frame, applies Xbox-style controls, and adds a VR shortcut with Halo CE cover art to Steam.
 
-**Version 1.2 — experimental VR support.** The underlying VR implementation is an open upstream pull request. The pinned build and controller changes ran on a real Steam Frame, with the menu and controllers confirmed by its user. This installer has automated component tests; its complete first-install wizard still needs a fresh-device hardware test. Performance varies by scene and device. This is an independent community project, unaffiliated with Microsoft, Bungie, or Valve.
+**Version 1.2.1 — experimental VR support.** The underlying VR implementation is an open upstream pull request. The pinned build and controller changes ran on a real Steam Frame, with the menu and controllers confirmed by its user. This installer has automated component tests; its complete first-install wizard still needs a fresh-device hardware test. Performance varies by scene and device. This is an independent community project, unaffiliated with Microsoft, Bungie, or Valve.
 
 ## Download and run
 
-**[Download Halo-Steam-Frame-Setup-1.2.0.exe](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/download/v1.2.0/Halo-Steam-Frame-Setup-1.2.0.exe)**
+**[Download Halo-Steam-Frame-Setup-1.2.1.exe](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/download/v1.2.1/Halo-Steam-Frame-Setup-1.2.1.exe)**
 
-This is the only installer file you need. It includes all installer dependencies; no ZIP, Python installation, or extra installer file is needed. Run it on Windows 10/11 x64. You do not need administrator rights. The **[version 1.2 release](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/tag/v1.2.0)** description includes its SHA256 checksum.
+This is the only installer file you need. It includes all installer dependencies; no ZIP, Python installation, or extra installer file is needed. Run it on Windows 10/11 x64. You do not need administrator rights. The **[version 1.2.1 release](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/tag/v1.2.1)** description includes its SHA256 checksum.
 
 The executable has a Master Chief helmet icon with olive armor and a gold visor, drawn for this project.
 
@@ -26,7 +26,7 @@ Choose **Repair installed game** in the **Game data** step, connect your Frame, 
 
 The old PC installation at `~/Games/HaloCEVR` is detected and explained separately. Its PC maps cannot be used for this native Xbox build. Setup installs the native version separately and does not automatically remove the PC version. Close the native game before repair. Program-file backups are retained in the owned build workspace, and a failed repair rolls back the affected files. **Add to Steam again** repairs library registration and adds missing library artwork; it does not rebuild the game.
 
-The Frame needs ARM64 SteamOS, SteamVR/OpenXR, rootless Podman, internet access, and **12 GiB of free internal storage**. Setup checks these before installing. Your Windows computer needs about 2.5 GB of temporary space for maps. The SteamOS root filesystem stays read-only; dependencies are installed inside a user-owned container.
+The Frame needs ARM64 SteamOS, SteamVR/OpenXR, rootless Podman, internet access, and **12 GiB of free internal storage**. Setup checks these before installing. Your Windows computer needs about 2.5 GB of temporary space for maps. The SteamOS root filesystem stays read-only. Podman runs as the ordinary `steamos` host user; dependency installation uses root only inside the rootless container, with `no-new-privileges` retained.
 
 If Steam cannot close normally, setup reports the remaining step rather than editing a running client's library. Quit Steam and click **Add to Steam again** without rebuilding, or add `~/Games/HaloCENativeVR/halo` as a non-Steam game yourself and use the launch option shown below. Restart Steam after setup if it was already closed.
 
@@ -80,7 +80,7 @@ Full source attribution, decompilation lineage, multiplayer references, and thir
 - **Authentication fails:** enter the password set in the Frame's Developer settings; your Steam account password is unrelated.
 - **Host key changed:** setup refuses the connection. Verify the new device/key independently before removing its old public fingerprint from `%LOCALAPPDATA%/HaloFrameInstaller/hosts.json`.
 - **Insufficient disk space or Podman missing:** resolve the failed preflight check and retry. Setup does not disable SteamOS protections or install system packages as root.
-- **Build/download fails:** save the setup log, keep the Frame's build log, and retry. A failed staging build does not replace an existing game or save.
+- **Build/download fails:** the error dialog shows a short failure headline; open **Show activity** or **Save log** for the full redacted details. Keep the Frame's build log and retry. Version 1.2.1 fixes the container dependency-installation permission errors (`setgroups`, `seteuid`, or APT cache permissions) seen in 1.2.0. Retry can reuse previously uploaded maps only when the complete map set matches the selected local data manifest and passes header and SHA256 verification; otherwise setup uploads fresh data. Reused data stays in its previous owned upload run and is verified again at build and finalization. A failed staging build does not replace an existing game or save.
 - **Flat window instead of VR:** wake the headset and start SteamVR before launching. The port falls back to a flat window if no usable OpenXR session is available.
 - **Controls doubled:** check the native shortcut's launch option above. Steam Input may otherwise add a second virtual controller stream.
 - **Library entry absent:** fully quit Steam and retry registration, or use Add a Non-Steam Game with the executable and launch option above. Enable “Include in VR Library” in its Steam properties.
@@ -99,6 +99,8 @@ python -m venv .venv
 .\.venv\Scripts\python scripts/build_release.py
 ```
 
-Corresponding installer source and applicable third-party source/notices are available in the **[version 1.2.0 source tag](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/tree/v1.2.0)** so you can modify and rebuild it, including its LGPL Paramiko dependency. GitHub's automatically generated Source code ZIP is optional for developers and is not needed to run setup. The build script packages only installer code/resources; no game binary, user ISO, maps, SSH password, or private key is included. GitHub Actions runs tests and builds the Windows setup executable. A local rebuild also writes a source bundle and checksum file to `dist/`; the public release attaches only the clearly named installer executable and prints its checksum in the release description.
+Corresponding installer source and applicable third-party source/notices are available in the **[version 1.2.1 source tag](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/tree/v1.2.1)** so you can modify and rebuild it, including its LGPL Paramiko dependency. GitHub's automatically generated Source code ZIP is optional for developers and is not needed to run setup. The build script packages only installer code/resources; no game binary, user ISO, maps, SSH password, or private key is included. GitHub Actions runs tests and builds the Windows setup executable. A local rebuild also writes a source bundle and checksum file to `dist/`; the public release attaches only the clearly named installer executable and prints its checksum in the release description.
+
+The workflow also includes an ARM64 Linux check, [check-build-container.py](scripts/check-build-container.py), that uses the same rootless Podman arguments as the Frame build. It checks APT package installation, `setgroups`, `seteuid`, `setegid`, `chown`, and that container output belongs to the ordinary host user. The Windows executable CI job depends on that check as well as the unit tests. This container check uses no game data and does not replace a full Steam Frame installation test.
 
 Before reporting a hardware test, record the SteamOS/SteamVR version, source commit, install status, and whether menu, campaign, Xbox controls, tutorial, and compatible multiplayer worked. Do not attach game data or credentials.

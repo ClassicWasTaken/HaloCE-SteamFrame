@@ -30,6 +30,9 @@ EXPECTED_MAPS = frozenset("maps/" + name + ".map" for name in (
 SUPPORTED_BUILDS = frozenset(("01.01.14.2342", "01.10.12.2276", "01.08.15.1749"))
 MAX_MAP_BYTES = 0x11600000
 MAX_TOTAL_BYTES = 4 * 1024 ** 3
+MAX_MANIFEST_BYTES = 64 * 1024
+MAX_RETRY_RUNS = 32
+MAX_RETRY_ENTRIES = 256
 HOME = pathlib.Path("/home/steamos")
 CACHE = HOME / ".cache/halo-frame-installer"
 GAME = HOME / "Games/HaloCENativeVR"
@@ -282,6 +285,7 @@ def preflight(repair=False, adopt=False):
         raise ValueError("Podman must run rootless as steamos.")
     return {"home": str(HOME), "cachePath": str(CACHE), "gamePath": str(GAME),
             "architecture": platform.machine(), "freeBytes": free, "existing": existing,
+            "retainedUploadReuse": True,
             "pcVersionDetected": (HOME / "Games/HaloCEVR").is_dir(),
             "steamOSVersion": system.get("VERSION_ID", "unknown")}
 
@@ -304,6 +308,133 @@ def prepare(value, use_existing_maps=False, repair=False, adopt=False):
     metadata["adopt"] = adopt
     (directory / MARKER).write_text(json.dumps(metadata, indent=2) + "\n")
     return {"runPath": str(directory), "uploadPath": str(directory / "upload")}
+
+
+def private_json(path, parent):
+    """Read bounded metadata from an ordinary file owned by this account."""
+    target = ordinary(beneath(path, parent))
+    details = target.stat()
+    if details.st_uid != os.getuid() or details.st_nlink != 1 or not 0 < details.st_size <= MAX_MANIFEST_BYTES:
+        raise ValueError("Retained upload metadata is not a private bounded ordinary file.")
+    with target.open("rb") as stream:
+        encoded = stream.read(MAX_MANIFEST_BYTES + 1)
+    if len(encoded) > MAX_MANIFEST_BYTES:
+        raise ValueError("Retained upload metadata exceeds supported bounds.")
+    decoded = json.loads(encoded)
+    if not isinstance(decoded, dict):
+        raise ValueError("Retained upload metadata must be an object.")
+    return decoded
+
+
+def map_identity(manifest):
+    """Compare selected data by its exact bounded paths, lengths and hashes."""
+    files = manifest.get("files")
+    if not isinstance(files, list) or len(files) != len(EXPECTED_MAPS):
+        raise ValueError("The Xbox data manifest must contain exactly 24 supported map files.")
+    identity = {}
+    for entry in files:
+        if not isinstance(entry, dict):
+            raise ValueError("Invalid retained Xbox data manifest entry.")
+        relative, size, checksum = entry.get("path"), entry.get("size"), entry.get("sha256")
+        if (not isinstance(relative, str) or relative not in EXPECTED_MAPS or relative in identity
+                or type(size) is not int or not 2048 <= size <= MAX_MAP_BYTES
+                or not isinstance(checksum, str) or not re.fullmatch("[a-f0-9]{64}", checksum)):
+            raise ValueError("Invalid retained Xbox map identity.")
+        identity[relative] = (size, checksum)
+    total = sum(size for size, _ in identity.values())
+    if (set(identity) != EXPECTED_MAPS or type(manifest.get("totalBytes")) is not int
+            or manifest["totalBytes"] != total or not 0 < total <= MAX_TOTAL_BYTES):
+        raise ValueError("Retained Xbox data total does not match the manifest.")
+    return identity
+
+
+def retained_upload(value):
+    """Resolve one original upload without following cross-run references."""
+    directory = run_dir(value)
+    if not directory.is_dir() or directory.stat().st_uid != os.getuid():
+        raise ValueError("The retained upload run is not an owned directory.")
+    marker = private_json(directory / MARKER, directory)
+    if (marker.get("owner") != OWNER or marker.get("sourceCommit") != SOURCE_COMMIT
+            or marker.get("mapsOrigin") != "upload"):
+        raise ValueError("The retained upload has no recognized original-upload marker.")
+    upload = beneath(directory / "upload", directory)
+    if not upload.is_dir() or upload.stat().st_uid != os.getuid():
+        raise ValueError("The retained upload is not an owned directory.")
+    manifest = private_json(upload / "xbox-data-manifest.json", upload)
+    map_identity(manifest)
+    # Reject hard links and files belonging to another account before hashing.
+    for relative in EXPECTED_MAPS:
+        details = ordinary(beneath(upload / relative, upload)).stat()
+        if details.st_uid != os.getuid() or details.st_nlink != 1:
+            raise ValueError("A retained Xbox map is not a private ordinary file.")
+    return upload, manifest
+
+
+def maps_source(directory, metadata, manifest):
+    """Recheck retained data provenance each time a build or publish reads it."""
+    origin = metadata.get("mapsOrigin")
+    if origin == "existing":
+        return GAME
+    if origin == "retained":
+        old_run = metadata.get("mapsRun")
+        if not isinstance(old_run, str) or old_run == directory.name:
+            raise ValueError("Invalid retained upload run reference.")
+        upload, previous = retained_upload(old_run)
+        if map_identity(previous) != map_identity(manifest):
+            raise ValueError("The retained Xbox maps no longer match the selected data.")
+        return upload
+    if origin != "upload":
+        raise ValueError("Unrecognized Xbox map source for this installation run.")
+    return beneath(directory / "upload", directory)
+
+
+def reuse_upload(value):
+    """Reuse verified local data from an older attempt, without changing it."""
+    directory = run_dir(value)
+    metadata = read_marker(directory / MARKER)
+    if metadata.get("mapsOrigin") != "upload":
+        raise ValueError("Only a fresh upload run can select retained Xbox data.")
+    upload = beneath(directory / "upload", directory)
+    map_directory = beneath(upload / "maps", upload)
+    if any(map_directory.iterdir()):
+        raise ValueError("Retained data must be selected before uploading new maps.")
+    manifest = private_json(upload / "xbox-data-manifest.json", upload)
+    selected = map_identity(manifest)
+    def check_cancelled():
+        if (directory / "cancelled").exists():
+            raise RuntimeError("Installation cancelled. Existing games and saves were kept.")
+    check_cancelled()
+    runs = beneath(CACHE / "runs", CACHE)
+    # Only inspect a bounded number of recognized run names. No prior run is
+    # removed, resumed or changed, even if its upload is incomplete or invalid.
+    candidates = []
+    with os.scandir(runs) as entries:
+        for count, entry in enumerate(entries):
+            check_cancelled()
+            if count >= MAX_RETRY_ENTRIES:
+                break
+            try:
+                if (entry.name != value and re.fullmatch("[a-f0-9]{32}", entry.name)
+                        and entry.is_dir(follow_symlinks=False)):
+                    candidates.append((entry.stat(follow_symlinks=False).st_mtime_ns, entry.name))
+            except OSError:
+                continue
+    for _, candidate in sorted(candidates, reverse=True)[:MAX_RETRY_RUNS]:
+        check_cancelled()
+        try:
+            old_upload, previous = retained_upload(candidate)
+            if map_identity(previous) != selected:
+                continue
+            progress("reuse", "Checking Xbox maps retained from an earlier installation attempt...")
+            verify_maps(old_upload, manifest, check_cancelled)
+        except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+            continue
+        check_cancelled()
+        metadata["mapsOrigin"] = "retained"
+        metadata["mapsRun"] = candidate
+        (directory / MARKER).write_text(json.dumps(metadata, indent=2) + "\n")
+        return {"reusedUpload": True, "mapsRun": candidate}
+    return {"reusedUpload": False}
 
 
 def verify_maps(directory, manifest, check_cancelled=lambda: None, allow_extra=False):
@@ -354,6 +485,20 @@ def verify_maps(directory, manifest, check_cancelled=lambda: None, allow_extra=F
     return total
 
 
+def build_container_args(value, directory, payload=None):
+    # keep-id alone maps steamos to UID 0 but Podman omits effective root
+    # capabilities unless the container user is explicit. apt needs those
+    # capabilities to switch to _apt and change package-file ownership.
+    return ["podman", "run", "--rm", "--name", "halo-frame-installer-" + value,
+            "--label", "org.halo-frame-installer.owner=" + OWNER,
+            "--label", "org.halo-frame-installer.run=" + value,
+            "--userns=keep-id:uid=0,gid=0", "--user=0:0",
+            "--security-opt=no-new-privileges",
+            "--volume", str(directory) + ":/build:rw", "--workdir", "/build",
+            "docker.io/library/ubuntu:22.04",
+            *(payload or ["/bin/bash", "/build/build-native.sh"])]
+
+
 def build(value, repair=False, adopt=False):
     directory = run_dir(value)
     metadata = read_marker(directory / MARKER)
@@ -366,7 +511,7 @@ def build(value, repair=False, adopt=False):
     check_cancelled()
     manifest = json.loads(ordinary(upload / "xbox-data-manifest.json").read_text())
     progress("verify", "Verifying the uploaded Xbox maps...")
-    verify_maps(GAME if metadata.get("mapsOrigin") == "existing" else upload, manifest, check_cancelled,
+    verify_maps(maps_source(directory, metadata, manifest), manifest, check_cancelled,
                 allow_extra=metadata.get("mapsOrigin") == "existing")
     source = directory / "src"
     if source.exists():
@@ -391,12 +536,7 @@ def build(value, repair=False, adopt=False):
     container = "halo-frame-installer-" + value
     progress("build", "Preparing and compiling the native ARM64 VR game in an isolated container. This may take 10–30 minutes...")
     log = directory / "native-build.log"
-    args = ["podman", "run", "--rm", "--name", container,
-            "--label", "org.halo-frame-installer.owner=" + OWNER,
-            "--label", "org.halo-frame-installer.run=" + value,
-            "--userns=keep-id:uid=0,gid=0", "--security-opt=no-new-privileges",
-            "--volume", str(directory) + ":/build:rw", "--workdir", "/build",
-            "docker.io/library/ubuntu:22.04", "/bin/bash", "/build/build-native.sh"]
+    args = build_container_args(value, directory)
     with log.open("wb") as output:
         check_cancelled()
         process = subprocess.Popen(args, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
@@ -592,12 +732,13 @@ def finalize(value, repair=False, adopt=False):
     upload = directory / "upload"
     manifest = json.loads(ordinary(upload / "xbox-data-manifest.json").read_text())
     reuse_maps = run_metadata.get("mapsOrigin") == "existing"
-    verify_maps(GAME if reuse_maps else upload, manifest, check_cancelled, allow_extra=reuse_maps)
+    map_directory = maps_source(directory, run_metadata, manifest)
+    verify_maps(map_directory, manifest, check_cancelled, allow_extra=reuse_maps)
     if not existing or not reuse_maps:
         (stage / "maps").mkdir()
         for entry in manifest["files"]:
             check_cancelled()
-            path = beneath(upload / entry["path"], upload)
+            path = beneath(map_directory / entry["path"], map_directory)
             shutil.copy2(ordinary(path), stage / entry["path"])
     shutil.copy2(upload / "xbox-data-manifest.json", stage / "xbox-data-manifest.json")
     if not existing or not reuse_maps:
@@ -687,17 +828,18 @@ def shortcut(close_steam=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("step", choices=("preflight", "prepare", "build", "finalize", "cancel", "shortcut"))
+    parser.add_argument("step", choices=("preflight", "prepare", "reuse-upload", "build", "finalize", "cancel", "shortcut"))
     parser.add_argument("--run-id")
     parser.add_argument("--close-steam", action="store_true")
     parser.add_argument("--repair", action="store_true")
     parser.add_argument("--adopt-existing", action="store_true")
     parser.add_argument("--use-existing-maps", action="store_true")
     args = parser.parse_args()
-    if args.step in ("prepare", "build", "finalize", "cancel") and args.run_id is None:
+    if args.step in ("prepare", "reuse-upload", "build", "finalize", "cancel") and args.run_id is None:
         parser.error("--run-id is required")
     functions = {"preflight": lambda: preflight(args.repair, args.adopt_existing),
                  "prepare": lambda: prepare(args.run_id, args.use_existing_maps, args.repair, args.adopt_existing),
+                 "reuse-upload": lambda: reuse_upload(args.run_id),
                  "build": lambda: build(args.run_id, args.repair, args.adopt_existing),
                  "finalize": lambda: finalize(args.run_id, args.repair, args.adopt_existing),
                  "cancel": lambda: cancel(args.run_id), "shortcut": lambda: shortcut(args.close_steam)}
