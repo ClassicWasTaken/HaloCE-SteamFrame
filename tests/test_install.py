@@ -146,6 +146,19 @@ def test_add_to_steam_retry_reuses_files_and_no_build_or_asset_upload():
     assert fake.commands[-1][-1] == "--close-steam"
 
 
+def test_setup_reports_success_only_after_ssh_disconnects():
+    fake = FakeConnection(Settings('frame', 'private', reinstall_existing=False))
+    seen = []
+    def report(stage, message, percent=None):
+        seen.append(stage)
+        if stage in ('disconnected', 'complete'):
+            assert fake.closed
+        elif stage == 'disconnect':
+            assert not fake.closed
+    Installer(lambda settings: fake, RESOURCES).run(fake.settings, None, report)
+    assert seen[-3:] == ['disconnect', 'disconnected', 'complete']
+
+
 def test_default_existing_install_rebuilds_without_uploading_maps():
     fake = FakeConnection(Settings("frame", "private"))
     with pytest.raises(SSHError, match="build failed"):
@@ -174,6 +187,32 @@ def test_cancelled_before_connect_has_no_remote_mutation():
     with pytest.raises(CancelledError):
         Installer(lambda settings: fake, RESOURCES).run(fake.settings, None, cancel_event=event)
     assert not fake.commands and not fake.uploads
+
+
+def test_installer_delivers_live_phase_counts_and_detail_lines_before_build_returns():
+    delivered = []
+
+    class ActivityConnection(FakeConnection):
+        def run(self, argv, **kwargs):
+            if argv[1] != '-c' and argv[2] == 'build':
+                self.commands.append(argv)
+                report = kwargs['progress']
+                report('HFI_PROGRESS {"stage":"toolchain","message":"Installing LLVM 22"}')
+                report('HFI_LOG {"stage":"toolchain","message":"Unpacking clang-22"}')
+                report('HFI_PROGRESS {"stage":"compile","message":"Compiled 42 of 100 tasks","percent":42}')
+                assert ('compile', 'Compiled 42 of 100 tasks', 42) in delivered
+                assert ('detail', 'toolchain: Unpacking clang-22', None) in delivered
+                return 'HFI_RESULT {"built":true}'
+            if argv[1] != '-c' and argv[2] == 'finalize':
+                self.commands.append(argv)
+                return 'HFI_RESULT {"gamePath":"/home/steamos/Games/HaloCENativeVR","repaired":true}'
+            return super().run(argv, **kwargs)
+
+    fake = ActivityConnection(Settings('frame', 'private'))
+    result = Installer(lambda settings: fake, RESOURCES).run(fake.settings, None,
+        lambda stage, message, percent=None: delivered.append((stage, message, percent)))
+    assert result.repaired and fake.closed
+    assert delivered[-1][0] == 'complete'
 
 
 def test_result_protocol_requires_one_result():

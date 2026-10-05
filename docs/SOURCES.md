@@ -20,7 +20,15 @@ The installer applies [its documented controller and tutorial patch](../resource
 
 ## Game data and compatibility
 
-[Upstream game-data instructions](https://github.com/startupfoundry/halo-ce-universal/blob/88142798513ebd99fc7c6224023e8b44c05d0106/README.md#game-data) require an **original Xbox Halo: Combat Evolved** disc image (`.iso` or `.xiso`) or its extracted maps. Upstream supports the original Xbox revisions and regions, including conversion of PAL map timing for play with NTSC maps.
+[Upstream game-data instructions](https://github.com/startupfoundry/halo-ce-universal/blob/88142798513ebd99fc7c6224023e8b44c05d0106/README.md#game-data) require an **original Xbox Halo: Combat Evolved** disc image (`.iso` or `.xiso`) or its extracted maps. This installer uses the exact released-map build list in the [pinned cache compatibility table](https://github.com/startupfoundry/halo-ce-universal/blob/88142798513ebd99fc7c6224023e8b44c05d0106/source/cache/cache_files.c#L616-L631):
+
+| Accepted Xbox version-5 map build | Upstream region |
+| --- | --- |
+| `01.10.12.2276` | NTSC |
+| `01.08.15.1749` | NTSC |
+| `01.01.14.2342` | PAL |
+
+**USA Rev 2 is validated with this installer.** Other original Xbox retail revisions and regions, including an image labeled USA Rev 1 or the original USA release, are accepted only when all 24 required maps have one of these builds. [Upstream PAL conversion notes](https://github.com/startupfoundry/halo-ce-universal/blob/88142798513ebd99fc7c6224023e8b44c05d0106/port/linux/game/pal_tags.c#L4-L22) identify shared NTSC maps across three releases and explain the PAL timing conversion. Those source files do not provide a definitive filename-to-Rev-label mapping; setup validates actual headers instead of trusting a filename. Incomplete or mixed-build sets and other build strings are rejected. This is a supported-data rule, not a claim that every disc pressing has been tested on a Frame.
 
 Select a local disc image or maps that you are authorized to use. The installer checks original Xbox map headers and extracts the required data locally. The repository and downloadable installer contain no game disc image or commercial map data and provide no unauthorized game-download links.
 
@@ -41,6 +49,7 @@ SteamOS has a read-only system filesystem. This installer uses a user-owned game
 ## Build and installer dependencies
 
 - [LLVM's signed Ubuntu package repository](https://apt.llvm.org/) supplies LLVM 22 inside the build container for the upstream `arm64_32` guest compiler target.
+- [Ninja's environment-variable documentation](https://ninja-build.org/manual.html#_environment_variables) defines the finished and total build-task counts used for measured compilation progress. The installer's overall percentage combines phase weights, transferred bytes, and completed build tasks; it is not a time or performance estimate.
 - [Podman's rootless operation](https://docs.podman.io/en/latest/markdown/podman.1.html#rootless-mode) isolates compiler dependencies from the headset's system installation.
 - [Podman run: container user and user namespaces](https://docs.podman.io/en/latest/markdown/podman-run.1.html#user-u-user-group) documents how `--user` selects the container UID/GID and how `--userns=keep-id` otherwise starts the process as the caller's UID. Setup explicitly uses `--user=0:0` for container dependency installation while Podman remains rootless under the ordinary host user. [Its security options](https://docs.podman.io/en/latest/markdown/podman-run.1.html#security-opt-option) define the retained `no-new-privileges` restriction.
 - [SDL](https://github.com/libsdl-org/SDL/tree/release-3.4.16) provides native windowing, audio and gamepad support. [Its Steam virtual-gamepad hint](https://github.com/libsdl-org/SDL/blob/release-3.4.16/include/SDL3/SDL_hints.h) supports suppressing duplicate virtual-pad input for this game's shortcut.
@@ -69,7 +78,7 @@ The cover remains copyrighted Microsoft/Halo artwork; the installer's MIT licens
 
 The preview reads only the `sound\music\title1\loops` sound tag from the user's selected original Xbox `ui.map`, either inside an ISO/XISO or in extracted maps. Cache and sound structures are based on the pinned native port's [cache_files.c](https://github.com/startupfoundry/halo-ce-universal/blob/88142798513ebd99fc7c6224023e8b44c05d0106/source/cache/cache_files.c) and [sound_definitions.h](https://github.com/startupfoundry/halo-ce-universal/blob/88142798513ebd99fc7c6224023e8b44c05d0106/source/sound/sound_definitions.h). Xbox ADPCM decoding follows its [dsound_sdl.c implementation](https://github.com/startupfoundry/halo-ce-universal/blob/88142798513ebd99fc7c6224023e8b44c05d0106/port/linux/src/dsound_sdl.c).
 
-The installer decodes the loop into a private temporary Windows WAV with a fixed 12% sample-amplitude gain. Playback loops automatically after local game data validates and has an explicit mute toggle. Closing the installer stops playback and clears its temporary audio. No soundtrack is present in the repository or executable, fetched from a website, or uploaded over SSH. Audio-file extensions are rejected by the release packager. Remote-only repair has no local audio preview, and an unavailable preview does not block installation. The original music remains copyrighted game content; the installer's code license does not apply to it. Playback still needs a listening check.
+The installer decodes the loop into a private temporary Windows WAV with a fixed 12% sample-amplitude gain. Playback loops automatically after local game data validates. Closing the installer stops playback and clears its temporary audio. No soundtrack is present in the repository or executable, fetched from a website, or uploaded over SSH. Audio-file extensions are rejected by the release packager. Remote-only repair has no local audio preview, and an unavailable preview does not block installation. The original music remains copyrighted game content; the installer's code license does not apply to it. Playback still needs a listening check.
 
 ## General preservation resources
 

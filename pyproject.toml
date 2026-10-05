@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "halo-steam-frame-installer"
-version = "1.2.1"
+version = "1.2.2"
 description = "Guided SSH installer for the native ARM64 Halo CE Steam Frame VR port"
 requires-python = ">=3.11"
 license = "MIT"

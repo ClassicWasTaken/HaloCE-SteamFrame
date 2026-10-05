@@ -14,6 +14,8 @@ RESOURCES = Path(__file__).resolve().parents[1] / "resources"
 
 
 def test_build_launches_package_manager_as_container_root_with_host_isolation(tmp_path, monkeypatch):
+    if not hasattr(__import__("os"), "getuid"):
+        monkeypatch.setattr(__import__("os"), "getuid", lambda: 0, raising=False)
     if "pwd" not in sys.modules:
         monkeypatch.setitem(sys.modules, "pwd", types.SimpleNamespace(getpwuid=lambda uid: None))
     spec = importlib.util.spec_from_file_location("build_container_remote_install", RESOURCES / "remote_install.py")

@@ -35,6 +35,12 @@ def smoke_test(resources: Path) -> dict:
                 pages_initialized.append(name)
             valid = (bool(app.asset_status.get()) and app.log.winfo_reqheight() > 1
                      and hasattr(app, '_game_cover') and hasattr(app, 'music'))
+            if str(app.progress['mode']) != 'determinate':
+                raise RuntimeError('Packaged progress bar is not determinate')
+            if {choice.value for choice in app.mode_choices} != {'install', 'repair', 'uninstall'}:
+                raise RuntimeError('Packaged operation choices are incomplete')
+            if app.music.muted or hasattr(app, 'music_button') or hasattr(app, '_toggle_music'):
+                raise RuntimeError('Packaged music behavior does not match this release')
         finally:
             for callback in app.tk.call('after', 'info'):
                 app.after_cancel(callback)
@@ -44,4 +50,6 @@ def smoke_test(resources: Path) -> dict:
     return {'ok': True, 'version': __version__, 'sourceCommit': SOURCE_COMMIT,
             'resources': hashes, 'guiInitialized': True,
             'guiPagesInitialized': pages_initialized,
+            'determinateProgress': True, 'uninstallAvailable': True,
+            'automaticMusicWithoutToggle': True,
             'passwordReprRedacted': True, 'networkConnections': 0}

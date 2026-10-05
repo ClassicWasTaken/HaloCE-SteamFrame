@@ -9,6 +9,7 @@ import shlex
 import socket
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -94,6 +95,9 @@ class SSHConnection:
         self.client = paramiko.SSHClient()
         self.policy = _VerifyHost(settings)
         self.client.set_missing_host_key_policy(self.policy)
+        self._command_channels = set()
+        self._sftp_clients = set()
+        self._closed = False
 
     @property
     def host_fingerprint(self) -> str | None:
@@ -117,17 +121,48 @@ class SSHConnection:
             transport.set_keepalive(15)
 
     def close(self) -> None:
-        self.client.close()
+        """Release setup's channels and TCP transport before declaring it done."""
+        if self._closed:
+            return
+        # A channel failure must not prevent the underlying socket and keepalive
+        # thread from being closed. These are only resources opened by this client.
+        for resource in (*self._sftp_clients, *self._command_channels):
+            try:
+                resource.close()
+            except Exception:
+                pass
+        self._sftp_clients.clear()
+        self._command_channels.clear()
+        transport = self.client.get_transport()
+        try:
+            if transport is not None:
+                try:
+                    transport.close()
+                finally:
+                    # Transport.close() may return early after a failed or
+                    # already inactive session. Release its socket as well.
+                    sock = getattr(transport, "sock", None)
+                    if sock is not None:
+                        sock.close()
+        finally:
+            self.client.close()
+        self._closed = True
 
     def run(self, argv: list[str], *, progress: Callable[[str], None] | None = None,
             cancel_event: threading.Event | None = None, timeout: float = 3600,
-            on_cancel: Callable[[], None] | None = None) -> str:
+            on_cancel: Callable[[], None] | None = None,
+            timeout_message: str | None = None) -> str:
         """Run an argument vector; no secrets are put into a remote command."""
         command = shlex.join([str(arg) for arg in argv])
         _, stdout, _ = self.client.exec_command(command, timeout=30)
         channel = stdout.channel
+        self._command_channels.add(channel)
         channel.set_combine_stderr(True)
-        chunks: list[bytes] = []
+        # Build output is delivered live to the activity callback. Keep only a
+        # bounded response tail for the final result/error, rather than storing
+        # the entire compilation a second time in memory.
+        chunks: deque[bytes] = deque()
+        retained_bytes = 0
         pending = bytearray()
         started = time.monotonic()
         try:
@@ -139,12 +174,21 @@ class SSHConnection:
                 if time.monotonic() - started > timeout:
                     if on_cancel is not None:
                         on_cancel()
-                    raise SSHError("The remote step timed out. You can reconnect and retry; existing games and saves were kept.")
+                    raise SSHError(timeout_message or "The remote step timed out. You can reconnect and retry; existing games and saves were kept.")
                 while channel.recv_ready():
                     data = channel.recv(65536)
                     if not data:
                         break
                     chunks.append(data)
+                    retained_bytes += len(data)
+                    while retained_bytes > 256 * 1024 and chunks:
+                        overflow = retained_bytes - 256 * 1024
+                        first = chunks.popleft()
+                        if len(first) > overflow:
+                            chunks.appendleft(first[overflow:])
+                            retained_bytes -= overflow
+                        else:
+                            retained_bytes -= len(first)
                     pending.extend(data)
                     while b"\n" in pending:
                         line, _, rest = pending.partition(b"\n")
@@ -161,7 +205,7 @@ class SSHConnection:
             if status:
                 # Remote helper emits bounded, user-readable diagnostics. Redact defensively.
                 lines = [line for line in result.splitlines()
-                         if not line.startswith(("HFI_PROGRESS ", "HFI_RESULT "))]
+                         if not line.startswith(("HFI_PROGRESS ", "HFI_LOG ", "HFI_RESULT "))]
                 safe = "\n".join(lines)
                 marker = safe.find("HFI_ERROR ")
                 if marker >= 0:
@@ -170,7 +214,10 @@ class SSHConnection:
                 raise SSHError(safe[-12000:].strip() or f"Remote step failed (exit {status}).")
             return result
         finally:
-            channel.close()
+            try:
+                channel.close()
+            finally:
+                self._command_channels.discard(channel)
 
     def put(self, local: Path, remote: str, *, callback=None,
             cancel_event: threading.Event | None = None) -> None:
@@ -180,6 +227,7 @@ class SSHConnection:
             if callback:
                 callback(done, total)
         with self.client.open_sftp() as sftp:
+            self._sftp_clients.add(sftp)
             sftp.get_channel().settimeout(20)
             try:
                 sftp.put(str(local), remote, callback=update, confirm=True)
@@ -187,3 +235,5 @@ class SSHConnection:
                 if cancel_event is not None and cancel_event.is_set():
                     raise CancelledError("Installation cancelled. Existing games and saves were kept.") from None
                 raise SSHError("The encrypted file transfer stopped. Check the Frame's connection and retry.") from None
+            finally:
+                self._sftp_clients.discard(sftp)

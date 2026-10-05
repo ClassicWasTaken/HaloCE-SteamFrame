@@ -3,7 +3,9 @@
 set -euo pipefail
 cd /build
 export DEBIAN_FRONTEND=noninteractive
-echo 'Installing the isolated ARM64 compiler and build dependencies...'
+export NINJA_STATUS='[%f/%t] '
+phase() { printf 'HFI_BUILD_PHASE %s %s\n' "$1" "$2"; }
+phase dependencies 'Installing isolated ARM64 build dependencies...'
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl gnupg git python3 \
   ninja-build cmake make pkg-config ccache file \
@@ -12,6 +14,7 @@ apt-get install -y --no-install-recommends ca-certificates curl gnupg git python
   libgl-dev libdrm-dev libgbm-dev libpulse-dev libpipewire-0.3-dev libasound2-dev \
   libudev-dev libdbus-1-dev libdecor-0-dev
 # The upstream ARM64 ILP32 guest needs recent LLVM. Use LLVM's signed apt repository.
+phase toolchain 'Downloading and installing the LLVM 22 ARM64 compiler...'
 curl --fail --silent --show-error --location https://apt.llvm.org/llvm-snapshot.gpg.key \
   -o /build/llvm-archive-key.asc
 gpg --batch --yes --dearmor --output /usr/share/keyrings/llvm-archive-keyring.gpg \
@@ -25,10 +28,13 @@ for tool in clang ld.lld llvm-ar; do
 done
 clang --version
 cd /build/src
+phase configure 'Configuring the native ARM64 OpenXR game and downloading its build sources...'
 python3 configure.py --release --vr --linux-arm64-cc clang
 export CMAKE_BUILD_PARALLEL_LEVEL=4
 export NINJAFLAGS=-j4
-echo 'Building the native Steam Frame OpenXR game. This can take several minutes...'
+phase sdl 'Configuring and compiling SDL3; the native game build follows...'
+# The monitor reads SDL's own logs and advances to compile on native Ninja jobs.
 ninja -j4 linux_arm64
+phase build-check 'Checking the completed native ARM64 VR executable...'
 file build/linux_arm64/halo
 echo 'Native ARM64 VR build completed.'

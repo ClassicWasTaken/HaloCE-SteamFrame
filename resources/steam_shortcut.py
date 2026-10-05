@@ -295,6 +295,33 @@ def update_shortcut(data: bytes | None, executable: str, directory: str) -> tupl
     return result, appid
 
 
+def remove_shortcut(data: bytes, executable: str) -> tuple[bytes, list[int]]:
+    """Remove only exact native title/path matches; keep all foreign fields."""
+    root = loads(data)
+    shortcuts = root.get("shortcuts")
+    if shortcuts is None or shortcuts.kind != 0:
+        raise ValueError("Unexpected Steam shortcuts root; no changes were made.")
+    matches, appids = [], []
+    for index, entry in shortcuts.value.items():
+        if entry.kind != 0:
+            raise ValueError("Unexpected Steam shortcut record; no changes were made.")
+        fields = entry.value
+        title = fields.get("AppName", fields.get("appname"))
+        path = fields.get("Exe", fields.get("exe"))
+        if (title is not None and title.kind == 1 and title.value == NAME
+                and path is not None and path.kind == 1 and path.value in (executable, f'"{executable}"')):
+            appid = fields.get("appid")
+            if appid is None or appid.kind != 2 or not 2 ** 31 <= appid.value < 2 ** 32:
+                raise ValueError("The native Halo shortcut has an invalid app ID; no changes were made.")
+            matches.append(index)
+            appids.append(appid.value)
+    for index in matches:
+        del shortcuts.value[index]
+    after = dumps(root)
+    loads(after)
+    return after if matches else data, sorted(set(appids))
+
+
 def _session_environment(proc: Path = Path("/proc")) -> tuple[dict | None, bool]:
     allowed = {"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR",
                "DBUS_SESSION_BUS_ADDRESS", "XDG_SESSION_TYPE"}
@@ -334,26 +361,31 @@ def add_native_shortcut(home: Path, game: Path, close_steam: bool = False) -> di
     The GUI must obtain explicit saved/closed-game acknowledgement for close_steam.
     No signals are sent to Steam, SteamVR, a game or another user's process.
     """
+    return _with_closed_steam(game, close_steam, lambda: _write_native_shortcut(home, game),
+                              _manual, "Add to Steam")
+
+
+def _with_closed_steam(game: Path, close_steam: bool, action, manual, button: str) -> dict:
     import subprocess
     if not close_steam or not steam_running():
-        return _write_native_shortcut(home, game)
+        return action()
     session, game_running = _session_environment()
     if game_running:
-        return _manual(game, "A game is still running. Save and close games, then click Add to Steam again.")
+        return manual(game, f"A game is still running. Save and close games, then click {button} again.")
     if session is None or not Path("/usr/bin/steam").is_file():
-        return _manual(game, "Steam's desktop session could not be verified. Quit Steam and click Add to Steam again.")
+        return manual(game, f"Steam's desktop session could not be verified. Quit Steam and click {button} again.")
     try:
         subprocess.run(["/usr/bin/steam", "-shutdown"], env=session,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
     except (OSError, subprocess.TimeoutExpired):
-        return _manual(game, "Steam did not complete a normal shutdown. Quit it and click Add to Steam again.")
+        return manual(game, f"Steam did not complete a normal shutdown. Quit it and click {button} again.")
     deadline = time.monotonic() + 45
     while steam_running() and time.monotonic() < deadline:
         time.sleep(0.5)
     if steam_running():
-        return _manual(game, "Steam is still running after its normal shutdown request. Its library files were left unchanged.")
+        return manual(game, "Steam is still running after its normal shutdown request. Its library files were left unchanged.")
     try:
-        return _write_native_shortcut(home, game)
+        return action()
     finally:
         # Only restart a client this operation observed running and normally closed.
         subprocess.Popen(["/usr/bin/steam"], env=session, stdin=subprocess.DEVNULL,
@@ -529,3 +561,156 @@ def _write_native_shortcut(home: Path, game: Path) -> dict:
                              artwork=_artwork_result(config, appid))
     except (OSError, ValueError, UnicodeError) as error:
         return {**manual, "reason": str(error)}
+
+
+def _remove_manual(game: Path, reason: str | None = None) -> dict:
+    return {"status": "manual", "name": NAME, "executable": str(game / "halo"),
+            "reason": reason or "Steam must be closed before uninstalling.",
+            "instructions": "Save and close games, then quit Steam or allow its normal shutdown and retry Uninstall. The native game files were kept."}
+
+
+def remove_native_shortcut(home: Path, game: Path, close_steam: bool = False) -> dict:
+    return _with_closed_steam(game, close_steam, lambda: _write_removed_shortcuts(home, game),
+                              _remove_manual, "Uninstall")
+
+
+def _private_steam_directory(path: Path):
+    if path.is_symlink() or path.resolve() != path or not path.is_dir():
+        raise ValueError("Steam uninstall encountered a symbolic link or unsupported directory.")
+    if hasattr(os, "getuid") and path.stat().st_uid != os.getuid():
+        raise ValueError("Steam's directory belongs to another user.")
+
+
+def _replace_shortcut_bytes(path: Path, content: bytes):
+    _private_steam_directory(path.parent)
+    fd, name = tempfile.mkstemp(prefix=".halo-uninstall-shortcuts-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(name, path.stat().st_mode & 0o777)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def _write_removed_shortcuts(home: Path, game: Path) -> dict:
+    """Back up all affected accounts, atomically remove exact entries and owned art."""
+    if steam_running():
+        return _remove_manual(game, "Steam is still running; game and library files were kept.")
+    plans, applied, deleted_art = [], [], []
+    backups = []
+    try:
+        steam = home / ".local/share/Steam"
+        if not steam.exists() and not steam.is_symlink():
+            return {"status": "already-absent", "accounts": []}
+        _private_steam_directory(steam)
+        userdata = steam / "userdata"
+        if not userdata.exists() and not userdata.is_symlink():
+            return {"status": "already-absent", "accounts": []}
+        _private_steam_directory(userdata)
+        accounts = sorted(path for path in userdata.iterdir()
+                          if path.name.isdecimal() and 0 < int(path.name) < 2 ** 32)
+        if len(accounts) > 128:
+            raise ValueError("Too many Steam accounts to safely update in one uninstall.")
+        metadata_bytes = art_bytes = 0
+        for account in accounts:
+            _private_steam_directory(account)
+            config = account / "config"
+            if not config.exists() and not config.is_symlink():
+                continue
+            _private_steam_directory(config)
+            path = config / "shortcuts.vdf"
+            if not path.exists() and not path.is_symlink():
+                continue
+            before = _artwork_file(path)
+            metadata_bytes += len(before)
+            if metadata_bytes > 64 * 1024 * 1024:
+                raise ValueError("Steam shortcut metadata exceeds uninstall's safety bounds.")
+            after, appids = remove_shortcut(before, str(game / "halo"))
+            if not appids:
+                continue
+            remaining = loads(after)["shortcuts"].value
+            shared_ids = {field.value for entry in remaining.values()
+                          for field in [entry.value.get("appid")]
+                          if field is not None and field.kind == 2}
+            artwork, preserved = [], []
+            grid = config / "grid"
+            if grid.exists() or grid.is_symlink():
+                _private_steam_directory(grid)
+                for appid in appids:
+                    for suffix, extension, _, expected in ARTWORK:
+                        target = grid / (str(appid) + suffix + extension)
+                        if not target.exists() and not target.is_symlink():
+                            continue
+                        try:
+                            content = _artwork_file(target)
+                        except (OSError, ValueError):
+                            preserved.append(str(target))
+                            continue
+                        if appid in shared_ids or hashlib.sha256(content).hexdigest() != expected:
+                            preserved.append(str(target))
+                            continue
+                        art_bytes += len(content)
+                        if art_bytes > 64 * 1024 * 1024:
+                            raise ValueError("Managed Steam artwork exceeds uninstall's safety bounds.")
+                        artwork.append((target, content))
+            plans.append({"account": account.name, "path": path, "before": before, "after": after,
+                          "appids": appids, "artwork": artwork, "preserved": preserved})
+        if not plans:
+            return {"status": "already-absent", "accounts": []}
+        # Validate every account before publishing any change.
+        for plan in plans:
+            if steam_running() or _artwork_file(plan["path"]) != plan["before"]:
+                raise ValueError("Steam reopened or its shortcuts changed; retry with Steam closed.")
+            backup = plan["path"].parent / ("shortcuts.vdf.halo-frame-uninstall-" + str(time.time_ns()) + ".bak")
+            with backup.open("xb") as stream:
+                stream.write(plan["before"])
+                stream.flush()
+                os.fsync(stream.fileno())
+            backup.chmod(0o600)
+            backups.append(str(backup))
+        for plan in plans:
+            if steam_running() or _artwork_file(plan["path"]) != plan["before"]:
+                raise ValueError("Steam reopened or its shortcuts changed during uninstall.")
+            _replace_shortcut_bytes(plan["path"], plan["after"])
+            applied.append(plan)
+        for plan in plans:
+            for target, content in plan["artwork"]:
+                if steam_running():
+                    raise ValueError("Steam reopened while removing managed artwork.")
+                if _artwork_file(target) != content:
+                    plan["preserved"].append(str(target))
+                    continue
+                target.unlink()
+                deleted_art.append((target, content))
+        return {"status": "removed", "accounts": [plan["account"] for plan in plans],
+                "appids": sorted({appid for plan in plans for appid in plan["appids"]}),
+                "backups": backups, "artworkRemoved": [str(path) for path, _ in deleted_art],
+                "artworkPreserved": [path for plan in plans for path in plan["preserved"]]}
+    except (OSError, ValueError, UnicodeError) as error:
+        failures = []
+        # Roll back only our unchanged publications while the client stays closed.
+        for plan in reversed(applied):
+            try:
+                if steam_running() or _artwork_file(plan["path"]) != plan["after"]:
+                    raise ValueError("Steam shortcut changed during rollback.")
+                _replace_shortcut_bytes(plan["path"], plan["before"])
+            except (OSError, ValueError):
+                failures.append(str(plan["path"]))
+        for target, content in deleted_art:
+            try:
+                if steam_running():
+                    raise ValueError("Steam reopened during artwork rollback.")
+                _private_steam_directory(target.parent)
+                with target.open("xb") as stream:
+                    stream.write(content)
+                target.chmod(0o600)
+            except (OSError, ValueError):
+                failures.append(str(target))
+        reason = str(error)
+        if failures:
+            reason += " Some library changes could not be restored. Exact shortcut backups: " + ", ".join(backups)
+        return {**_remove_manual(game, reason), "backups": backups}

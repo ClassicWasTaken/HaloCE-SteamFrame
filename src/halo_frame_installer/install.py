@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sys
 import tempfile
@@ -61,6 +62,33 @@ def parse_result(output: str) -> dict:
     return result
 
 
+def parse_activity(line: str) -> tuple[str, str, float | None] | None:
+    """Decode a phase update or an activity-only build line from the Frame."""
+    prefix = next((value for value in ("HFI_PROGRESS ", "HFI_LOG ")
+                   if line.startswith(value)), None)
+    if prefix is None:
+        return None
+    try:
+        data = json.loads(line[len(prefix):])
+        if not isinstance(data, dict):
+            raise ValueError
+        stage, message = data.get("stage"), data.get("message")
+        if (not isinstance(stage, str) or not stage or len(stage) > 64
+                or not isinstance(message, str) or len(message) > 4096):
+            raise ValueError
+    except (ValueError, TypeError):
+        raise SSHError("The Frame returned an invalid setup activity update.") from None
+    if prefix == "HFI_LOG ":
+        return "detail", f"{stage}: {message}", None
+    percent = data.get("percent")
+    # A missing or unusable count holds at the current milestone. It never
+    # invents a percentage or stops the installation for a display-only value.
+    if (type(percent) not in (int, float) or not 0 <= percent <= 100
+            or not math.isfinite(percent)):
+        percent = None
+    return stage, message, percent
+
+
 @dataclass(frozen=True)
 class InstallResult:
     game_path: str
@@ -80,6 +108,20 @@ class InstallResult:
         return self.steam.get("status") != "added"
 
 
+@dataclass(frozen=True)
+class UninstallResult:
+    game_path: str
+    uninstalled: bool
+    already_absent: bool
+    saved_backup_path: str | None
+    steam: dict
+    host_fingerprint: str | None
+
+    @property
+    def requires_manual_steam_step(self) -> bool:
+        return self.steam.get("status") not in ("removed", "already-absent")
+
+
 class Installer:
     def __init__(self, connection_factory=SSHConnection, resource_dir: Path | None = None):
         self.connection_factory = connection_factory
@@ -95,15 +137,16 @@ class Installer:
         run_identifier = uuid.uuid4().hex
         remote_helper: str | None = None
         prepared = False
+        disconnected = False
 
         def check_cancel():
             if cancel_event.is_set():
                 raise CancelledError("Installation cancelled. Existing games and saves were kept.")
 
         def remote_progress(line):
-            if line.startswith("HFI_PROGRESS "):
-                data = json.loads(line[len("HFI_PROGRESS "):])
-                progress(data["stage"], data["message"], None)
+            activity = parse_activity(line)
+            if activity is not None:
+                progress(*activity)
 
         def cancel_remote():
             if remote_helper is not None and prepared:
@@ -210,9 +253,15 @@ class Installer:
             check_cancel()
             progress("steam", "Adding the native VR game and Halo box art to your Steam account while Steam is closed...", None)
             steam = step("shortcut", timeout=90)
+            # Keep the result's public fingerprint before releasing the client.
+            host_fingerprint = connection.host_fingerprint
+            progress("disconnect", "Closing the setup SSH connection...", None)
+            connection.close()
+            disconnected = True
+            progress("disconnected", "Setup has disconnected from your Frame.", None)
             progress("complete", "Native VR game is ready. Start Steam and launch Halo: Combat Evolved VR (Native)." if steam.get("status") == "added" else "Native VR game is installed. One Steam library step remains.", 100)
             return InstallResult(installed["gamePath"], bool(installed.get("reused")),
-                                 steam, connection.host_fingerprint, repaired=bool(installed.get("repaired")),
+                                 steam, host_fingerprint, repaired=bool(installed.get("repaired")),
                                  backup_path=installed.get("backupPath"))
         except CancelledError:
             try:
@@ -221,12 +270,91 @@ class Installer:
                 pass
             raise
         finally:
-            connection.close()
+            if not disconnected:
+                progress("detail", "Closing the setup SSH connection...", None)
+                connection.close()
+                progress("detail", "Setup has disconnected from your Frame.", None)
 
     def add_to_steam(self, settings: Settings, progress_callback: ProgressCallback | None = None,
                      cancel_event: threading.Event | None = None) -> InstallResult:
         """Retry library registration without extraction, upload or rebuilding."""
         return self.run(settings, None, progress_callback, cancel_event, registration_only=True)
+
+    def uninstall(self, settings: Settings, progress_callback: ProgressCallback | None = None,
+                  cancel_event: threading.Event | None = None, *, keep_saves=True) -> UninstallResult:
+        """Remove the recognized native game and its shortcut, without map input."""
+        progress = progress_callback or (lambda stage, message, percent=None: None)
+        cancel_event = cancel_event or threading.Event()
+        connection = self.connection_factory(settings)
+        run_identifier = uuid.uuid4().hex
+        disconnected = False
+
+        def check_cancel():
+            if cancel_event.is_set():
+                raise CancelledError("Uninstall cancelled before removal. The game and saves were kept.")
+
+        def remote_progress(line):
+            activity = parse_activity(line)
+            if activity is not None:
+                progress(*activity)
+
+        try:
+            check_cancel()
+            progress("connect", "Connecting securely to your Steam Frame...", None)
+            connection.connect()
+            check_cancel()
+            progress("preflight", "Checking the native game location and safe uninstall support...", None)
+            helper_source = (self.resource_dir / "remote_install.py").read_text(encoding="utf-8")
+            info = parse_result(connection.run(["python3", "-c", helper_source, "preflight-uninstall"],
+                progress=remote_progress, cancel_event=cancel_event, timeout=90))
+            if (info.get("home") != "/home/steamos"
+                    or info.get("cachePath") != "/home/steamos/.cache/halo-frame-installer"
+                    or info.get("gamePath") != "/home/steamos/Games/HaloCENativeVR"
+                    or info.get("uninstallSupported") is not True):
+                raise SSHError("The Frame returned an unexpected uninstall location or capability.")
+            remote_resources = info["cachePath"] + "/resources"
+            for name in ("remote_install.py", "steam_shortcut.py"):
+                check_cancel()
+                connection.put(self.resource_dir / name, remote_resources + "/" + name, cancel_event=cancel_event)
+            check_cancel()
+            progress("uninstall", "Removing the native game and its Steam entry. Please wait for removal to finish...", None)
+            argv = ["python3", remote_resources + "/remote_install.py", "uninstall", "--run-id", run_identifier]
+            if keep_saves:
+                argv.append("--keep-saves")
+            if settings.close_steam_for_shortcut:
+                argv.append("--close-steam")
+            # Once removal starts, finish the owned transaction rather than
+            # abandoning it mid-delete. The GUI disables Cancel for this phase.
+            data = parse_result(connection.run(argv, progress=remote_progress, timeout=600,
+                timeout_message="Uninstall timed out before completion could be verified. Removal may be incomplete; reconnect and check the native game folder, save backup, and activity log before retrying."))
+            steam = data.get("steam")
+            if not isinstance(steam, dict):
+                raise SSHError("The Frame returned an invalid uninstall result.")
+            if steam.get("status") == "manual":
+                raise SSHError(steam.get("reason", "Steam could not close safely; the game was kept.")
+                    + "\n" + steam.get("instructions", "Quit Steam and retry Uninstall Halo VR."))
+            uninstalled, absent = data.get("uninstalled"), data.get("alreadyAbsent", False)
+            saved = data.get("savedBackupPath")
+            if (data.get("gamePath") != info["gamePath"] or type(uninstalled) is not bool
+                    or type(absent) is not bool or not (uninstalled or absent)
+                    or steam.get("status") not in ("removed", "already-absent")
+                    or (saved is not None and saved != "/home/steamos/Games/HaloCENativeVR-saves-" + run_identifier)):
+                raise SSHError("The Frame returned an invalid uninstall result.")
+            warning = data.get("warning")
+            if isinstance(warning, str) and 0 < len(warning) <= 4096:
+                progress("detail", warning, None)
+            host_fingerprint = connection.host_fingerprint
+            progress("disconnect", "Closing the setup SSH connection...", None)
+            connection.close()
+            disconnected = True
+            progress("disconnected", "Setup has disconnected from your Frame.", None)
+            progress("complete", "Native Halo VR has been uninstalled." if uninstalled else "Native Halo VR was already absent; its Steam entry has been checked.", 100)
+            return UninstallResult(info["gamePath"], uninstalled, absent, saved, steam, host_fingerprint)
+        finally:
+            if not disconnected:
+                progress("detail", "Closing the setup SSH connection...", None)
+                connection.close()
+                progress("detail", "Setup has disconnected from your Frame.", None)
 
 
 def run(settings: Settings, maps_dir: Path | None, progress_callback=None,

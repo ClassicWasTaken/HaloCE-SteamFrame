@@ -79,10 +79,51 @@ def test_authentication_error_does_not_include_secret(monkeypatch):
     assert "private password text" not in str(error.value)
 
 
+def test_disconnect_releases_even_an_inactive_transport_socket():
+    import socket
+    left, right = socket.socketpair()
+    try:
+        connection = SSHConnection(Settings('frame', 'private'))
+        transport = paramiko.Transport(left)
+        connection.client._transport = transport
+        assert not transport.is_active()
+        connection.close()
+        assert left.fileno() == -1
+        assert right.recv(1) == b''
+        assert connection.client.get_transport() is None
+        connection.close()  # Closing an already completed setup is safe.
+    finally:
+        left.close()
+        right.close()
+
+
+def test_disconnect_still_closes_transport_when_a_channel_close_fails(monkeypatch):
+    client = Mock()
+    transport = client.get_transport.return_value
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    connection = SSHConnection(Settings('frame', 'private'))
+    command = Mock()
+    command.close.side_effect = OSError('Already closed')
+    sftp = Mock()
+    connection._command_channels.add(command)
+    connection._sftp_clients.add(sftp)
+    connection.close()
+    command.close.assert_called_once()
+    sftp.close.assert_called_once()
+    transport.close.assert_called_once()
+    transport.sock.close.assert_called_once()
+    client.close.assert_called_once()
+    assert not connection._command_channels and not connection._sftp_clients
+    connection.close()
+    client.close.assert_called_once()
+
+
 @pytest.mark.parametrize('output,expected', [
     (b'HFI_PROGRESS {"stage":"build","message":"Working"}\nHFI_ERROR Native build failed.\nE: setgroups failed\nprivate\n',
      'Native build failed.\nE: setgroups failed\n[redacted]'),
     (b'HFI_PROGRESS {}\nHFI_RESULT {}\n', 'Remote step failed (exit 1).'),
+    (b'HFI_LOG {"stage":"compile","message":"[22/100] task"}\nHFI_ERROR Native build failed.\ncompiler diagnostic private\n',
+     'Native build failed.\ncompiler diagnostic [redacted]'),
     (b'connection helper failed\n', 'connection helper failed'),
 ])
 def test_remote_failure_shows_diagnostic_without_progress_protocol(monkeypatch, output, expected):
@@ -104,3 +145,59 @@ def test_remote_failure_shows_diagnostic_without_progress_protocol(monkeypatch, 
     assert all('HFI_PROGRESS' not in line for line in str(error.value).splitlines())
     assert progress.called
     channel.close.assert_called_once()
+
+
+def test_long_live_activity_is_forwarded_but_response_memory_is_bounded(monkeypatch):
+    from collections import deque
+    line = b'HFI_LOG {"stage":"compile","message":"' + b'x' * 1024 + b'"}\n'
+    output = line * 800 + b'HFI_RESULT {"built":true}\n'
+    packets = deque(output[index:index + 65536] for index in range(0, len(output), 65536))
+    channel = Mock()
+    channel.recv_ready.side_effect = lambda: bool(packets)
+    channel.recv.side_effect = lambda count: packets.popleft()
+    channel.exit_status_ready.side_effect = lambda: not packets
+    channel.recv_exit_status.return_value = 0
+    client = Mock()
+    client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    progress = Mock()
+    result = SSHConnection(Settings('frame', 'private')).run(['python3', 'helper.py', 'build'], progress=progress)
+    assert progress.call_count == 801
+    assert progress.call_args.args[0] == 'HFI_RESULT {"built":true}'
+    assert len(result.encode()) <= 256 * 1024
+    assert result.endswith('HFI_RESULT {"built":true}\n')
+    channel.close.assert_called_once()
+
+
+def test_utf8_activity_split_between_ssh_packets_is_preserved(monkeypatch):
+    from collections import deque
+    output = 'HFI_LOG {"stage":"compile","message":"Compiled café"}\nHFI_RESULT {}\n'.encode()
+    split = output.index('é'.encode()) + 1
+    packets = deque((output[:split], output[split:]))
+    channel = Mock()
+    channel.recv_ready.side_effect = lambda: bool(packets)
+    channel.recv.side_effect = lambda count: packets.popleft()
+    channel.exit_status_ready.side_effect = lambda: not packets
+    channel.recv_exit_status.return_value = 0
+    client = Mock()
+    client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    progress = Mock()
+    SSHConnection(Settings('frame', 'private')).run(['python3', 'helper.py'], progress=progress)
+    assert progress.call_args_list[0].args[0] == 'HFI_LOG {"stage":"compile","message":"Compiled café"}'
+
+
+def test_uninstall_timeout_reports_uncertain_removal_and_closes_channel(monkeypatch):
+    from halo_frame_installer import ssh
+    channel = Mock()
+    client = Mock()
+    client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    monkeypatch.setattr(ssh.time, 'monotonic', Mock(side_effect=[0, 601]))
+    connection = SSHConnection(Settings('frame', 'private'))
+    with pytest.raises(SSHError, match='Removal may be incomplete') as error:
+        connection.run(['python3', 'helper.py', 'uninstall'], timeout=600,
+                       timeout_message='Removal may be incomplete; check the saved backup and activity log.')
+    assert 'were kept' not in str(error.value)
+    channel.close.assert_called_once()
+    assert not connection._command_channels

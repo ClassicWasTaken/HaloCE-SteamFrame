@@ -64,7 +64,7 @@ A cover thumbnail identifies Halo inside the installer, and the portrait and lan
 
 ## User-supplied menu audio
 
-The original Halo menu music is not bundled with the installer. After the user selects valid local original Xbox data, setup reads the menu loop from that game's `ui.map`, decodes it quietly to a private temporary WAV, and can play it locally with a mute control. It is not downloaded or uploaded to the Frame, and its temporary decoded file is cleared on close. Repair with only remote maps does not supply a preview. The original music retains its rights holders' copyright and is separate from the installer's MIT code license.
+The original Halo menu music is not bundled with the installer. After the user selects valid local original Xbox data, setup reads the menu loop from that game's `ui.map`, decodes it quietly to a private temporary WAV, and automatically plays it locally. It is not downloaded or uploaded to the Frame, and its temporary decoded file is cleared on close. Repair with only remote maps does not supply a preview. The original music retains its rights holders' copyright and is separate from the installer's MIT code license.
 
 The cache layout, sound definitions, and Xbox ADPCM algorithm are based on the pinned native port's CC0 source files credited in [SOURCES.md](SOURCES.md#local-halo-menu-music). The implementation is included as [music.py](../src/halo_frame_installer/music.py). The release packager rejects `.wav`, `.mp3`, `.ogg`, and `.wma` files to keep soundtrack data out of the executable and source bundle.
 
