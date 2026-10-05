@@ -9,7 +9,8 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
+EXE_NAME = f"Halo-Steam-Frame-Setup-{VERSION}.exe"
 
 def allowed_source_files():
     roots = [ROOT / name for name in ("src", "resources", "docs", "scripts", "tests", ".github")]
@@ -34,7 +35,7 @@ def main():
     source_files = allowed_source_files()
     snapshots = {path:hashlib.sha256(path.read_bytes()).hexdigest() for path in source_files}
     subprocess.run([sys.executable,"-m","PyInstaller","--noconfirm","--clean","--onefile","--windowed",
-        "--name","HaloFrameSetup","--paths",str(ROOT / "src"),
+        "--name",Path(EXE_NAME).stem,"--icon",str(ROOT / "resources/ui/app-icon.ico"),"--paths",str(ROOT / "src"),
         "--add-data",str(ROOT / "resources") + ";resources",
         "--add-data",str(ROOT / "docs") + ";docs",
         "--add-data",str(ROOT / "LICENSE") + ";.",
@@ -46,7 +47,7 @@ def main():
     with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in source_files:
             archive.write(path, f"halo-steam-frame-installer-{VERSION}/" + path.relative_to(ROOT).as_posix())
-    files = [DIST / "HaloFrameSetup.exe", source]
+    files = [DIST / EXE_NAME, source]
     checksums = []
     for path in files:
         checksums.append(hashlib.sha256(path.read_bytes()).hexdigest() + "  " + path.name)

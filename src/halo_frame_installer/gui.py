@@ -17,6 +17,7 @@ import webbrowser
 from . import __version__
 from .assets import inspect_image, inspect_maps, extract_image, copy_maps
 from .ssh import Settings, SSHConnection
+from .ui import BG, SIDEBAR, WHITE, TEXT, MUTED, BORDER, BLUE, Button, Card, Page, Choice, rounded
 
 SETUP_URL = "https://partner.steamgames.com/doc/steamhardware/steamframe/setup"
 SOURCE_URL = "https://github.com/OpenCommunityEdition/OpenCE/pull/85"
@@ -30,11 +31,19 @@ CONTROLS = (
 
 class App(tk.Tk):
     def __init__(self, state_dir: Path | None = None):
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            except (AttributeError, OSError):
+                pass
         super().__init__()
         self.title("Halo • Steam Frame Setup")
-        self.geometry(f"850x{min(960, max(650, self.winfo_screenheight()-120))}")
-        self.minsize(760, 620)
-        self.configure(bg="#101827")
+        width = min(1040, max(900, self.winfo_screenwidth() - 100))
+        height = min(720, max(620, self.winfo_screenheight() - 100))
+        self.geometry(f"{width}x{height}")
+        self.minsize(900, 620)
+        self.configure(bg=BG)
         self.state_dir = state_dir or Path(os.environ.get("LOCALAPPDATA", str(Path.home() / ".config"))) / "HaloFrameInstaller"
         self.state_file = self.state_dir / "hosts.json"
         self.fingerprints = self._load_fingerprints()
@@ -48,13 +57,29 @@ class App(tk.Tk):
         self.source = tk.StringVar()
         self.authorized = tk.BooleanVar()
         self.steam_closed = tk.BooleanVar()
+        self.mode = tk.StringVar(value="install")
+        self.current_page = self.current_step = 0
+        self.max_page = 0
+        self.installing = False
+        self.activity_open = False
+        self.advanced_open = False
+        self.phase = tk.StringVar(value="Ready when you are")
+        self.connection_status = tk.StringVar(value="Your password stays in memory and is never saved.")
+        self.source_label = tk.StringVar(value="No game data selected")
+        self.summary_source = tk.StringVar()
+        self.summary_frame = tk.StringVar()
+        self.step_count = tk.StringVar(value="Step 1 of 3")
         self.status = tk.StringVar(value="Choose Xbox game data, or repair the installed native game.")
         self.asset_status = tk.StringVar(value="Original Xbox Halo CE .iso / .xiso, or an extracted maps folder")
         self.log_lines: list[str] = []
         self.buttons = []
         self.entries = []
+        self.checks = []
         self.last_result = None
         self._build()
+        self.source.trace_add("write", lambda *args:self._source_changed())
+        self.mode.trace_add("write", lambda *args:self._mode_changed())
+        self._apply_icon()
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.after(80, self._drain)
 
@@ -68,87 +93,134 @@ class App(tk.Tk):
     def _build(self):
         style = ttk.Style(self)
         style.theme_use("clam")
-        style.configure("TFrame", background="#101827")
-        style.configure("Card.TFrame", background="#1b2638")
-        style.configure("TLabel", background="#1b2638", foreground="#ecf2fc", font=("Segoe UI", 10))
-        style.configure("Title.TLabel", background="#101827", font=("Segoe UI", 24, "bold"))
-        style.configure("Sub.TLabel", background="#101827", foreground="#a8b8ce")
-        style.configure("Heading.TLabel", font=("Segoe UI", 12, "bold"))
-        style.configure("TButton", font=("Segoe UI", 10), padding=(12, 7))
-        style.configure("TCheckbutton", background="#1b2638", foreground="#ecf2fc", font=("Segoe UI", 10))
-        style.map("TCheckbutton", background=[("active", "#1b2638")])
-        style.configure("Horizontal.TProgressbar", troughcolor="#1b2638", background="#64d4ad")
-        outer = ttk.Frame(self)
-        outer.pack(fill="both", expand=True)
-        canvas = tk.Canvas(outer, bg="#101827", highlightthickness=0)
-        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-        body = ttk.Frame(canvas, padding=24)
-        window = canvas.create_window((0, 0), window=body, anchor="nw")
-        body.bind("<Configure>", lambda event:canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda event:canvas.itemconfigure(window, width=event.width))
-        self.bind("<MouseWheel>", lambda event:canvas.yview_scroll(-int(event.delta/120), "units"))
-        self.canvas = canvas
-        ttk.Label(body, text="Halo on Steam Frame", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(body, text=f"Native ARM64 VR • Xbox-style controls • Setup {__version__}", style="Sub.TLabel").pack(anchor="w", pady=(5, 15))
+        style.configure("TEntry", fieldbackground=WHITE, foreground=TEXT,
+                        bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER,
+                        padding=(10, 9), font=("Segoe UI", 10))
+        style.map("TEntry", bordercolor=[("focus", BLUE)],
+                  fieldbackground=[("disabled", "#F0F0F2")])
+        style.configure("TCheckbutton", background=WHITE, foreground=TEXT,
+                        font=("Segoe UI", 10), padding=(0, 5))
+        style.map("TCheckbutton", background=[("active", WHITE)],
+                  foreground=[("disabled", "#A1A1A6")])
+        style.configure("Horizontal.TProgressbar", troughcolor="#E9EDF3",
+                        background=BLUE, bordercolor="#E9EDF3", lightcolor=BLUE,
+                        darkcolor=BLUE, thickness=8)
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
 
-        first = self._card(body, "1   Choose your game data")
-        row = ttk.Frame(first, style="Card.TFrame")
-        row.pack(fill="x", pady=5)
-        ttk.Entry(row, textvariable=self.source, state="readonly").pack(side="left", fill="x", expand=True)
-        self._button(row, "Choose ISO", self._choose_iso).pack(side="left", padx=(8, 0))
-        self._button(row, "Maps folder", self._choose_maps).pack(side="left", padx=(8, 0))
-        ttk.Label(first, textvariable=self.asset_status, wraplength=730).pack(anchor="w", pady=4)
-        ttk.Checkbutton(first, text="I am authorized to use this original Xbox game data.", variable=self.authorized).pack(anchor="w", pady=2)
+        sidebar = tk.Frame(self, bg=SIDEBAR, width=218)
+        sidebar.grid(row=0, column=0, sticky="nsew")
+        sidebar.grid_propagate(False)
+        tk.Frame(sidebar, bg=BORDER, width=1).pack(side="right", fill="y")
+        brand = tk.Frame(sidebar, bg=SIDEBAR)
+        brand.pack(fill="x", padx=23, pady=(28, 0))
+        icon = tk.Canvas(brand, bg=SIDEBAR, width=43, height=43,
+                         highlightthickness=0, bd=0)
+        icon.pack(anchor="w")
+        rounded(icon, 1, 1, 42, 42, 11, fill=BLUE, outline="")
+        # Original headset mark, drawn locally; no platform logo assets.
+        rounded(icon, 9, 14, 34, 30, 6, fill="", outline=WHITE, width=2)
+        icon.create_line(9, 20, 5, 20, 5, 25, 9, 25, fill=WHITE, width=2)
+        icon.create_line(34, 20, 38, 20, 38, 25, 34, 25, fill=WHITE, width=2)
+        icon.create_line(15, 20, 28, 20, fill=WHITE, width=2)
+        self._label(brand, "Halo", 19, "bold", background=SIDEBAR).pack(anchor="w", pady=(15, 0))
+        self._label(brand, "Steam Frame Setup", 10, color=MUTED, background=SIDEBAR).pack(anchor="w", pady=(2, 0))
+        self._label(brand, f"Version {__version__}", 9, color=MUTED, background=SIDEBAR).pack(anchor="w", pady=(9, 0))
+        self._label(sidebar, "SETUP", 8, "bold", MUTED, SIDEBAR).pack(anchor="w", padx=24, pady=(38, 8))
+        self.nav_buttons = []
+        for index, title in enumerate(("Game data", "Connect Frame", "Install")):
+            nav = Button(sidebar, f"{index + 1}   {title}",
+                         lambda i=index:self._nav_to(i), width=180,
+                         height=45, background=SIDEBAR, subtle=True)
+            nav.pack(fill="x", padx=18, pady=3)
+            self.nav_buttons.append(nav)
+        help_area = tk.Frame(sidebar, bg=SIDEBAR)
+        help_area.pack(side="bottom", fill="x", padx=20, pady=23)
+        Button(help_area, "Xbox controls", self._show_controls,
+               background=SIDEBAR, subtle=True, width=170).pack(anchor="w")
+        Button(help_area, "Help & sources", self._show_help,
+               background=SIDEBAR, subtle=True, width=170).pack(anchor="w", pady=(2, 13))
+        self._label(help_area, "Your game. In VR.", 9, color=MUTED,
+                    background=SIDEBAR).pack(anchor="w", padx=10)
 
-        second = self._card(body, "2   Connect your Frame")
-        ttk.Label(second, text="On your Frame: Settings → System → Enable Developer Mode.\nThen Developer → Set User Password. Keep both devices on the same network.", wraplength=730).pack(anchor="w")
-        row = ttk.Frame(second, style="Card.TFrame")
-        row.pack(fill="x", pady=(10, 4))
-        ttk.Label(row, text="Address").pack(side="left")
-        self._entry(row, textvariable=self.host, width=20).pack(side="left", padx=(6, 12))
-        ttk.Label(row, text="Port").pack(side="left")
-        self._entry(row, textvariable=self.port, width=5).pack(side="left", padx=(6, 12))
-        ttk.Label(row, text="Password").pack(side="left")
-        self._entry(row, textvariable=self.password, show="•", width=20).pack(side="left", padx=6, fill="x", expand=True)
-        self._button(row, "Test connection", self._test_connection).pack(side="left", padx=(6, 0))
-        ttk.Label(second, text="Login: steamos. Your password stays in memory and is never saved.", foreground="#a8b8ce").pack(anchor="w")
-        ttk.Checkbutton(second, text="I have saved and closed games. Setup may briefly restart Steam to add the library entry.", variable=self.steam_closed).pack(anchor="w", pady=(8, 2))
+        main = tk.Frame(self, bg=BG)
+        main.grid(row=0, column=1, sticky="nsew")
+        main.columnconfigure(0, weight=1)
+        main.rowconfigure(1, weight=1)
+        header = tk.Frame(main, bg=BG)
+        header.grid(row=0, column=0, sticky="ew", padx=32, pady=(27, 16))
+        self._label(header, textvariable=self.step_count, size=9, color=MUTED).pack(anchor="w")
+        self.page_title = self._label(header, "Bring your Halo.", 25, "bold")
+        self.page_title.pack(anchor="w", pady=(6, 4))
+        self.page_subtitle = self._label(header,
+            "A few steps to native VR on your Steam Frame.", 10, color=MUTED)
+        self.page_subtitle.pack(anchor="w")
+        page_host = tk.Frame(main, bg=BG)
+        page_host.grid(row=1, column=0, sticky="nsew", padx=32)
+        page_host.columnconfigure(0, weight=1)
+        page_host.rowconfigure(0, weight=1)
+        self.pages = [Page(page_host) for _ in range(3)]
+        for page in self.pages:
+            page.grid(row=0, column=0, sticky="nsew")
+        self.canvas = self.pages[0].canvas
+        self.bind("<MouseWheel>", lambda event:self.pages[self.current_page].wheel(event))
+        self._build_data_page(self.pages[0].body)
+        self._build_connection_page(self.pages[1].body)
+        self._build_install_page(self.pages[2].body)
 
-        third = self._card(body, "3   Install and play")
-        ttk.Label(third, text="Setup copies your maps, builds the native VR game, applies the controller layout,\nand adds it to Steam. Allow at least 12 GB free on the Frame. The first build can take a while.", wraplength=730).pack(anchor="w")
-        ttk.Label(third, text=CONTROLS, foreground="#a8b8ce", font=("Segoe UI", 9)).pack(anchor="w", pady=7)
-        row = ttk.Frame(third, style="Card.TFrame")
+        footer = tk.Frame(main, bg=BG)
+        footer.grid(row=2, column=0, sticky="ew", padx=32, pady=(15, 18))
+        tk.Frame(footer, bg=BORDER, height=1).pack(fill="x", pady=(0, 12))
+        row = tk.Frame(footer, bg=BG)
         row.pack(fill="x")
-        self._button(row, "Install native Halo VR", self._install).pack(side="left")
-        self._button(row, "Repair installed game", lambda:self._install(repair=True)).pack(side="left", padx=(8, 0))
-        self.retry_button = self._button(row, "Add to Steam again", self._retry_steam)
-        self.retry_button.pack(side="left", padx=8)
-        self.retry_button.configure(state="disabled")
-        self.cancel_button = ttk.Button(row, text="Cancel", command=self.cancel.set, state="disabled")
-        self.cancel_button.pack(side="left", padx=8)
-        self.progress = ttk.Progressbar(third, maximum=100)
-        self.progress.pack(fill="x", pady=(12, 5))
-        ttk.Label(third, textvariable=self.status, wraplength=730).pack(anchor="w")
+        self.back_button = self._button(row, "Back", self._back)
+        self.back_button.pack(side="left")
+        self.activity_button = Button(row, "Show activity", self._toggle_activity,
+                                      subtle=True, background=BG)
+        self.activity_button.pack(side="left", padx=5)
+        self.next_button = self.primary_button = self._button(row, "Continue", self._continue, primary=True)
+        self.next_button.pack(side="right")
+        self.cancel_button = Button(row, "Cancel", self._cancel_setup, background=BG)
+        self.cancel_button.configure(state="disabled")
+        self.footer_note = self._label(row, "", 9, color=MUTED)
+        self.footer_note.pack(side="right", padx=12)
 
-        bottom = ttk.Frame(body)
-        bottom.pack(fill="x", pady=(10, 4))
-        ttk.Button(bottom, text="Valve SSH guide", command=lambda:webbrowser.open(SETUP_URL)).pack(side="left")
-        ttk.Button(bottom, text="Native VR source", command=lambda:webbrowser.open(SOURCE_URL)).pack(side="left", padx=6)
-        ttk.Button(bottom, text="Save setup log", command=self._save_log).pack(side="right")
-        self.log = tk.Text(body, height=5, bg="#0b1220", fg="#a8b8ce", relief="flat", font=("Consolas", 9), state="disabled", wrap="word")
-        self.log.pack(fill="both", expand=True, pady=(5, 0))
+        self.activity_frame = tk.Frame(main, bg=BG)
+        self.activity_frame.grid(row=3, column=0, sticky="ew", padx=32, pady=(0, 18))
+        activity_heading = tk.Frame(self.activity_frame, bg=BG)
+        activity_heading.pack(fill="x")
+        self._label(activity_heading, "Setup activity", 10, "bold").pack(side="left")
+        Button(activity_heading, "Save log", self._save_log, background=BG,
+               subtle=True, height=31).pack(side="right")
+        self.log = tk.Text(self.activity_frame, height=5, bg=WHITE, fg=MUTED,
+                           relief="flat", borderwidth=0, highlightthickness=1,
+                           highlightbackground=BORDER, padx=12, pady=8,
+                           font=("Consolas", 9), state="disabled", wrap="word")
+        self.log.pack(fill="x", pady=(5, 0))
+        self.activity_frame.grid_remove()
+        self._show_page(0)
 
-    def _card(self, parent, title):
-        frame = ttk.Frame(parent, style="Card.TFrame", padding=14)
-        frame.pack(fill="x", pady=(0, 10))
-        ttk.Label(frame, text=title, style="Heading.TLabel").pack(anchor="w", pady=(0, 7))
-        return frame
+    def _label(self, parent, text=None, size=10, weight="normal", color=TEXT,
+               background=BG, **kwargs):
+        if text is not None:
+            kwargs["text"] = text
+        label = tk.Label(parent, bg=background, fg=color, font=("Segoe UI", size, weight),
+                         anchor="w", justify="left", **kwargs)
+        if "wraplength" in kwargs:
+            limit = kwargs["wraplength"]
+            parent.bind("<Configure>", lambda event:label.configure(
+                wraplength=max(120, min(limit, event.width - 4))), add="+")
+        return label
 
-    def _button(self, parent, text, command):
-        button = ttk.Button(parent, text=text, command=command)
+    def _card(self, parent, title=None):
+        card = Card(parent, padding=16)
+        card.pack(fill="x", pady=(0, 10))
+        if title:
+            self._label(card.content, title, 12, "bold", background=WHITE).pack(anchor="w", pady=(0, 8))
+        return card.content
+
+    def _button(self, parent, text, command, **kwargs):
+        button = Button(parent, text, command, background=parent.cget("background"), **kwargs)
         self.buttons.append(button)
         return button
 
@@ -156,6 +228,303 @@ class App(tk.Tk):
         entry = ttk.Entry(parent, **kwargs)
         self.entries.append(entry)
         return entry
+
+    def _check(self, parent, text, variable):
+        check = ttk.Checkbutton(parent, text=text, variable=variable)
+        self.checks.append(check)
+        return check
+
+    def _build_data_page(self, body):
+        mode_card = self._card(body, "What would you like to do?")
+        choices = tk.Frame(mode_card, bg=WHITE)
+        choices.pack(fill="x")
+        choices.columnconfigure((0, 1), weight=1)
+        self.mode_choices = []
+        for index, title, subtitle, value in (
+            (0, "Install Halo VR", "Set up a new native game", "install"),
+            (1, "Repair installed game", "Refresh files. Keep your saves.", "repair")):
+            choice = Choice(choices, title, subtitle, self.mode, value, self._mode_changed)
+            choice.grid(row=0, column=index, sticky="ew", padx=(0, 6) if index == 0 else (6, 0))
+            self.mode_choices.append(choice)
+
+        data = self._card(body)
+        self.data_title = self._label(data, "Your original Xbox game data", 12, "bold", background=WHITE)
+        self.data_title.pack(anchor="w")
+        self.data_note = self._label(data,
+            "Choose a disc image or an extracted maps folder.", 10, color=MUTED, background=WHITE)
+        self.data_note.pack(anchor="w", pady=(5, 14))
+        file_row = tk.Frame(data, bg="#F5F6F8")
+        file_row.pack(fill="x")
+        file_icon = tk.Canvas(file_row, width=35, height=44, bg="#F5F6F8", bd=0, highlightthickness=0)
+        file_icon.pack(side="left", padx=(10, 0))
+        file_icon.create_rectangle(9, 11, 24, 32, outline="#8A919C", width=1.5)
+        file_icon.create_line(13, 18, 21, 18, 13, 23, 21, 23, fill="#8A919C")
+        self._label(file_row, textvariable=self.source_label, size=10, background="#F5F6F8").pack(side="left", fill="x", expand=True, padx=8)
+        self.clear_source_button = self._button(file_row, "Clear", lambda:self.source.set(""), subtle=True, height=34)
+        self.clear_source_button.pack(side="right", padx=6)
+        source_row = tk.Frame(data, bg=WHITE)
+        source_row.pack(fill="x", pady=(11, 0))
+        self._button(source_row, "Choose ISO", self._choose_iso).pack(side="left")
+        self._button(source_row, "Choose maps folder", self._choose_maps).pack(side="left", padx=(8, 0))
+        self.asset_label = self._label(data, textvariable=self.asset_status, size=9,
+                                       color=MUTED, background=WHITE, wraplength=630)
+        self.asset_label.pack(anchor="w", pady=(9, 0))
+        consent = self._card(body)
+        self._check(consent, "I am authorized to use this original Xbox game data.", self.authorized).pack(anchor="w")
+        self._label(consent, "Use your own game data. PC and Xbox 360 editions are not supported.",
+                    9, color=MUTED, background=WHITE, wraplength=630).pack(anchor="w", pady=(2, 0))
+
+    def _build_connection_page(self, body):
+        instructions = self._card(body, "Prepare your Steam Frame")
+        self._label(instructions,
+            "1   Settings → System → Enable Developer Mode\n2   Developer → Set User Password",
+            10, background=WHITE).pack(anchor="w")
+        self._label(instructions, "Keep your computer and Frame on the same network.",
+                    9, color=MUTED, background=WHITE).pack(anchor="w", pady=(7, 0))
+        self._button(instructions, "Valve SSH guide", lambda:webbrowser.open(SETUP_URL), subtle=True,
+                     height=33).pack(anchor="w")
+        connection = self._card(body, "Connect securely")
+        row = tk.Frame(connection, bg=WHITE)
+        row.pack(fill="x")
+        row.columnconfigure((0, 1), weight=1)
+        self._label(row, "Frame address", 9, color=MUTED, background=WHITE).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self._label(row, "SSH password", 9, color=MUTED, background=WHITE).grid(row=0, column=1, sticky="w", padx=(12, 0), pady=(0, 6))
+        self._entry(row, textvariable=self.host, width=22).grid(row=1, column=0, sticky="ew")
+        self._entry(row, textvariable=self.password, show="•", width=22).grid(row=1, column=1, sticky="ew", padx=(12, 0))
+        self.connection_label = self._label(connection, textvariable=self.connection_status, size=9,
+                                           color=MUTED, background=WHITE, wraplength=620)
+        self.connection_label.pack(anchor="w", pady=(6, 0))
+        connection_actions = tk.Frame(connection, bg=WHITE)
+        connection_actions.pack(fill="x", pady=(4, 0))
+        self._button(connection_actions, "Test connection", self._test_connection).pack(side="left")
+        self.advanced_button = self._button(connection_actions, "Advanced SSH settings", self._toggle_advanced,
+                                            subtle=True)
+        self.advanced_button.pack(side="right")
+        self.advanced_frame = tk.Frame(connection, bg=WHITE)
+        self._label(self.advanced_frame, "SSH port", 9, color=MUTED, background=WHITE).pack(side="left")
+        self._entry(self.advanced_frame, textvariable=self.port, width=6).pack(side="left", padx=10)
+        self._label(self.advanced_frame, "Login: steamos", 9, color=MUTED, background=WHITE).pack(side="left", padx=6)
+        acknowledgement = self._card(body)
+        self._check(acknowledgement, "I have saved and closed games on my Frame.", self.steam_closed).pack(anchor="w")
+        self._label(acknowledgement, "Setup may briefly restart Steam to add Halo to your library.",
+                    9, color=MUTED, background=WHITE).pack(anchor="w", pady=(2, 0))
+
+    def _build_install_page(self, body):
+        summary = self._card(body, "Everything, ready to go")
+        for title, variable in (("GAME DATA", self.summary_source), ("STEAM FRAME", self.summary_frame)):
+            self._label(summary, title, 8, "bold", MUTED, WHITE).pack(anchor="w")
+            self._label(summary, textvariable=variable, size=10, background=WHITE,
+                        wraplength=620).pack(anchor="w", pady=(4, 13))
+        self._label(summary, "XBOX CONTROLS", 8, "bold", MUTED, WHITE).pack(anchor="w")
+        self._label(summary, "A  Jump   ·   B  Melee   ·   X  Reload / use   ·   Y  Change weapon",
+                    10, background=WHITE).pack(anchor="w", pady=(4, 6))
+        self._label(summary, "Motion aiming and the full Xbox-style layout are included.",
+                    9, color=MUTED, background=WHITE).pack(anchor="w")
+        self.progress_card = self._card(body)
+        self.phase_label = self._label(self.progress_card, textvariable=self.phase, size=12,
+                                       weight="bold", background=WHITE)
+        self.phase_label.pack(anchor="w")
+        self.progress = ttk.Progressbar(self.progress_card, maximum=100)
+        self.progress.pack(fill="x", pady=(14, 10))
+        self.status_label = self._label(self.progress_card, textvariable=self.status, size=10,
+                                        color=MUTED, background=WHITE, wraplength=620)
+        self.status_label.pack(anchor="w")
+        self.retry_button = self._button(self.progress_card, "Add to Steam again", self._retry_steam)
+        self.retry_button.pack(anchor="w", pady=(11, 0))
+        self.retry_button.configure(state="disabled")
+        self.retry_button.pack_forget()
+        self._label(body,
+            "Keep this window open during setup. Allow 12 GB free on the Frame.\nThe first native build can take a while.",
+            9, color=MUTED, wraplength=620).pack(anchor="w", pady=(0, 10))
+
+    def _apply_icon(self):
+        try:
+            from .install import resources_path
+            directory = resources_path() / "ui"
+            image_path = directory / "app-icon.png"
+            if image_path.is_file():
+                self._app_icon = tk.PhotoImage(file=str(image_path))
+                self.iconphoto(True, self._app_icon)
+            if sys.platform == "win32" and (directory / "app-icon.ico").is_file():
+                self.iconbitmap(str(directory / "app-icon.ico"))
+        except (OSError, tk.TclError):
+            pass
+
+    def _source_changed(self):
+        source = self.source.get()
+        self.source_label.set(Path(source).name if source else "No game data selected")
+        if not source:
+            self.asset_status.set("Original Xbox Halo CE .iso / .xiso, or an extracted maps folder")
+        self._update_summary()
+
+    def _mode_changed(self):
+        repair = self.mode.get() == "repair"
+        self.data_title.configure(text="Replacement game data (optional)" if repair else "Your original Xbox game data")
+        self.data_note.configure(text="Use valid installed Xbox maps, or choose data to replace them." if repair
+                                  else "Choose a disc image or an extracted maps folder.")
+        self._update_summary()
+        self._update_navigation()
+
+    def _update_summary(self):
+        source = self.source.get()
+        self.summary_source.set(Path(source).name if source else "Use valid Xbox maps already installed on the Frame")
+        self.summary_frame.set(self.host.get().strip() or "Enter your Frame address")
+
+    def _show_page(self, index):
+        if not 0 <= index < len(self.pages):
+            return
+        self.current_page = self.current_step = index
+        self.max_page = max(self.max_page, index)
+        self.pages[index].tkraise()
+        self.canvas = self.pages[index].canvas
+        self.step_count.set(f"Step {index + 1} of 3")
+        titles = ("Bring your Halo.", "Meet your Steam Frame.", "Make yourself at home.")
+        subtitles = ("A few steps to native VR on your Steam Frame.",
+                     "Connect once. Your password stays private.",
+                     "Native VR, familiar controls, and a place in your Steam library.")
+        self.page_title.configure(text=titles[index])
+        self.page_subtitle.configure(text=subtitles[index])
+        self._update_summary()
+        self._update_navigation()
+
+    _show_step = _show_page
+
+    def _nav_to(self, index):
+        if not self.busy and index <= self.max_page:
+            self._show_page(index)
+
+    def _back(self):
+        if not self.busy and self.current_page > 0:
+            self._show_page(self.current_page - 1)
+
+    def _continue(self):
+        if self.busy:
+            return
+        if self.current_page == 0:
+            repair = self.mode.get() == "repair"
+            if not self.authorized.get() or (not repair and not self.source.get()):
+                messagebox.showinfo("Choose game data",
+                    "Confirm that you are authorized to use the installed Xbox game data." if repair else
+                    "Choose your original Xbox Halo CE image or maps, and confirm you are authorized to use them.", parent=self)
+                return
+            self._show_page(1)
+        elif self.current_page == 1:
+            try:
+                settings = self._settings()
+                settings.password = ""
+            except ValueError as exc:
+                messagebox.showerror("Connection details", str(exc), parent=self)
+                return
+            if not self.steam_closed.get():
+                messagebox.showinfo("Close games first", "Save and close games, then confirm that setup may briefly restart Steam to add the library entry.", parent=self)
+                return
+            self.status.set("Setup builds the native game, applies Xbox controls, and adds Halo to Steam.")
+            self._show_page(2)
+        else:
+            self._install(repair=self.mode.get() == "repair")
+
+    def _update_navigation(self):
+        for index, nav in enumerate(self.nav_buttons):
+            active = index == self.current_page
+            nav.primary = active
+            nav.subtle = not active
+            nav.configure(state="disabled" if self.busy or index > self.max_page else "normal")
+        self.back_button.configure(state="disabled" if self.busy or self.current_page == 0 else "normal")
+        label = "Continue" if self.current_page < 2 else "Repair Halo VR" if self.mode.get() == "repair" else "Install Halo VR"
+        self.next_button.configure(text=label, state="disabled" if self.busy else "normal")
+        if self.busy:
+            self.next_button.pack_forget()
+            self.cancel_button.pack(side="right")
+        else:
+            self.cancel_button.pack_forget()
+            self.next_button.pack(side="right")
+
+    def _toggle_activity(self):
+        self.activity_open = not self.activity_open
+        if self.activity_open:
+            self.activity_frame.grid()
+        else:
+            self.activity_frame.grid_remove()
+        self.activity_button.configure(text="Hide activity" if self.activity_open else "Show activity")
+
+    def _toggle_advanced(self):
+        self.advanced_open = not self.advanced_open
+        if self.advanced_open:
+            self.advanced_frame.pack(fill="x", pady=(9, 0))
+        else:
+            self.advanced_frame.pack_forget()
+        self.advanced_button.configure(text="Hide SSH settings" if self.advanced_open else "Advanced SSH settings")
+
+    def _cancel_setup(self):
+        self.cancel.set()
+        self.phase.set("Cancelling setup…")
+        self.status.set("Keep this window open until setup stops. Existing saves will be kept.")
+        self.cancel_button.configure(state="disabled")
+
+    def _dialog(self, title, subtitle):
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.configure(bg=BG)
+        dialog.geometry("650x535")
+        dialog.minsize(600, 480)
+        dialog.transient(self)
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(1, weight=1)
+        header = tk.Frame(dialog, bg=BG)
+        header.grid(row=0, column=0, sticky="ew", padx=28, pady=(24, 16))
+        self._label(header, title, 22, "bold").pack(anchor="w")
+        self._label(header, subtitle, 10, color=MUTED).pack(anchor="w", pady=(6, 0))
+        page = Page(dialog)
+        page.grid(row=1, column=0, sticky="nsew", padx=28)
+        footer = tk.Frame(dialog, bg=BG)
+        footer.grid(row=2, column=0, sticky="ew", padx=28, pady=16)
+        Button(footer, "Done", dialog.destroy, primary=True).pack(side="right")
+        dialog.bind("<Escape>", lambda event:dialog.destroy())
+        dialog.bind("<MouseWheel>", page.wheel)
+        return dialog, page.body
+
+    def _show_controls(self):
+        _, body = self._dialog("Xbox controls", "Familiar actions. Motion aiming stays enabled.")
+        card = self._card(body)
+        for controls, action in (("A / B", "Jump / accept  ·  Melee / back"),
+                                 ("X / Y", "Reload / use  ·  Change weapon"),
+                                 ("RT / LT", "Fire  ·  Throw grenade"),
+                                 ("RB / LB", "Flashlight  ·  Change grenade"),
+                                 ("Left stick", "Move  ·  Click to crouch"),
+                                 ("Right stick", "Turn  ·  Click to zoom"),
+                                 ("Menu / View", "Pause  ·  Scoreboard"),
+                                 ("Both grips", "Hold to recenter")):
+            row = tk.Frame(card, bg=WHITE)
+            row.pack(fill="x", pady=7)
+            self._label(row, controls, 10, "bold", background=WHITE, width=14).pack(side="left")
+            self._label(row, action, 10, background=WHITE).pack(side="left")
+        self._label(body, "Hold the left grip near the foregrip for two-handed aiming.",
+                    9, color=MUTED).pack(anchor="w", pady=(0, 8))
+
+    def _show_help(self):
+        _, body = self._dialog("Help & sources", "Everything you need to finish setup.")
+        card = self._card(body, "A little preparation")
+        self._label(card,
+            "• Use original Xbox Halo CE data you are authorized to use.\n"
+            "• Keep both devices on the same network.\n"
+            "• Install SteamVR and allow at least 12 GB free on your Frame.\n"
+            "• Repair refreshes the program and controls while preserving saves.\n"
+            "• Online play uses the native port's own multiplayer protocol.",
+            10, background=WHITE, wraplength=530).pack(anchor="w")
+        links = self._card(body, "Project references")
+        Button(links, "Steam Frame SSH guide", lambda:webbrowser.open(SETUP_URL),
+               subtle=True, background=WHITE).pack(anchor="w")
+        Button(links, "Native VR source", lambda:webbrowser.open(SOURCE_URL),
+               subtle=True, background=WHITE).pack(anchor="w")
+        Button(links, "Installer project & documentation",
+               lambda:webbrowser.open("https://github.com/ClassicWasTaken/HaloCE-SteamFrame"),
+               subtle=True, background=WHITE).pack(anchor="w")
+
+    def _redact(self, text):
+        text = str(text)
+        if self.password_to_redact:
+            return text.replace(self.password_to_redact, "[redacted]")
+        return text
 
     def _choose_iso(self):
         selected = filedialog.askopenfilename(title="Select your original Xbox Halo CE image", filetypes=[("Xbox disc image", "*.iso *.xiso"), ("All files", "*.*")])
@@ -170,6 +539,8 @@ class App(tk.Tk):
     def _inspect(self, selected):
         if self.busy:
             return
+        self.operation = "data"
+        self.asset_status.set("Checking original Xbox game data…")
         self._set_busy(True)
         def worker():
             try:
@@ -207,10 +578,17 @@ class App(tk.Tk):
             button.configure(state="disabled" if value else "normal")
         for entry in self.entries:
             entry.configure(state="disabled" if value else "normal")
+        for check in self.checks:
+            check.configure(state="disabled" if value else "normal")
+        for choice in self.mode_choices:
+            choice.configure(state="disabled" if value else "normal")
         self.retry_button.configure(state="normal" if not value and self.last_result is not None else "disabled")
+        if self.last_result is not None:
+            self.retry_button.pack(anchor="w", pady=(11, 0))
         self.cancel_button.configure(state="normal" if value else "disabled")
         if value:
             self.cancel.clear()
+        self._update_navigation()
 
     def _test_connection(self):
         try:
@@ -219,8 +597,10 @@ class App(tk.Tk):
             messagebox.showerror("Connection details", str(exc), parent=self)
             return
         self.password_to_redact = settings.password
+        self.operation = "connection"
         self._set_busy(True)
         self.status.set("Connecting to your Frame…")
+        self.connection_status.set("Connecting to your Frame…")
         def worker():
             connection = SSHConnection(settings)
             try:
@@ -256,8 +636,14 @@ class App(tk.Tk):
             if not messagebox.askyesno("Repair existing native game", "Setup will check ~/Games/HaloCENativeVR on your Frame and reinstall its native program files and Xbox controls. Saves and unrelated settings are preserved.\n\n" + data_note + "\n\nRepair this installation?", parent=self):
                 return
             settings.adopt_existing_native = True
+        self.operation = "install"
+        self.installing = True
+        self._show_page(2)
         self._set_busy(True)
+        self.progress.stop()
+        self.progress.configure(mode="determinate", value=0)
         self.status.set("Preparing installation…")
+        self.phase.set("Preparing your game")
         last_progress = [None, 0.0]
         def report(stage, message, percent=None):
             now = time.monotonic()
@@ -302,7 +688,14 @@ class App(tk.Tk):
             messagebox.showerror("Connection details", str(exc), parent=self)
             return
         self.password_to_redact = settings.password
+        self.operation = "install"
+        self.installing = True
+        self._show_page(2)
         self._set_busy(True)
+        self.progress.stop()
+        self.progress.configure(mode="determinate", value=0)
+        self.phase.set("Adding Halo to Steam")
+        self.status.set("Checking the installed game and Steam library…")
         def worker():
             from .install import Installer
             try:
@@ -317,9 +710,7 @@ class App(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _append(self, text):
-        text = str(text)
-        if self.password_to_redact:
-            text = text.replace(self.password_to_redact, "[redacted]")
+        text = self._redact(text)
         self.log_lines.append(text)
         self.log.configure(state="normal")
         self.log.insert("end", text + "\n")
@@ -345,10 +736,13 @@ class App(tk.Tk):
                     _, host, port, value = event
                     if value:
                         self._remember(host, port, value)
-                    self.status.set("Connected to an ARM64 device. Ready to install.")
+                    self.status.set("Connected to your Frame. Ready to install.")
+                    self.connection_status.set("Connected to your Frame. You're ready to continue.")
                     self._append("SSH connection verified. No password was saved.")
                 elif kind == "progress":
                     _, stage, message, percent = event
+                    stage, message = self._redact(stage), self._redact(message)
+                    self.phase.set(stage)
                     self.status.set(f"{stage}: {message}"[:500])
                     if percent is None:
                         self.progress.configure(mode="indeterminate"); self.progress.start(20)
@@ -367,18 +761,31 @@ class App(tk.Tk):
                         done = "Native Halo VR is installed; its Steam entry needs one more step.\n" + result.steam.get("reason", "") + "\n" + result.steam.get("instructions", "Quit Steam, then click Add to Steam again.")
                         self._append("Executable: " + result.game_path + "/halo")
                         self._append("Launch options: " + result.steam.get("launchOptions", "SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=0 %command%"))
+                    done = self._redact(done)
+                    self.phase.set("One more step in Steam" if result.requires_manual_steam_step else "You're ready to play")
                     self.status.set(done)
                     self._append(done)
                     messagebox.showinfo("Setup complete", done + "\n\nXbox controls and motion aiming are enabled. The native port uses its own multiplayer protocol; legacy PC servers and PC saves are incompatible.", parent=self)
                 elif kind == "error":
-                    text = event[1].replace(self.password_to_redact, "[redacted]") if self.password_to_redact else event[1]
+                    text = self._redact(event[1])
                     self.status.set("Setup stopped. See the message below; you can retry.")
+                    self.phase.set("Let's try that again")
+                    if getattr(self, "operation", None) == "connection":
+                        self.connection_status.set("Couldn't connect. Check your address and SSH password, then retry.")
+                    elif getattr(self, "operation", None) == "data":
+                        self.asset_status.set("Couldn't validate this data. Choose an original Xbox image or maps folder.")
                     self._append(text)
                     messagebox.showerror("Setup needs attention", text[-4000:], parent=self)
                 elif kind == "clear_password":
                     self.password.set(""); self.password_to_redact = ""
                 elif kind == "idle":
-                    self.progress.stop(); self._set_busy(False)
+                    determinate = str(self.progress.cget("mode")) == "determinate"
+                    value = self.progress["value"]
+                    self.progress.stop()
+                    if determinate:
+                        self.progress.configure(value=value)
+                    self._set_busy(False)
+                    self.installing = False
         except queue.Empty:
             pass
         self.after(80, self._drain)
@@ -402,8 +809,7 @@ class App(tk.Tk):
     def _close(self):
         if self.busy:
             if messagebox.askyesno("Cancel setup?", "Cancel the current setup? Existing games and saves will be kept.", parent=self):
-                self.cancel.set()
-                self.status.set("Cancelling… Keep this window open until setup stops.")
+                self._cancel_setup()
             return
         self.password.set("")
         self.destroy()

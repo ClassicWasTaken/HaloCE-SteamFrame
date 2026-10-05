@@ -4,10 +4,12 @@ from pathlib import Path
 import tempfile
 
 def smoke_test(resources: Path) -> dict:
+    from . import __version__
     from .gui import App
     from .install import SOURCE_COMMIT
     from .ssh import Settings
-    names = ('remote_install.py', 'steam_shortcut.py', 'build-native.sh', 'frame-controls.patch')
+    names = ('remote_install.py', 'steam_shortcut.py', 'build-native.sh',
+             'frame-controls.patch', 'ui/app-icon.png', 'ui/app-icon.ico')
     hashes = {}
     for name in names:
         path = resources / name
@@ -20,11 +22,23 @@ def smoke_test(resources: Path) -> dict:
         raise RuntimeError('Password exposed in Settings repr')
     with tempfile.TemporaryDirectory(prefix='halo-frame-smoke-') as tmp:
         app = App(Path(tmp) / 'state')
-        app.withdraw()
-        app.update_idletasks()
-        valid = app.asset_status.get().startswith('Original Xbox') and app.log.winfo_reqheight() > 1
-        app.destroy()
+        pages_initialized = []
+        try:
+            app.withdraw()
+            for index, name in enumerate(('gameData', 'connection', 'install')):
+                app._show_page(index)
+                app.update_idletasks()
+                if app.current_page != index:
+                    raise RuntimeError('Installer page did not initialize: ' + name)
+                pages_initialized.append(name)
+            valid = bool(app.asset_status.get()) and app.log.winfo_reqheight() > 1
+        finally:
+            for callback in app.tk.call('after', 'info'):
+                app.after_cancel(callback)
+            app.destroy()
     if not valid:
         raise RuntimeError('Installer window did not initialize')
-    return {'ok': True, 'sourceCommit': SOURCE_COMMIT, 'resources':hashes,
-            'guiInitialized':True, 'passwordReprRedacted':True, 'networkConnections':0}
+    return {'ok': True, 'version': __version__, 'sourceCommit': SOURCE_COMMIT,
+            'resources': hashes, 'guiInitialized': True,
+            'guiPagesInitialized': pages_initialized,
+            'passwordReprRedacted': True, 'networkConnections': 0}
