@@ -37,7 +37,14 @@ jobs:
         with:
           python-version: '3.12'
       - name: Verify package installation in the rootless build container
-        run: python scripts/check-build-container.py
+        run: |
+          # A separate disposable test account avoids the hosted runner's
+          # overlapping subordinate group map. Podman itself stays unprivileged.
+          sudo useradd --create-home --user-group halo-build-check
+          sudo install -d -m 700 -o halo-build-check -g halo-build-check /home/halo-build-check/runtime
+          sudo install -D -m 644 scripts/check-build-container.py /home/halo-build-check/installer-check/scripts/check-build-container.py
+          sudo install -D -m 644 resources/remote_install.py /home/halo-build-check/installer-check/resources/remote_install.py
+          sudo -u halo-build-check env XDG_RUNTIME_DIR=/home/halo-build-check/runtime /usr/bin/python3 /home/halo-build-check/installer-check/scripts/check-build-container.py
 
   windows-executable:
     needs: [test, build-container]

@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import platform
 from pathlib import Path
 import subprocess
 import sys
@@ -19,6 +20,9 @@ def main():
     info = json.loads(subprocess.check_output(['podman', 'info', '--format', 'json'], text=True))
     if not info.get('host', {}).get('security', {}).get('rootless', False):
         raise SystemExit('This check requires rootless Podman.')
+    print(json.dumps({'architecture': platform.machine(), 'hostUid': os.getuid(),
+                      'hostGid': os.getgid(), 'rootless': True,
+                      'idMappings': info.get('host', {}).get('idMappings')}), flush=True)
     spec = importlib.util.spec_from_file_location('remote_helper', ROOT / 'resources/remote_install.py')
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
