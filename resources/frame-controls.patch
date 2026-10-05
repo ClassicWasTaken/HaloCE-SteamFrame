@@ -1,0 +1,124 @@
+diff --git a/port/linux/src/vr.c b/port/linux/src/vr.c
+index 89cfb6f..30c5787 100644
+--- a/port/linux/src/vr.c
++++ b/port/linux/src/vr.c
+@@ -99,6 +99,10 @@ static struct
+ 	int aiming;
+ 	int aimed;
+ 	int aim_synced;
++	/* the tutorial's look tests observe head motion independently of the
++	controller's aim, without feeding it into the game's facing */
++	int tutorial_head_valid;
++	float tutorial_head_yaw, tutorial_head_pitch;
+ 	int snap_latched;
+ 	float recentre_time;
+ 	/* a gamepad's Back held (halo_vr_gamepad_back), and for how long */
+@@ -1044,6 +1048,47 @@ int halo_vr_view(struct halo_vr_view *view)
+ 
+ /* ---------- aiming */
+ 
++int halo_vr_tutorial_look(float *yaw, float *pitch)
++{
++	static const float forwards[3] = { 0.0f, 0.0f, -1.0f };
++	const float threshold = 0.01f; /* about half a degree; ignore tracking jitter */
++	float pointing[3], facing[3], head_yaw, head_pitch;
++
++	*yaw = *pitch = 0.0f;
++	if (!vr.initialized || !(vr.frame || vr.pending) || !vr.views.should_render ||
++		!vr.views.focused || !vr.views.head.valid || vr.menus || !settings.controller_aim)
++	{
++		vr.tutorial_head_valid = 0;
++		return 0;
++	}
++	/* Use the tracking space, rather than body_yaw or the recentred origin:
++	stick turns and recentring must not count as physical head movement. */
++	quaternion_rotate(vr.views.head.orientation, forwards, pointing);
++	game_axes(pointing, 0.0f, facing);
++	head_yaw = atan2f(facing[1], facing[0]);
++	head_pitch = asinf(facing[2] < -1.0f ? -1.0f : facing[2] > 1.0f ? 1.0f : facing[2]);
++	if (!vr.tutorial_head_valid)
++	{
++		vr.tutorial_head_valid = 1;
++		vr.tutorial_head_yaw = head_yaw;
++		vr.tutorial_head_pitch = head_pitch;
++		return 0;
++	}
++	*yaw = remainderf(head_yaw - vr.tutorial_head_yaw, 2.0f * (float)M_PI);
++	*pitch = head_pitch - vr.tutorial_head_pitch;
++	/* Keep each anchor until movement crosses the threshold, so a slow
++	look still counts and sub-threshold jitter does not. */
++	if (fabsf(*yaw) >= threshold)
++		vr.tutorial_head_yaw = head_yaw;
++	else
++		*yaw = 0.0f;
++	if (fabsf(*pitch) >= threshold)
++		vr.tutorial_head_pitch = head_pitch;
++	else
++		*pitch = 0.0f;
++	return *yaw != 0.0f || *pitch != 0.0f;
++}
++
+ int halo_vr_aim(float current_yaw, int long_gun, float *yaw, float *pitch)
+ {
+ 	static const float backwards[3] = { 0.0f, 0.0f, -1.0f };
+@@ -1161,10 +1206,10 @@ void halo_vr_gamepad(void *gamepad)
+ 	analog(pad, XINPUT_GAMEPAD_B, (buttons & VR_BUTTON_B) || vr.melee_frames > 0);
+ 	analog(pad, XINPUT_GAMEPAD_X, buttons & VR_BUTTON_X);
+ 	analog(pad, XINPUT_GAMEPAD_Y, buttons & VR_BUTTON_Y);
+-	/* the bumpers where the Xbox's white and black buttons were: the
+-	flashlight and the grenade switch */
+-	analog(pad, XINPUT_GAMEPAD_WHITE, buttons & VR_BUTTON_LEFT_BUMPER);
+-	analog(pad, XINPUT_GAMEPAD_BLACK, buttons & VR_BUTTON_RIGHT_BUMPER);
++	/* Keep the user's Xbox layout: left bumper changes grenade, and the
++	right bumper toggles the flashlight. */
++	analog(pad, XINPUT_GAMEPAD_WHITE, buttons & VR_BUTTON_RIGHT_BUMPER);
++	analog(pad, XINPUT_GAMEPAD_BLACK, buttons & VR_BUTTON_LEFT_BUMPER);
+ 	trigger = (BYTE)(vr.input.left_trigger * 255.0f);
+ 	if (trigger > pad->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER])
+ 		pad->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] = trigger;
+diff --git a/port/linux/src/vr.h b/port/linux/src/vr.h
+index 9f78308..8acbb8f 100644
+--- a/port/linux/src/vr.h
++++ b/port/linux/src/vr.h
+@@ -106,6 +106,9 @@ stays the game's (vr.aim = "gamepad"); 0 when it does not (no VR frame, a
+ cinematic). With a long gun, the left hand on its foregrip aims it along
+ both hands (vr.two_handed). */
+ int halo_vr_aim(float current_yaw, int long_gun, float *yaw, float *pitch);
++/* Physical head movement for the campaign's tutorial look-direction tests;
++does not change controller aiming or the player's facing. */
++int halo_vr_tutorial_look(float *yaw, float *pitch);
+ /* the aim no longer follows the head (a cinematic, a vehicle's camera
+ taking over): the next halo_vr_aim starts again from the player's facing */
+ void halo_vr_aim_release(void);
+diff --git a/source/game/player_control.c b/source/game/player_control.c
+index 71ed135..5d1f506 100644
+--- a/source/game/player_control.c
++++ b/source/game/player_control.c
+@@ -1771,6 +1771,27 @@ static void player_control_action_test_check_reset_input_blob(
+ 	{
+ 		globals->action_flags |= FLAG(_player_control_look_relative_right_bit);
+ 	}
++#ifdef HALO_VR
++	{
++		/* Controller aiming bypasses the game's relative look input. Let
++		physical head movement satisfy the tutorial's look tests as well,
++		without adding head motion to the controller's weapon aim. */
++		extern int halo_vr_tutorial_look(float *yaw, float *pitch);
++		float yaw, pitch;
++
++		if (halo_vr_tutorial_look(&yaw, &pitch))
++		{
++			if (pitch > 0.f)
++				globals->action_flags |= FLAG(_player_control_look_relative_up_bit);
++			else if (pitch < 0.f)
++				globals->action_flags |= FLAG(_player_control_look_relative_down_bit);
++			if (yaw > 0.f)
++				globals->action_flags |= FLAG(_player_control_look_relative_left_bit);
++			else if (yaw < 0.f)
++				globals->action_flags |= FLAG(_player_control_look_relative_right_bit);
++		}
++	}
++#endif
+ 	if (input->throttle.i > 0.f)
+ 	{
+ 		globals->action_flags |= FLAG(_player_control_move_relative_forward_bit);

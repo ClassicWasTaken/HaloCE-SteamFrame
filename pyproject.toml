@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "halo-steam-frame-installer"
+version = "0.1.0"
+description = "Guided SSH installer for the native ARM64 Halo CE Steam Frame VR port"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = ["paramiko==4.0.0"]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "pyinstaller==6.22.3"]
+
+[project.gui-scripts]
+halo-frame-setup = "halo_frame_installer.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

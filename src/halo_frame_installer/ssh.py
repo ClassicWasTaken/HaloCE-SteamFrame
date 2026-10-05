@@ -1,0 +1,183 @@
+"""Password-only SSH with explicit host-key verification and redacted errors."""
+from __future__ import annotations
+
+import base64
+import hashlib
+import ipaddress
+import re
+import shlex
+import socket
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+import paramiko
+
+
+class SSHError(RuntimeError):
+    pass
+
+
+class CancelledError(RuntimeError):
+    pass
+
+
+def validate_host(host: str) -> str:
+    """Accept an IP address or a simple DNS name, never shell/URL syntax."""
+    host = host.strip()
+    if not host or len(host) > 253 or any(c.isspace() for c in host):
+        raise ValueError("Enter the Frame's IP address or hostname, without a URL.")
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", host):
+        raise ValueError("Enter a valid IP address or hostname.")
+    if any(not label or len(label) > 63 or label.startswith("-") or label.endswith("-")
+           for label in host.split(".")):
+        raise ValueError("Enter a valid hostname.")
+    return host
+
+
+def fingerprint(key: paramiko.PKey) -> str:
+    digest = hashlib.sha256(key.asbytes()).digest()
+    return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
+
+
+@dataclass
+class Settings:
+    host: str
+    password: str = field(repr=False)
+    username: str = "steamos"
+    port: int = 22
+    known_host_fingerprint: str | None = None
+    accept_host_key: Callable[[str, str, str], bool] | None = field(default=None, repr=False)
+    close_steam_for_shortcut: bool = False
+    reinstall_existing: bool = True
+    adopt_existing_native: bool = False
+
+    def __post_init__(self) -> None:
+        self.host = validate_host(self.host)
+        if self.username != "steamos":
+            raise ValueError("This installer supports the Steam Frame's steamos account.")
+        if isinstance(self.port, bool) or not isinstance(self.port, int) or not 1 <= self.port <= 65535:
+            raise ValueError("SSH port must be between 1 and 65535.")
+        if not self.password:
+            raise ValueError("Enter the Frame's SSH password.")
+
+
+class _VerifyHost(paramiko.MissingHostKeyPolicy):
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.accepted_fingerprint: str | None = None
+
+    def missing_host_key(self, client, hostname, key):
+        value = fingerprint(key)
+        expected = self.settings.known_host_fingerprint
+        if expected is not None and value != expected:
+            raise SSHError("The Frame's SSH host key has changed. Connection refused. Verify the device before updating its saved fingerprint.")
+        if expected is None:
+            confirm = self.settings.accept_host_key
+            if confirm is None or not confirm(self.settings.host, key.get_name(), value):
+                raise SSHError("SSH host fingerprint was not approved.")
+        self.accepted_fingerprint = value
+        # Store only in this connection's memory. The GUI may persist the public fingerprint.
+        client.get_host_keys().add(hostname, key.get_name(), key)
+
+
+class SSHConnection:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.client = paramiko.SSHClient()
+        self.policy = _VerifyHost(settings)
+        self.client.set_missing_host_key_policy(self.policy)
+
+    @property
+    def host_fingerprint(self) -> str | None:
+        return self.policy.accepted_fingerprint
+
+    def connect(self) -> None:
+        try:
+            self.client.connect(self.settings.host, port=self.settings.port,
+                                username="steamos", password=self.settings.password,
+                                allow_agent=False, look_for_keys=False,
+                                timeout=15, auth_timeout=20, banner_timeout=20)
+        except (paramiko.AuthenticationException, paramiko.PasswordRequiredException) as exc:
+            raise SSHError("SSH authentication failed. Check the Frame's steamos password.") from None
+        except SSHError:
+            raise
+        except (paramiko.SSHException, OSError, socket.timeout) as exc:
+            # Avoid displaying a library error that might include submitted credentials.
+            raise SSHError("Could not connect to the Frame over SSH. Check its address, Wi-Fi connection, and SSH service.") from None
+        transport = self.client.get_transport()
+        if transport is not None:
+            transport.set_keepalive(15)
+
+    def close(self) -> None:
+        self.client.close()
+
+    def run(self, argv: list[str], *, progress: Callable[[str], None] | None = None,
+            cancel_event: threading.Event | None = None, timeout: float = 3600,
+            on_cancel: Callable[[], None] | None = None) -> str:
+        """Run an argument vector; no secrets are put into a remote command."""
+        command = shlex.join([str(arg) for arg in argv])
+        _, stdout, _ = self.client.exec_command(command, timeout=30)
+        channel = stdout.channel
+        channel.set_combine_stderr(True)
+        chunks: list[bytes] = []
+        pending = bytearray()
+        started = time.monotonic()
+        try:
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    if on_cancel is not None:
+                        on_cancel()
+                    raise CancelledError("Installation cancelled. Existing games and saves were kept.")
+                if time.monotonic() - started > timeout:
+                    if on_cancel is not None:
+                        on_cancel()
+                    raise SSHError("The remote step timed out. You can reconnect and retry; existing games and saves were kept.")
+                while channel.recv_ready():
+                    data = channel.recv(65536)
+                    if not data:
+                        break
+                    chunks.append(data)
+                    pending.extend(data)
+                    while b"\n" in pending:
+                        line, _, rest = pending.partition(b"\n")
+                        pending[:] = rest
+                        if progress is not None:
+                            progress(line.decode("utf-8", "replace"))
+                if channel.exit_status_ready() and not channel.recv_ready():
+                    break
+                time.sleep(0.08)
+            if pending and progress is not None:
+                progress(pending.decode("utf-8", "replace"))
+            result = b"".join(chunks).decode("utf-8", "replace")
+            status = channel.recv_exit_status()
+            if status:
+                # Remote helper emits bounded, user-readable diagnostics. Redact defensively.
+                safe = result.replace(self.settings.password, "[redacted]")
+                raise SSHError(safe[-12000:].strip() or f"Remote step failed (exit {status}).")
+            return result
+        finally:
+            channel.close()
+
+    def put(self, local: Path, remote: str, *, callback=None,
+            cancel_event: threading.Event | None = None) -> None:
+        def update(done: int, total: int):
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledError("Installation cancelled. Existing games and saves were kept.")
+            if callback:
+                callback(done, total)
+        with self.client.open_sftp() as sftp:
+            sftp.get_channel().settimeout(20)
+            try:
+                sftp.put(str(local), remote, callback=update, confirm=True)
+            except (OSError, EOFError, paramiko.SSHException):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise CancelledError("Installation cancelled. Existing games and saves were kept.") from None
+                raise SSHError("The encrypted file transfer stopped. Check the Frame's connection and retry.") from None
