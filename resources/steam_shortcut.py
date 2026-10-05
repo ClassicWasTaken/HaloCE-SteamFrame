@@ -5,6 +5,7 @@ existing entries retain their type/value structure, and an exact backup is kept.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -18,6 +19,9 @@ from pathlib import Path
 
 NAME = "Halo: Combat Evolved VR (Native)"
 LAUNCH_OPTIONS = "SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=0 %command%"
+ARTWORK = (("p", ".jpg", "halo-ce-cover.jpg", "84fee9349f8f00d8ade44c840330ac54ec4b01ef84086d72b8c791d16c8ad248"),
+           ("", ".png", "halo-ce-landscape.png", "179ff6b9bd1a6ba610e9c0c4b9b32c76e525719b253856d547f65eaa02d1f33d"))
+ARTWORK_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
 
 @dataclass
@@ -366,6 +370,119 @@ def _manual(game: Path, reason: str | None = None) -> dict:
     return manual
 
 
+def _artwork_file(path: Path, maximum: int = 8 * 1024 * 1024) -> bytes:
+    """Read only ordinary, private files under a verified directory."""
+    if path.is_symlink() or path.resolve() != path or not path.is_file():
+        raise ValueError("An artwork path is not an ordinary file: " + path.name)
+    info = path.stat()
+    if info.st_nlink != 1 or info.st_size > maximum:
+        raise ValueError("An artwork file is hard-linked or too large: " + path.name)
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise ValueError("An artwork file belongs to another user: " + path.name)
+    return path.read_bytes()
+
+
+def install_artwork(config: Path, appid: int, sources: Path | None = None) -> dict:
+    """Fill missing portrait and wide artwork without replacing custom images.
+
+    Steam names non-Steam artwork with the existing shortcut's unsigned 32-bit
+    app ID. Both files are staged before publication, and hard-link publication
+    fails rather than replacing a file that appears concurrently. A failed
+    transaction removes only unchanged new files this call created.
+    """
+    if not 2 ** 31 <= appid < 2 ** 32:
+        raise ValueError("Artwork needs a valid unsigned non-Steam app ID.")
+    if config.is_symlink() or config.resolve() != config or not config.is_dir():
+        raise ValueError("Steam artwork config must be an ordinary directory.")
+    sources = sources or Path(__file__).resolve().parent / "artwork"
+    if sources.is_symlink() or sources.resolve() != sources or not sources.is_dir():
+        raise ValueError("Bundled Halo artwork was not found. Click Add to Steam again to retry.")
+    payloads = []
+    for suffix, extension, name, expected in ARTWORK:
+        content = _artwork_file(sources / name)
+        if hashlib.sha256(content).hexdigest() != expected:
+            raise ValueError("Bundled Halo artwork failed its integrity check. Re-download the installer and retry.")
+        payloads.append((str(appid) + suffix, extension, content, expected))
+    grid = config / "grid"
+    if grid.is_symlink() or grid.resolve() != grid or (grid.exists() and not grid.is_dir()):
+        raise ValueError("Steam artwork folder is not an ordinary directory.")
+    if steam_running():
+        raise ValueError("Steam reopened before its artwork could be added. Quit it and click Add to Steam again.")
+    # Validate both categories before writing either. Different-extension custom
+    # art wins too; keep existing user images without creating competing files.
+    pending = []
+    preserved = []
+    unchanged = []
+    for stem, extension, content, expected in payloads:
+        siblings = [grid / (stem + ext) for ext in ARTWORK_EXTENSIONS]
+        present = [path for path in siblings if path.exists() or path.is_symlink()]
+        existing = [(path, _artwork_file(path)) for path in present]
+        if existing:
+            if len(existing) == 1 and existing[0][0].name == stem + extension and hashlib.sha256(existing[0][1]).hexdigest() == expected:
+                unchanged.append(existing[0][0].name)
+            else:
+                preserved.extend(path.name for path, _ in existing)
+        else:
+            pending.append((grid / (stem + extension), content, expected))
+    if not pending:
+        return {"status": "preserved" if preserved else "unchanged", "installed": [],
+                "preserved": preserved, "unchanged": unchanged}
+    grid.mkdir(exist_ok=True)
+    staged = []
+    installed = []
+    try:
+        for target, content, expected in pending:
+            fd, name = tempfile.mkstemp(prefix=".halo-artwork-", dir=grid)
+            temporary = Path(name)
+            staged.append(temporary)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.chmod(0o600)
+        for (target, _, expected), temporary in zip(pending, staged):
+            if steam_running():
+                raise ValueError("Steam reopened while artwork was being added. Quit it and click Add to Steam again.")
+            # A custom file with another extension may have appeared after our
+            # initial scan. Keep it and require an explicit retry.
+            if any((grid / (target.stem + ext)).exists() or (grid / (target.stem + ext)).is_symlink() for ext in ARTWORK_EXTENSIONS):
+                raise ValueError("Steam artwork changed during setup. Existing artwork was kept; retry Add to Steam again.")
+            os.link(temporary, target)
+            installed.append((target, expected))
+            temporary.unlink()
+        return {"status": "added", "installed": [path.name for path, _ in installed],
+                "preserved": preserved, "unchanged": unchanged}
+    except BaseException:
+        # Remove staged links first, so a failed temporary-file cleanup cannot
+        # prevent our ordinary-file rollback from recognizing a published file.
+        for path in staged:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        for path, expected in reversed(installed):
+            try:
+                if hashlib.sha256(_artwork_file(path)).hexdigest() == expected:
+                    path.unlink()
+            except (OSError, ValueError):
+                pass
+        raise
+    finally:
+        for path in staged:
+            if path.exists():
+                path.unlink()
+
+
+def _artwork_result(config: Path, appid: int) -> dict:
+    # Artwork failure must never turn a successfully written shortcut into a
+    # false library-registration failure. Report the independent retry instead.
+    try:
+        return install_artwork(config, appid)
+    except (OSError, ValueError, UnicodeError) as error:
+        return {"status": "manual", "reason": str(error),
+                "instructions": "Quit Steam and click Add to Steam again to retry adding Halo box art."}
+
+
 def _write_native_shortcut(home: Path, game: Path) -> dict:
     manual = _manual(game)
     if steam_running():
@@ -390,7 +507,7 @@ def _write_native_shortcut(home: Path, game: Path) -> dict:
         if (path.read_bytes() if path.exists() else None) != before:
             return {**manual, "reason": "Steam's shortcuts changed during setup; no changes were made."}
         if before == after:
-            return _added_result(steam, appid, unchanged=True)
+            return _added_result(steam, appid, unchanged=True, artwork=_artwork_result(config, appid))
         backup = None
         if before is not None:
             backup = config / ("shortcuts.vdf.halo-frame-installer-" + str(time.time_ns()) + ".bak")
@@ -408,6 +525,7 @@ def _write_native_shortcut(home: Path, game: Path) -> dict:
         finally:
             if os.path.exists(temp):
                 os.unlink(temp)
-        return _added_result(steam, appid, backup=str(backup) if backup else None)
+        return _added_result(steam, appid, backup=str(backup) if backup else None,
+                             artwork=_artwork_result(config, appid))
     except (OSError, ValueError, UnicodeError) as error:
         return {**manual, "reason": str(error)}

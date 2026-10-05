@@ -1,16 +1,22 @@
-"""Small, dependency-free desktop widgets for the installer."""
+"""Locally drawn console-dashboard widgets, without additional dependencies."""
 from __future__ import annotations
 
+import math
 import tkinter as tk
 from tkinter import font as tkfont
 
-BG = "#F5F5F7"
-SIDEBAR = "#ECEEF2"
-WHITE = "#FFFFFF"
-TEXT = "#1D1D1F"
-MUTED = "#6E6E73"
-BORDER = "#DEDFE3"
-BLUE = "#007AFF"
+BG = "#101612"
+SIDEBAR = "#151D18"
+SURFACE = "#202A24"
+INSET = "#131C16"
+TEXT = "#E4ECDA"
+MUTED = "#A5B4A3"
+BORDER = "#425440"
+ACCENT = "#B8F548"
+DISABLED = "#7A8975"
+# Retain palette aliases for callers importing the small widget module.
+WHITE = SURFACE
+BLUE = ACCENT
 
 
 def rounded(canvas, x1, y1, x2, y2, radius=12, **kwargs):
@@ -22,8 +28,42 @@ def rounded(canvas, x1, y1, x2, y2, radius=12, **kwargs):
     return canvas.create_polygon(points, smooth=True, splinesteps=24, **kwargs)
 
 
+def chamfer(canvas, x1, y1, x2, y2, cut=10, **kwargs):
+    """An angular inset panel, sized safely for its current canvas."""
+    cut = min(cut, max(0, (x2 - x1) / 2), max(0, (y2 - y1) / 2))
+    return canvas.create_polygon(
+        x1 + cut, y1, x2 - cut, y1, x2, y1 + cut, x2, y2 - cut,
+        x2 - cut, y2, x1 + cut, y2, x1, y2 - cut, x1, y1 + cut,
+        **kwargs)
+
+
+def power_orb(canvas, center_x, center_y, radius):
+    """Original luminous-core drawing; it does not use console artwork."""
+    for scale, fill, outline in (
+        (1.0, "#0B100C", "#516644"), (.92, "#293A23", "#839A5C"),
+        (.82, "#11200D", "#5F833A"), (.69, "#304D1C", "#739F36"),
+        (.56, "#507B26", "#7DB332"), (.44, "#76A831", "#B5EA48"),
+        (.30, "#9BCB3B", "#C6FA63"), (.14, "#C6F56B", "")):
+        r = radius * scale
+        canvas.create_oval(center_x - r, center_y - r, center_x + r,
+                           center_y + r, fill=fill, outline=outline, width=1)
+    r = radius * .82
+    canvas.create_arc(center_x - r, center_y - r, center_x + r, center_y + r,
+                      start=36, extent=107, style="arc", outline="#DAFC97", width=2)
+    r = radius * .98
+    canvas.create_arc(center_x - r, center_y - r, center_x + r, center_y + r,
+                      start=217, extent=71, style="arc", outline="#759C40", width=2)
+    for angle in (45, 135, 225, 315):
+        a = math.radians(angle)
+        canvas.create_line(center_x + math.cos(a) * radius * .99,
+                           center_y + math.sin(a) * radius * .99,
+                           center_x + math.cos(a) * radius * 1.16,
+                           center_y + math.sin(a) * radius * 1.16,
+                           fill="#637759", width=3)
+
+
 class Button(tk.Canvas):
-    """Rounded button with pointer, keyboard, focus and disabled states."""
+    """Beveled menu button with pointer, keyboard, focus and disabled states."""
     def __init__(self, parent, text, command, *, primary=False, subtle=False,
                  width=None, height=40, background=BG):
         self._text = text
@@ -33,10 +73,9 @@ class Button(tk.Canvas):
         self.subtle = subtle
         self.hover = False
         self.focused = False
-        self._font = tkfont.Font(family="Segoe UI", size=10,
-                                weight="bold" if primary else "normal")
+        self._font = tkfont.Font(family="Segoe UI", size=10, weight="bold")
         self._auto_width = width is None
-        width = width or max(80, self._font.measure(text) + 32)
+        width = width or max(80, self._font.measure(text) + 36)
         height = max(height, self._font.metrics("linespace") + 14)
         super().__init__(parent, width=width, height=height, bg=background,
                          highlightthickness=0, bd=0, cursor="hand2", takefocus=True)
@@ -70,18 +109,27 @@ class Button(tk.Canvas):
         height = max(self.winfo_height(), int(super().cget("height")))
         disabled = self._state == "disabled"
         if self.primary:
-            fill = "#B8CDE6" if disabled else "#0068DC" if self.hover else BLUE
-            outline, foreground = fill, WHITE
+            fill = "#29372B" if disabled else "#426923" if self.hover else "#34541F"
+            outline = "#51634C" if disabled else ACCENT
+            foreground = DISABLED if disabled else "#E2FFAA"
+            shine = "#657A4B" if disabled else "#A2CC62"
         else:
-            fill = super().cget("background") if self.subtle else WHITE
+            fill = "#1B251E" if self.subtle else "#28352B"
             if self.hover and not disabled:
-                fill = "#E5EAF1" if self.subtle else "#F6F8FB"
-            outline = fill if self.subtle else BORDER
-            foreground = "#ADADB2" if disabled else BLUE if self.subtle else TEXT
+                fill = "#354C2A"
+            outline = "#354637" if disabled else "#789058" if self.hover else BORDER
+            foreground = DISABLED if disabled else ACCENT if self.subtle else TEXT
+            shine = "#314133" if disabled else "#52664B"
+        rounded(self, 3, 5, width - 3, height - 2, height / 2, fill="#080D09", outline="")
+        rounded(self, 3, 3, width - 3, height - 5, height / 2,
+                fill=fill, outline=outline, width=1)
+        self.create_line(18, 6, width - 18, 6, fill=shine, width=1)
+        self.create_line(20, height - 8, width - 20, height - 8,
+                         fill="#192515", width=1)
         if self.focused and not disabled:
-            rounded(self, 1, 1, width - 1, height - 1, 12, fill="", outline="#78B5FF", width=2)
-        rounded(self, 3, 3, width - 3, height - 3, 10, fill=fill, outline=outline, width=1)
-        self.create_text(width / 2, height / 2, text=self._text, font=self._font, fill=foreground)
+            rounded(self, 1, 1, width - 1, height - 1, height / 2,
+                    fill="", outline=ACCENT, width=2)
+        self.create_text(width / 2, height / 2 - 1, text=self._text, font=self._font, fill=foreground)
 
     def configure(self, cnf=None, **kwargs):
         if cnf:
@@ -89,7 +137,7 @@ class Button(tk.Canvas):
         if "text" in kwargs:
             self._text = kwargs.pop("text")
             if self._auto_width:
-                kwargs["width"] = max(80, self._font.measure(self._text) + 32)
+                kwargs["width"] = max(80, self._font.measure(self._text) + 36)
         if "command" in kwargs:
             self._command = kwargs.pop("command")
         if "state" in kwargs:
@@ -117,10 +165,11 @@ class Button(tk.Canvas):
 
 
 class Card(tk.Canvas):
+    """Chamfered gunmetal enclosure with a green status rail."""
     def __init__(self, parent, *, padding=20, background=BG):
         super().__init__(parent, bg=background, bd=0, highlightthickness=0, height=80)
         self.padding = padding
-        self.content = tk.Frame(self, bg=WHITE)
+        self.content = tk.Frame(self, bg=SURFACE)
         self.window = self.create_window(padding, padding, window=self.content, anchor="nw")
         self.content.bind("<Configure>", self._resize_content)
         self.bind("<Configure>", self._resize)
@@ -133,8 +182,19 @@ class Card(tk.Canvas):
     def _resize(self, event):
         self.itemconfigure(self.window, width=max(1, event.width - self.padding * 2))
         self.delete("border")
-        rounded(self, 1, 1, event.width - 1, event.height - 1, 16,
-                fill=WHITE, outline=BORDER, width=1, tags="border")
+        w, h = event.width, event.height
+        chamfer(self, 2, 3, w - 2, h - 1, 12,
+                fill="#080E09", outline="", tags="border")
+        chamfer(self, 1, 1, w - 2, h - 3, 11,
+                fill=SURFACE, outline=BORDER, width=1, tags="border")
+        self.create_line(12, 2, w - 13, 2, fill="#657259", tags="border")
+        self.create_line(17, 5, min(w - 20, 112), 5,
+                         fill="#719F36", width=2, tags="border")
+        self.create_line(12, h - 5, w - 13, h - 5,
+                         fill="#122016", tags="border")
+        # Static scanlines stay at panel edges, away from text and controls.
+        for y in range(15, max(15, h - 14), 6):
+            self.create_line(4, y, 9, y, fill="#2D3D2D", tags="border")
         self.tag_lower("border")
 
 
@@ -147,7 +207,9 @@ class Page(tk.Frame):
         self.canvas = tk.Canvas(self, bg=BG, bd=0, highlightthickness=0)
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.scrollbar = tk.Scrollbar(self, orient="vertical", command=self.canvas.yview,
-                                      relief="flat", bd=0, width=10)
+                                      relief="flat", bd=0, width=10,
+                                      bg=BORDER, activebackground="#739449",
+                                      troughcolor=INSET, highlightthickness=0)
         self.canvas.configure(yscrollcommand=self._scroll)
         self.body = tk.Frame(self.canvas, bg=BG)
         self.window = self.canvas.create_window(0, 0, window=self.body, anchor="nw")
@@ -175,7 +237,7 @@ class Page(tk.Frame):
 
 class Choice(tk.Canvas):
     def __init__(self, parent, title, subtitle, variable, value, command):
-        super().__init__(parent, bg=WHITE, bd=0, highlightthickness=0,
+        super().__init__(parent, bg=SURFACE, bd=0, highlightthickness=0,
                          height=72, cursor="hand2", takefocus=True)
         self.title_text, self.subtitle = title, subtitle
         self.variable, self.value, self.command = variable, value, command
@@ -206,16 +268,20 @@ class Choice(tk.Canvas):
         width = max(100, self.winfo_width())
         selected = self.variable.get() == self.value
         disabled = self._state == "disabled"
-        rounded(self, 1, 1, width - 1, 70, 12, fill="#F0F6FF" if selected else WHITE,
-                outline=BLUE if selected else BORDER, width=1.5 if selected else 1)
+        line = "#536A40" if disabled else ACCENT if selected else BORDER
+        chamfer(self, 1, 1, width - 1, 70, 8,
+                fill="#2B4022" if selected else INSET,
+                outline=line, width=1.5 if selected else 1)
+        self.create_line(11, 3, width - 12, 3, fill="#70974E" if selected else "#425040")
         if self.focused and not disabled:
-            rounded(self, 4, 4, width - 4, 67, 10, fill="", outline="#78B5FF", width=2)
-        self.create_oval(17, 18, 31, 32, outline=BLUE if selected else "#B4B5BA", width=1.5)
+            chamfer(self, 4, 4, width - 4, 67, 6, fill="", outline=ACCENT, width=2)
+        self.create_oval(17, 18, 31, 32, fill="#132011", outline=line, width=1.5)
         if selected:
-            self.create_oval(21, 22, 27, 28, fill=BLUE, outline="")
+            self.create_oval(21, 22, 27, 28, fill=DISABLED if disabled else ACCENT, outline="")
         self.create_text(43, 25, text=self.title_text, anchor="w",
-                         font=("Segoe UI", 10, "bold"), fill=MUTED if disabled else TEXT)
-        self.create_text(18, 52, text=self.subtitle, anchor="w", font=("Segoe UI", 9), fill=MUTED)
+                         font=("Segoe UI", 10, "bold"), fill=DISABLED if disabled else TEXT)
+        self.create_text(18, 52, text=self.subtitle, anchor="w", font=("Segoe UI", 9),
+                         fill=DISABLED if disabled else MUTED)
 
     def configure(self, cnf=None, **kwargs):
         if cnf:

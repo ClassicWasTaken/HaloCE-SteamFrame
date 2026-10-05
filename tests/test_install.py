@@ -140,6 +140,8 @@ def test_add_to_steam_retry_reuses_files_and_no_build_or_asset_upload():
     assert result.reused and result.steam_appid == 3732925724
     assert fake.closed
     assert all(not remote.endswith(".map") for _, remote in fake.uploads)
+    assert any(remote.endswith("/artwork/halo-ce-cover.jpg") for _, remote in fake.uploads)
+    assert any(remote.endswith("/artwork/halo-ce-landscape.png") for _, remote in fake.uploads)
     assert not any("build" in command[2:] for command in fake.commands)
     assert fake.commands[-1][-1] == "--close-steam"
 

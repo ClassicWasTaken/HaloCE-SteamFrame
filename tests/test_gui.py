@@ -114,7 +114,8 @@ def test_gui_offline_smoke():
                             capture_output=True, text=True, check=True)
     result = json.loads(report.stdout)
     assert result['ok'] and result['guiInitialized']
-    assert result['version'] == '1.1.0'
+    from halo_frame_installer import __version__
+    assert result['version'] == __version__
     assert result['guiPagesInitialized'] == ['gameData', 'connection', 'install']
     assert result['networkConnections'] == 0
 

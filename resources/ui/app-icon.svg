@@ -1,10 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-  <defs>
-    <linearGradient id="blue" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="#3293ff"/><stop offset="1" stop-color="#0759da"/>
-    </linearGradient>
-  </defs>
-  <rect x="4" y="4" width="248" height="248" rx="56" fill="url(#blue)"/>
-  <path d="M58 104 Q58 89 75 89 L181 89 Q198 89 198 104 L194 159 Q193 170 180 170 L157 170 Q148 170 144 160 L138 148 Q128 135 118 148 L112 160 Q108 170 99 170 L76 170 Q63 170 62 159 Z" fill="none" stroke="white" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M93 117 H110 M146 117 H163" stroke="white" stroke-width="10" stroke-linecap="round" opacity=".8"/>
+  <title>Original Master Chief helmet drawing</title>
+  <rect x="4" y="4" width="248" height="248" rx="48" fill="#101713"/>
+  <path d="M64 92 79 49 102 33H154L177 49 192 92 183 154 169 190 147 212H109L87 190 73 154Z" fill="#263821"/>
+  <path d="M68 86 81 51 103 37H153L175 51 188 86 155 98H101Z" fill="#718d45"/>
+  <path d="M82 51 104 39H151L173 51 165 65H91Z" fill="#94b66b"/>
+  <path d="M84 72 101 81H155L172 72" fill="none" stroke="#b1d784" stroke-width="3"/>
+  <path d="M76 98 99 109H157L180 98 174 141 147 168H109L82 141Z" fill="#c69038"/>
+  <path d="M85 111 109 121H152L171 110 166 136 144 153H112L90 136Z" fill="#efc369"/>
+  <path d="M91 114 111 122H151L169 113 163 122 110 129Z" fill="#ffe7a0"/>
+  <path d="M70 78 103 94H153L186 78 181 96 154 112H102L75 96Z" fill="#18231d"/>
+  <path d="M71 117 82 146 109 172H147L174 146 185 117 177 165 165 190 144 207H112L91 190 79 165Z" fill="#5b793c"/>
+  <path d="M106 174 128 183 150 174 144 203H112Z" fill="#8da359"/>
+  <path d="M114 183H142L139 195H117Z" fill="#273626"/>
+  <path d="M79 156 90 171 98 186M177 156 166 171 158 186" fill="none" stroke="#bdd58b" stroke-width="3"/>
+  <g fill="#121b15" stroke="#b1c273"><circle cx="81" cy="147" r="3"/><circle cx="81" cy="159" r="3"/><circle cx="176" cy="147" r="3"/><circle cx="176" cy="159" r="3"/></g>
 </svg>

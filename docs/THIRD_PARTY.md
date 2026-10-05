@@ -52,6 +52,22 @@ The Windows download contains the installer and build instructions, not the comm
 
 The rootless build environment installs [Ubuntu packages](https://ubuntu.com/legal/open-source) and [LLVM](https://llvm.org/docs/DeveloperPolicy.html#license) under their own licenses inside its container. The installer does not relicense those tools or SteamOS/SteamVR. Game artwork, names and data remain the property of their respective rights holders.
 
+## Dashboard and library artwork
+
+The dashboard's circular core, panels, and green menus are independently drawn project resources covered by the project's MIT license. The original Xbox dashboard screenshots and Microsoft's launch-campaign announcement are credited as visual/historical references in [SOURCES.md](SOURCES.md#dashboard-visual-references); the interface is not an official Xbox or Microsoft application.
+
+The installer icon is an original project drawing of Master Chief's helmet, with olive armor and a gold visor, created in code and supplied as SVG, PNG, and multi-size ICO resources. The project's MIT license covers its drawing code. Microsoft retains the underlying rights in Halo, Master Chief, the character design, and associated trademarks; those rights are separate from the installer code's license.
+
+The bundled Halo CE portrait cover and the landscape library layout retain copyrighted Microsoft/Halo cover artwork. The [Halopedia file page](https://www.halopedia.org/File:HCE_Cover_Art.jpg) identifies it as Halo: Combat Evolved cover art and records an [official Halo Facebook image](https://www.facebook.com/Halo/photos/a.137195553028391/1561119617302637/) as the source. This artwork is separate from the installer code's MIT license and is not represented as public domain or freely licensed. Attribution does not transfer rights in the cover or the Halo/Xbox trademarks.
+
+A cover thumbnail identifies Halo inside the installer, and the portrait and landscape images identify the native Halo shortcut in the user's Steam library. The wider image preserves the cover proportions. Existing library art is retained, including custom images with another supported file extension; missing images can be installed. Exact image hashes and source attribution are in the [artwork resource notice](../resources/artwork/README.md). The repository and executable still contain no disc image, commercial map data, product key, or commercial game binary.
+
+## User-supplied menu audio
+
+The original Halo menu music is not bundled with the installer. After the user selects valid local original Xbox data, setup reads the menu loop from that game's `ui.map`, decodes it quietly to a private temporary WAV, and can play it locally with a mute control. It is not downloaded or uploaded to the Frame, and its temporary decoded file is cleared on close. Repair with only remote maps does not supply a preview. The original music retains its rights holders' copyright and is separate from the installer's MIT code license.
+
+The cache layout, sound definitions, and Xbox ADPCM algorithm are based on the pinned native port's CC0 source files credited in [SOURCES.md](SOURCES.md#local-halo-menu-music). The implementation is included as [music.py](../src/halo_frame_installer/music.py). The release packager rejects `.wav`, `.mp3`, `.ogg`, and `.wma` files to keep soundtrack data out of the executable and source bundle.
+
 ## Regenerating notices
 
 Run the following in the same Python environment used for packaging:

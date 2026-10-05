@@ -147,6 +147,12 @@ class Installer:
             for name in ("remote_install.py", "build-native.sh", "steam_shortcut.py", "frame-controls.patch"):
                 check_cancel()
                 connection.put(self.resource_dir / name, remote_resources + "/" + name, cancel_event=cancel_event)
+            # Artwork ships inside the one-file installer; no metadata service or
+            # account API key is needed, including an Add to Steam again retry.
+            for name in ("halo-ce-cover.jpg", "halo-ce-landscape.png"):
+                check_cancel()
+                connection.put(self.resource_dir / "artwork" / name,
+                               remote_resources + "/artwork/" + name, cancel_event=cancel_event)
             remote_helper = remote_resources + "/remote_install.py"
             existing = info.get("existing")
             if existing is not None and not repair:
@@ -188,7 +194,7 @@ class Installer:
                 check_cancel()
                 installed = step("finalize", run_id=True, timeout=600)
             check_cancel()
-            progress("steam", "Adding the native VR game to your Steam account while Steam is closed...", None)
+            progress("steam", "Adding the native VR game and Halo box art to your Steam account while Steam is closed...", None)
             steam = step("shortcut", timeout=90)
             progress("complete", "Native VR game is ready. Start Steam and launch Halo: Combat Evolved VR (Native)." if steam.get("status") == "added" else "Native VR game is installed. One Steam library step remains.", 100)
             return InstallResult(installed["gamePath"], bool(installed.get("reused")),

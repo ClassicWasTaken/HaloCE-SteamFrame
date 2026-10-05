@@ -1,4 +1,4 @@
-"""Build only the installer executable/source, never commercial game files."""
+"""Build installer executable/source without disc images, maps or private files."""
 from __future__ import annotations
 import hashlib
 import json
@@ -9,7 +9,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 EXE_NAME = f"Halo-Steam-Frame-Setup-{VERSION}.exe"
 
 def allowed_source_files():
@@ -23,7 +23,7 @@ def allowed_source_files():
     for path in files:
         if path.is_symlink() or not path.resolve().is_relative_to(ROOT.resolve()):
             raise RuntimeError("Unexpected release source path")
-        if path.suffix.lower() in (".iso", ".xiso", ".map", ".reg", ".key", ".pem") or path.name in ("halo", "hosts.json"):
+        if path.suffix.lower() in (".iso", ".xiso", ".map", ".wav", ".mp3", ".ogg", ".wma", ".reg", ".key", ".pem") or path.name in ("halo", "hosts.json"):
             raise RuntimeError("Private or commercial files must never be packaged")
     return sorted(files)
 

@@ -265,8 +265,10 @@ def preflight(repair=False, adopt=False):
         raise ValueError("SteamVR's ARM64 OpenXR runtime was not found. Run SteamVR on the Frame once, then retry.")
     owned(CACHE)
     beneath(CACHE / "resources", CACHE).mkdir(exist_ok=True)
+    beneath(CACHE / "resources/artwork", CACHE).mkdir(exist_ok=True)
     beneath(CACHE / "runs", CACHE).mkdir(exist_ok=True)
-    for name in ("remote_install.py", "build-native.sh", "steam_shortcut.py", "frame-controls.patch"):
+    for name in ("remote_install.py", "build-native.sh", "steam_shortcut.py", "frame-controls.patch",
+                 "artwork/halo-ce-cover.jpg", "artwork/halo-ce-landscape.png"):
         candidate = beneath(CACHE / "resources" / name, CACHE)
         if candidate.exists() and (not candidate.is_file() or candidate.stat().st_nlink != 1 or candidate.stat().st_uid != os.getuid()):
             raise ValueError("An installer resource path is not a private ordinary file.")

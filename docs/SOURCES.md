@@ -51,6 +51,25 @@ Actual package versions, original license notices and source references are reco
 
 This product includes software developed by in <in@fishtank.com> (the upstream `extract-xiso` component).
 
+## Dashboard visual references
+
+- [Martin Nobel's original Xbox dashboard screenshots](https://www.martinnobel.com/techresearch/original-xbox-dashboard-screenshots) document the console's main menu, settings, and other screens. They serve as visual references for the installer's dark panels, green accents, and beveled interface.
+- [Microsoft's November 5, 2001 Xbox launch campaign announcement](https://news.microsoft.com/source/2001/11/05/microsoft-broadcast-ad-campaign-electrifies-gamers-for-the-launch-of-xbox-on-nov-15/) describes the original console's glowing green jewel campaign and identifies Halo among its launch titles.
+
+These links credit visual and historical references. Dashboard styling is an independent installer interface; the project is unaffiliated with Microsoft or Xbox. Original screenshots, game artwork, and trademarks retain their respective owners' rights.
+
+## Steam library artwork
+
+The bundled portrait image is the original **Halo: Combat Evolved** cover from [Halopedia's cover-art file page](https://www.halopedia.org/File:HCE_Cover_Art.jpg), with the [original JPEG](https://www.halopedia.org/images/8/8e/HCE_Cover_Art.jpg). Halopedia records the [official Halo Facebook image](https://www.facebook.com/Halo/photos/a.137195553028391/1561119617302637/) as its source. The landscape library image arranges the same cover in a wider layout without stretching it.
+
+The cover remains copyrighted Microsoft/Halo artwork; the installer's MIT license does not apply to it. Source attribution and exact hashes are retained in the [artwork resource notice](../resources/artwork/README.md) and described in [THIRD_PARTY.md](THIRD_PARTY.md#dashboard-and-library-artwork). A thumbnail appears inside the installer. The library images are applied only to its native Halo shortcut, preserving user-selected custom art. Artwork registration has not yet been visually checked on a Frame.
+
+## Local Halo menu music
+
+The preview reads only the `sound\music\title1\loops` sound tag from the user's selected original Xbox `ui.map`, either inside an ISO/XISO or in extracted maps. Cache and sound structures are based on the pinned native port's [cache_files.c](https://github.com/startupfoundry/halo-ce-universal/blob/88142798513ebd99fc7c6224023e8b44c05d0106/source/cache/cache_files.c) and [sound_definitions.h](https://github.com/startupfoundry/halo-ce-universal/blob/88142798513ebd99fc7c6224023e8b44c05d0106/source/sound/sound_definitions.h). Xbox ADPCM decoding follows its [dsound_sdl.c implementation](https://github.com/startupfoundry/halo-ce-universal/blob/88142798513ebd99fc7c6224023e8b44c05d0106/port/linux/src/dsound_sdl.c).
+
+The installer decodes the loop into a private temporary Windows WAV with a fixed 12% sample-amplitude gain. Playback loops automatically after local game data validates and has an explicit mute toggle. Closing the installer stops playback and clears its temporary audio. No soundtrack is present in the repository or executable, fetched from a website, or uploaded over SSH. Audio-file extensions are rejected by the release packager. Remote-only repair has no local audio preview, and an unavailable preview does not block installation. The original music remains copyrighted game content; the installer's code license does not apply to it. Playback still needs a listening check.
+
 ## General preservation resources
 
 User-suggested background links: [Vimm's Lair](https://vimm.net/) and [Internet Archive's about page](https://archive.org/about/). These are general references, not Halo file-download links, software dependencies, or assurances of game-data permissions. The installer selects a local original Xbox image/maps supplied by the user; it does not fetch commercial game files. The PC edition is not an input to the native Frame build.
