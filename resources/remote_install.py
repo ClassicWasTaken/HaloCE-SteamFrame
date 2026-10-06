@@ -33,6 +33,7 @@ SUPPORTED_BUILDS = frozenset(("01.01.14.2342", "01.10.12.2276", "01.08.15.1749")
 MAX_MAP_BYTES = 0x11600000
 MAX_TOTAL_BYTES = 4 * 1024 ** 3
 MAX_MANIFEST_BYTES = 64 * 1024
+MAX_WARNING_CHARS = 4000
 MAX_RETRY_RUNS = 32
 MAX_RETRY_ENTRIES = 256
 HOME = pathlib.Path("/home/steamos")
@@ -1248,6 +1249,56 @@ def remove_uninstall_tree(directory, inventory, completed, total):
     completed[0] += 1
 
 
+def recover_interrupted_uninstall():
+    """Finish removing quarantine folders an interrupted uninstall left behind."""
+    notes = []
+    for path in sorted(GAME.parent.glob(".HaloCENativeVR-uninstall-*")):
+        identifier = path.name[len(".HaloCENativeVR-uninstall-"):]
+        if path.is_symlink() or not re.fullmatch(r"[a-f0-9]{32}", identifier):
+            continue
+        # The quarantined game always carries a recognizable ownership marker;
+        # verify it like uninstall_identity does, so a folder that merely
+        # shares the name is never treated as ours.
+        owned_quarantine = False
+        for name in (MARKER, ".codex-halo-native-install.json"):
+            try:
+                if private_json(path / name, path).get("owner") in (OWNER, "codex-halo-native-frame-20261005"):
+                    owned_quarantine = True
+                    break
+            except (OSError, ValueError):
+                continue
+        if not owned_quarantine:
+            continue
+        progress("uninstall", "Finishing an earlier interrupted uninstall...", None)
+        game_closed((path / "halo",))
+        try:
+            remove_uninstall_tree(path, uninstall_inventory(path), [0], 0)
+        except (OSError, ValueError, RuntimeError) as error:
+            # A leftover that can no longer be validated must not block every
+            # future uninstall; finish the rest and name it for manual cleanup.
+            notes.append("An interrupted uninstall left a folder that could not be safely "
+                         "removed and was kept: " + str(path) + " (" + str(error) + "). "
+                         "Remove it manually if you no longer need it.")
+            continue
+        note = "Finished removing native files left by an interrupted uninstall: " + str(path) + "."
+        saved = GAME.parent / ("HaloCENativeVR-saves-" + identifier)
+        try:
+            read_marker(saved / MARKER, OWNER + "-save-backup")
+        except (OSError, ValueError):
+            pass
+        else:
+            note += " Campaign saves and configuration from that uninstall are in " + str(saved) + "."
+        notes.append(note)
+    return notes
+
+
+def join_notes(notes):
+    warning = " ".join(notes)
+    if len(warning) > MAX_WARNING_CHARS:
+        warning = warning[:MAX_WARNING_CHARS].rstrip() + " (earlier notes omitted)"
+    return warning
+
+
 def uninstall(value, close_steam=False, keep_saves=False):
     preflight_uninstall()
     directory = run_dir(value)
@@ -1272,6 +1323,9 @@ def uninstall(value, close_steam=False, keep_saves=False):
             raise ValueError("An unfinished uninstall folder already exists: " + str(path))
     if save_files and (saved.exists() or saved.is_symlink()):
         raise ValueError("The selected save backup already exists. Use a fresh uninstall run.")
+    # Completing an earlier removal is still work this uninstall performs, but
+    # only after every refusal above has cleared.
+    recovered = recover_interrupted_uninstall()
     total = len(save_files) + len(inventory) + (1 if identity else 0)
     completed = [0]
     staged, saved_path, renamed = False, None, False
@@ -1296,8 +1350,14 @@ def uninstall(value, close_steam=False, keep_saves=False):
         if steam.get("status") not in ("removed", "already-absent"):
             return {"gamePath": str(GAME), "uninstalled": False, "savedBackupPath": None, "steam": steam}
         if not identity:
-            return {"gamePath": str(GAME), "uninstalled": True, "alreadyAbsent": True,
-                    "savedBackupPath": metadata.get("savedBackupPath"), "steam": steam}
+            # Leftovers from an interrupted earlier run count as a removal this
+            # run finished, not as "already absent": the user still gets the
+            # completed-removal message and where that run's saves are.
+            response = {"gamePath": str(GAME), "uninstalled": True, "alreadyAbsent": not recovered,
+                        "savedBackupPath": metadata.get("savedBackupPath"), "steam": steam}
+            if recovered:
+                response["warning"] = join_notes(recovered)
+            return response
         game_closed()
         no_active_build()
         if uninstall_inventory(GAME) != inventory:
@@ -1313,17 +1373,17 @@ def uninstall(value, close_steam=False, keep_saves=False):
         remove_uninstall_tree(quarantine, inventory, completed, total)
         renamed = False
         metadata["state"] = "complete"
-        warning = None
+        notes = list(recovered)
         try:
             (directory / MARKER).write_text(json.dumps(metadata) + "\n")
         except OSError:
             # Bookkeeping failure after deletion cannot undo a completed removal.
-            warning = "Halo was removed, but the installer operation record could not be updated."
+            notes.append("Halo was removed, but the installer operation record could not be updated.")
         progress("uninstall", "Native Halo and its Steam shortcut were removed.", 100)
         response = {"gamePath": str(GAME), "uninstalled": True, "savedBackupPath": saved_path,
                     "externalSavePathsPreserved": external, "steam": steam}
-        if warning:
-            response["warning"] = warning
+        if notes:
+            response["warning"] = join_notes(notes)
         return response
     except BaseException as error:
         if renamed and quarantine.exists():
