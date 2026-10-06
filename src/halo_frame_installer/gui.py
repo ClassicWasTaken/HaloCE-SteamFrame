@@ -965,7 +965,6 @@ class App(tk.Tk):
         steam = self.last_result.steam if self.last_result is not None else {}
         pending_steam = (bool(self.last_result and self.last_result.requires_manual_steam_step)
                          or steam.get("artwork", {}).get("status") == "manual"
-                         or steam.get("artwork", {}).get("icon", {}).get("status") == "manual"
                          or steam.get("notes", {}).get("status") == "manual")
         allow_steam_retry = self.last_result is not None and pending_steam and self.mode.get() != "uninstall"
         self.retry_button.configure(state="normal" if not value and allow_steam_retry else "disabled")
@@ -1234,7 +1233,16 @@ class App(tk.Tk):
                     artwork = result.steam.get("artwork", {})
                     artwork_pending = artwork.get("status") == "manual"
                     icon = artwork.get("icon", {})
-                    icon_pending = icon.get("status") == "manual"
+                    # The shortcut icon is cosmetic. Keep its actual result in
+                    # activity without making a successful game operation pending.
+                    if icon:
+                        self._append("Steam shortcut icon (optional): " + str(icon.get("status", "unknown")))
+                        if icon.get("reason"):
+                            self._append("Steam shortcut icon details: " + icon["reason"])
+                        if icon.get("instructions"):
+                            self._append("Steam shortcut icon instructions: " + icon["instructions"])
+                        elif icon.get("status") == "manual":
+                            self._append("Steam shortcut icon instructions: Click Add to Steam again to retry the library icon.")
                     notes = result.steam.get("notes", {})
                     if notes:
                         # The copyable fallback remains safe after the worker clears
@@ -1243,7 +1251,7 @@ class App(tk.Tk):
                                  for key, value in notes.items()}
                         result.steam["notes"] = notes
                     notes_pending = notes.get("status") == "manual"
-                    info_pending = artwork_pending or icon_pending or notes_pending
+                    info_pending = artwork_pending or notes_pending
                     if library_update and info_pending and not result.requires_manual_steam_step:
                         done = "Native Halo VR was kept; some Steam library info needs one more step. Your game and saves are unchanged."
                     self.progress_state.finish(pending=result.requires_manual_steam_step or info_pending or cleanup_pending)
@@ -1251,9 +1259,6 @@ class App(tk.Tk):
                     if artwork_pending:
                         done += "\n\nHalo library art needs one more step.\n" + artwork.get("reason", "")
                         done += "\n" + artwork.get("instructions", STEAM_ART_NOTE)
-                    if icon_pending:
-                        done += "\n\nHalo's library icon needs one more step.\n" + icon.get("reason", "")
-                        done += "\n" + icon.get("instructions", "Click Add to Steam again to retry the library icon.")
                     if notes_pending:
                         done += "\n\nThe game description in Steam Notes needs one more step.\n"
                         done += notes.get("message", STEAM_NOTES_NOTE)
@@ -1263,14 +1268,16 @@ class App(tk.Tk):
                         done += "\n\nYour existing custom game note was kept."
                     if cleanup_pending:
                         done += "\n\nThe game operation finished; connection cleanup needs attention.\n" + cleanup_warning
-                    if info_pending:
+                    if info_pending or result.requires_manual_steam_step:
                         self.retry_button.pack(anchor="w", pady=(11, 0))
+                    else:
+                        self.retry_button.pack_forget()
                     done = self._redact(done)
                     self.phase.set("One more step in Steam" if result.requires_manual_steam_step
                                    else "Ready to play · Steam info pending" if info_pending
                                    else "Connection cleanup needs attention" if cleanup_pending
                                    else "Steam info updated" if library_update
-                                   else "You're ready to play")
+                                   else "Complete")
                     self.status.set(done)
                     self._append(done)
                     extra = "" if library_update else "\n\nXbox controls and motion aiming are enabled. The native port uses its own multiplayer protocol; legacy PC servers and PC saves are incompatible."

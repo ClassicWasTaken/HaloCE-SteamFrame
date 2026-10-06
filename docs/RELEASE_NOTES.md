@@ -10,6 +10,8 @@ This patch addresses the first mission's VR tutorial:
 - **Standing and snap defaults:** Install and Repair apply standing mode and snap turning. Other preferences, including snap angle and refresh rate, remain intact.
 - **Inversion prompt buttons:** tutorial Back no longer leaks into melee or other mapped gameplay actions while pressed or held. The reported crash still needs confirmation in the headset test; the profile's inversion-setting and save logic remain intact.
 - **Tracking loss:** a failed or partial OpenXR pose query cannot reuse an old valid head or hand pose to complete a tutorial target.
+- **Native build fix:** tutorial button handling uses the engine's existing VR-session function, avoiding the missing-symbol failure at the final linking step. Long build errors retain their failure summary in the setup dialog.
+- **Completion display:** an optional Steam shortcut icon that has not loaded no longer holds a successful Install or Repair at 99%. Setup shows Complete at 100%; icon details remain in the activity log.
 
 **Update an existing native installation with Repair.** Save and close Halo, then choose Repair to rebuild the patched game using its verified Xbox maps. The game stays at `~/Games/HaloCENativeVR` with the Steam title **Halo: Combat Evolved VR (Native)**. Existing 1.4.0 profiles and checkpoints remain in `save-v1.4`; this patch does not change the save format.
 

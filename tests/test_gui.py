@@ -1030,16 +1030,14 @@ def test_pending_steam_retry_does_not_read_game_data_or_build_and_clears_credent
 
 
 @WINDOWS_GUI
-@pytest.mark.parametrize('pending', ['icon', 'notes', 'artwork'])
+@pytest.mark.parametrize('pending', ['notes', 'artwork'])
 def test_steam_info_partial_results_stay_actionable_without_claiming_complete_update(app, pending):
     from halo_frame_installer.install import InstallResult
     app.operation = 'library'
     app.password_to_redact = 'offline-secret'
     steam = {'status': 'added', 'artwork': {'status': 'added', 'icon': {'status': 'added'}},
              'notes': {'status': 'added', 'title': 'About Halo', 'content': 'Campaign and controls.'}}
-    if pending == 'icon':
-        steam['artwork']['icon'] = {'status': 'manual', 'reason': 'Icon not persisted. offline-secret'}
-    elif pending == 'notes':
+    if pending == 'notes':
         steam['notes'].update(status='manual', message='Open Steam Notes. offline-secret')
     else:
         steam['artwork']['status'] = 'manual'
@@ -1056,6 +1054,93 @@ def test_steam_info_partial_results_stay_actionable_without_claiming_complete_up
     assert 'offline-secret' not in '\n'.join(app.log_lines)
     assert app._test_dialogs[-1][0] == 'Steam info needs attention'
     assert bool(app.notes_button.winfo_manager()) is (pending == 'notes')
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('operation', ['install', 'repair', 'library'])
+@pytest.mark.parametrize('reason', [
+    "Steam's current shortcut icon has not loaded yet.",
+    'Steam has not yet persisted the Halo icon selection.',
+    "Steam's current shortcut icon could not be verified as empty.",
+])
+def test_optional_shortcut_icon_does_not_block_success_or_show_stale_retry(app, operation, reason):
+    from halo_frame_installer.install import InstallResult
+    app.operation = operation
+    app.mode.set('repair' if operation == 'repair' else 'install')
+    app.password_to_redact = 'offline-secret'
+    icon = {'status': 'manual', 'reason': reason + ' offline-secret',
+            'instructions': "Open Halo's library page before retrying the icon. offline-secret"}
+    steam = {'status': 'added', 'artwork': {'status': 'added', 'icon': icon},
+             'notes': {'status': 'added'}}
+    result = InstallResult('/home/steamos/Games/HaloCENativeVR', False, steam, None,
+                           repaired=operation == 'repair')
+    # A previous required Steam step may have left this action visible.
+    app.retry_button.pack(anchor='w')
+    app.events.put(('complete', result))
+    _drain_events(app)
+    assert float(app.progress['value']) == 100
+    assert app.phase.get() == ('Steam info updated' if operation == 'library' else 'Complete')
+    assert not app.retry_button.winfo_manager()
+    expected_result = {'install': 'installed', 'repair': 'repaired', 'library': 'has been updated'}[operation]
+    assert expected_result in app.status.get()
+    popup_title, popup_message = app._test_dialogs[-1]
+    assert popup_title == ('Steam info updated' if operation == 'library' else 'Setup complete')
+    assert 'icon' not in app.status.get().lower() and 'icon' not in popup_message.lower()
+    assert 'needs one more step' not in popup_message
+    activity = '\n'.join(app.log_lines)
+    assert 'Steam shortcut icon (optional): manual' in activity
+    assert reason in activity and "Open Halo's library page before retrying the icon." in activity
+    assert 'offline-secret' not in activity and '[redacted]' in activity
+    assert result.steam['artwork']['icon'] == icon
+    app.events.put(('clear_password',))
+    app.events.put(('idle',))
+    _drain_events(app)
+    assert not app.retry_button.winfo_manager() and _disabled(app.retry_button)
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('operation', ['install', 'repair', 'library'])
+@pytest.mark.parametrize('pending', ['shortcut', 'artwork', 'notes', 'cleanup'])
+def test_optional_icon_does_not_hide_required_pending_work(app, operation, pending):
+    from halo_frame_installer.install import InstallResult
+    app.operation = operation
+    app.password_to_redact = 'offline-secret'
+    steam = {'status': 'added',
+             'artwork': {'status': 'added', 'icon': {'status': 'manual',
+                 'reason': 'Optional icon has not loaded. offline-secret'}},
+             'notes': {'status': 'added'}}
+    cleanup_warning = None
+    if pending == 'shortcut':
+        steam.update(status='manual', reason='Required Steam entry is missing. offline-secret')
+    elif pending == 'artwork':
+        steam['artwork'].update(status='manual', reason='Required banner is pending. offline-secret')
+    elif pending == 'notes':
+        steam['notes'].update(status='manual', message='Required Notes need a step. offline-secret')
+    else:
+        cleanup_warning = 'Connection cleanup is pending. offline-secret'
+    app.events.put(('complete', InstallResult('/home/steamos/Games/HaloCENativeVR', False,
+        steam, None, repaired=operation == 'repair', cleanup_warning=cleanup_warning)))
+    app.events.put(('clear_password',))
+    app.events.put(('idle',))
+    _drain_events(app)
+    assert float(app.progress['value']) == 99
+    assert app.phase.get() == ('One more step in Steam' if pending == 'shortcut'
+                              else 'Connection cleanup needs attention' if pending == 'cleanup'
+                              else 'Ready to play · Steam info pending')
+    assert bool(app.retry_button.winfo_manager()) is (pending != 'cleanup')
+    assert 'Optional icon' not in app.status.get()
+    assert 'Optional icon' not in app._test_dialogs[-1][1]
+    expected_warning = {'shortcut': 'Required Steam entry is missing.',
+                        'artwork': 'Required banner is pending.',
+                        'notes': 'Required Notes need a step.',
+                        'cleanup': 'Connection cleanup is pending.'}[pending]
+    assert expected_warning in app.status.get() and expected_warning in app._test_dialogs[-1][1]
+    activity = '\n'.join(app.log_lines)
+    assert 'Optional icon has not loaded.' in activity
+    assert 'Click Add to Steam again to retry the library icon.' in activity
+    assert 'offline-secret' not in app.status.get()
+    assert 'offline-secret' not in app._test_dialogs[-1][1]
+    assert 'offline-secret' not in '\n'.join(app.log_lines)
 
 
 @WINDOWS_GUI
@@ -1110,6 +1195,7 @@ def test_preserved_steam_info_is_successful_without_manual_pending(app, icon_sta
     assert float(app.progress['value']) == 100
     assert app.phase.get() == 'Steam info updated'
     assert 'existing custom game note was kept' in app.status.get()
+    assert 'Steam shortcut icon (optional): ' + icon_status in '\n'.join(app.log_lines)
     assert not app.notes_button.winfo_manager()
 
 

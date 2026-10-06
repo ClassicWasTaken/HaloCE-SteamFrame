@@ -8,7 +8,8 @@ import subprocess
 def smoke_test(resources: Path) -> dict:
     from . import __version__
     from .gui import App, APP_TITLE, CONTENT_DISCLOSURE
-    from .install import SOURCE_COMMIT
+    from .install import InstallResult, SOURCE_COMMIT
+    from . import gui
     from .ssh import Settings
     names = ('remote_install.py', 'steam_shortcut.py', 'steam_live.py', 'steam_notes.py', 'build-native.sh',
              'frame-controls.patch', 'ui/app-icon.png', 'ui/app-icon.ico',
@@ -80,6 +81,29 @@ def smoke_test(resources: Path) -> dict:
                 if ('Steam artwork and game Notes are added automatically' not in guidance
                         or hasattr(app, 'library_card')):
                     raise RuntimeError('Packaged install/repair lost automatic Steam info setup')
+            # Exercise the reported icon-readback case in the packaged GUI,
+            # without opening a dialog or connecting to a device.
+            dialogs = []
+            showinfo = gui.messagebox.showinfo
+            gui.messagebox.showinfo = lambda title, message, **kwargs: dialogs.append((title, message))
+            try:
+                for repaired in (False, True):
+                    app.operation = 'install'
+                    app.progress_state.reset()
+                    app.events.put(('complete', InstallResult(
+                        '/home/steamos/Games/HaloCENativeVR', True,
+                        {'status': 'added', 'artwork': {'status': 'unchanged',
+                            'icon': {'status': 'manual',
+                                     'reason': 'Steam shortcut icon has not loaded yet.'}},
+                         'notes': {'status': 'added'}}, None, repaired=repaired)))
+                    app._drain()
+                    if (float(app.progress['value']) != 100 or app.phase.get() != 'Complete'
+                            or app.retry_button.winfo_manager()
+                            or dialogs[-1][0] != 'Setup complete'
+                            or 'icon' in dialogs[-1][1].lower()):
+                        raise RuntimeError('Packaged successful setup was blocked by its optional Steam icon')
+            finally:
+                gui.messagebox.showinfo = showinfo
         finally:
             for callback in app.tk.call('after', 'info'):
                 app.after_cancel(callback)
@@ -95,5 +119,6 @@ def smoke_test(resources: Path) -> dict:
             'usbTransferAvailable': True,
             'steamInfoAutomaticOnInstall': True,
             'steamDescriptionUsesNotes': True,
+            'optionalSteamIconNonBlocking': True,
             'usbToolsBundled': usb_bundled,
             'passwordReprRedacted': True, 'networkConnections': 0}
