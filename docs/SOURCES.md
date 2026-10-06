@@ -22,13 +22,15 @@ Those contributions remain in 1.4.1. The 1.4.0 release changed the engine pin an
 | [bnunu/halo-1](https://github.com/bnunu/halo-1) and [punpckhdq/halo](https://github.com/punpckhdq/halo) | Decompilation lineage identified by the upstream README. |
 | [Upstream XDK declarations](https://github.com/startupfoundry/halo-ce-universal/blob/2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4/port/include/xdk/README.md) | The port supplies its own declarations; installing the proprietary Xbox SDK is unnecessary. |
 
-The installer applies [its documented controls, reticle, tutorial and campaign-menu patch](../resources/frame-controls.patch) to that pinned revision. The 1.4.1 patch's SHA256 is `039c79ee898868b1b10f6194f47e3160df21920a4f27a7b790523ac0b8e98b16`. The 1.4.0 baseline patch's SHA256 was `639f2694cf9574eefca6204e74193b95a72b642128884189ad398c86f7c1b30e`. [Controls and defaults](CONTROLS.md) distinguish these changes from upstream behavior. Performance depends on game scene, headset software and settings; native ARM64 does not imply unlimited performance.
+The installer applies [its documented controls, reticle, tutorial and campaign-menu patch](../resources/frame-controls.patch) to that pinned revision. The 1.4.1 patch's SHA256 is `25b08aac6d725dd33bc294aa41bbc281be15128e79517b78c33c5ed4ade2cd92`. The 1.4.0 baseline patch's SHA256 was `639f2694cf9574eefca6204e74193b95a72b642128884189ad398c86f7c1b30e`. [Controls and defaults](CONTROLS.md) distinguish these changes from upstream behavior. Performance depends on game scene, headset software and settings; native ARM64 does not imply unlimited performance.
 
 ### 1.4.1 tutorial changes
 
 The local patch adds a controller-directed unarmed/default reticle without replacing the equipped weapon's nominal firing preview. It uses local headset gaze for look-at-person checks. Only the five named first-mission calibration panels also accept the unarmed hand-reticle ray within their original five-degree cone. Cryopod look calibration resets across tracking/test transitions and accepts headset movement and legitimate snap or smooth view turns, while preserving recenter, menu, cinematic, AI and remote-player guards. Install and Repair apply standing mode and snap turning while keeping other preferences. These changes require their own headset validation; the 1.4.0 report does not cover them.
 
 Tutorial Back consumes the gameplay actions mapped to B until the physical button is released, while keeping the original inversion-setting and profile-save logic. Production C checks reproduce the prior melee leak; the reported headset crash has not been reproduced locally. OpenXR pose queries clear old validity before querying and require both position and orientation validity, so failed or partial tracking cannot complete a gaze/hand target with an old pose. Focused tests cover those failure and recovery paths using the checked-in Khronos headers.
+
+The tutorial-button regression includes the actual `vr.h` declaration and links the extracted production `halo_vr_running` definition from a separate translation unit. This avoids a test stub masking a missing session-query function. An offline ARM64 relocatable-link check also verifies the new tutorial bridges across the compiled guest objects; it is not a fully linked game or hardware test.
 
 ### Retained 1.4.0 engine changes
 

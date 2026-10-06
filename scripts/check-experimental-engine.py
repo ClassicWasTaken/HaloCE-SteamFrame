@@ -309,9 +309,15 @@ def check_tutorial(source):
             and "halo_vr_tutorial_reset(" in c_function(player, "player_control_action_test_reset")
             and "halo_vr_tutorial_turn(" in c_function(player, "player_control_action_test_note"),
             "The script action tests must share actual VR turns and reset their head anchor.")
-    require("vr_controls" in c_function(player, "player_control_action_test_check_reset_input_blob")
+    buttons = c_function(player, "player_control_action_test_check_reset_input_blob")
+    require("halo_vr_running()" in buttons and "halo_vr_active" not in buttons
+            and "vr_controls" in buttons
             and "_unit_control_use_equipment_bit, FALSE" in c_function(player, "player_control_action_test_check_reset_input_blob"),
             "A consumed VR tutorial Back button must suppress its mapped melee action.")
+    vr = read("port/linux/src/vr.c")
+    c_function(vr, "halo_vr_running")
+    require("int halo_vr_running(void);" in read("port/linux/src/vr.h"),
+            "The tutorial VR-running query must use the real engine API.")
     units = c_function(read("source/units/units.c"), "unit_can_see_point")
     require("vr_render_player_gaze(" in units and "local_player_index == 0" in units
             and "_object_dead_bit" in units,

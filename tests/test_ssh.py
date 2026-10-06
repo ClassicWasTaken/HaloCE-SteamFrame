@@ -147,6 +147,33 @@ def test_remote_failure_shows_diagnostic_without_progress_protocol(monkeypatch, 
     channel.close.assert_called_once()
 
 
+def test_long_remote_failure_keeps_summary_and_final_linker_diagnostic(monkeypatch):
+    summary = 'Native build failed. The existing game was kept.'
+    output = ('HFI_ERROR ' + summary + '\n'
+              + '[1372/1613] LINUX ARM64 CC intermediate_radiosity.o\n' * 300
+              + 'ld.lld: error: undefined symbol: halo_vr_active\n'
+              + 'compiler diagnostic private\n').encode()
+    client = Mock()
+    channel = Mock()
+    states = iter([True, False, False])
+    channel.recv_ready.side_effect = lambda: next(states)
+    channel.recv.return_value = output
+    channel.exit_status_ready.return_value = True
+    channel.recv_exit_status.return_value = 1
+    client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    connection = SSHConnection(Settings('frame', 'private'))
+    with pytest.raises(SSHError) as error:
+        connection.run(['python3', 'helper.py', 'build'])
+    message = str(error.value)
+    assert message.startswith(summary + '\n')
+    assert 'ld.lld: error: undefined symbol: halo_vr_active' in message
+    assert '[earlier details omitted]' in message
+    assert '[redacted]' in message and 'private' not in message
+    assert len(message) <= 12000 and 'HFI_ERROR' not in message
+    channel.close.assert_called_once()
+
+
 def test_long_live_activity_is_forwarded_but_response_memory_is_bounded(monkeypatch):
     from collections import deque
     line = b'HFI_LOG {"stage":"compile","message":"' + b'x' * 1024 + b'"}\n'

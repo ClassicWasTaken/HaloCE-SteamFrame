@@ -1823,7 +1823,7 @@ index f5570893c4325fc94c6fd32e96e1a62d9443a318..6a6a22cbaeb975a928b18d989ac13935
  	short local_player_index,
  	real *autoaim_level,
 diff --git a/source/game/player_control.c b/source/game/player_control.c
-index f954ef16dd217cefa37f2988d4269f8c4cf6db3d..8eae0263e7083fe72e8f5fc4d84010e127bdeb73 100644
+index f954ef16dd217cefa37f2988d4269f8c4cf6db3d..592216bab610e89cdda157ac89f184a79c774280 100644
 --- a/source/game/player_control.c
 +++ b/source/game/player_control.c
 @@ -619,6 +619,17 @@ static void handle_one_player_input(
@@ -1927,8 +1927,8 @@ index f954ef16dd217cefa37f2988d4269f8c4cf6db3d..8eae0263e7083fe72e8f5fc4d84010e1
  {
  	struct player_control_globals_data *globals;
 +#ifdef HALO_VR
-+	extern int halo_vr_active(void);
-+	boolean vr_controls = halo_vr_active() != 0;
++	extern int halo_vr_running(void);
++	boolean vr_controls = halo_vr_running() != 0;
 +#endif
  
  	if (input->accept && (cinematic_can_be_skipped() || network_coop_skip_offered()))
@@ -5551,17 +5551,19 @@ index 0000000000000000000000000000000000000000..d1bbd2b2a0b367bad3c51b3ff2b96a64
 +    main()
 diff --git a/tools/test_vr_tutorial_buttons.py b/tools/test_vr_tutorial_buttons.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..d7c4b483d09176336cac4882992c207b8450ce39
+index 0000000000000000000000000000000000000000..29f780a9132add7a896623679d28377b306220b3
 --- /dev/null
 +++ b/tools/test_vr_tutorial_buttons.py
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,288 @@
 +#!/usr/bin/env python3
 +"""Run production tutorial button consumption and inversion persistence logic.
 +
 +The same extracted input function is compiled with and without its VR branch,
 +so the legacy melee leak and unchanged flat behavior are tested directly. The
 +profile setter is also extracted; its disk/HUD boundaries are controlled stubs,
-+not a claim that the reported headset crash has been reproduced.
++not a claim that the reported headset crash has been reproduced. VR activity
++links a separate translation unit with the real vr.h declaration and extracted
++vr.c definition; no invented activity API is provided by this harness.
 +"""
 +import argparse
 +import os
@@ -5577,7 +5579,7 @@ index 0000000000000000000000000000000000000000..d7c4b483d09176336cac4882992c207b
 +def function(text, name):
 +    hidden = re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"',
 +                    lambda match: re.sub(r'[^\n]', ' ', match.group()), text, flags=re.S)
-+    found = re.search(r'(?:static\s+)?(?:boolean|void)\s+' + re.escape(name) +
++    found = re.search(r'(?:static\s+)?(?:boolean|void|int)\s+' + re.escape(name) +
 +                      r'\s*\([^;]*?\)\s*\{', hidden)
 +    if not found:
 +        raise AssertionError('Missing production function: ' + name)
@@ -5595,6 +5597,7 @@ index 0000000000000000000000000000000000000000..d7c4b483d09176336cac4882992c207b
 +#include <stdlib.h>
 +#include <string.h>
 +#include <wchar.h>
++@@VR_HEADER@@
 +typedef int boolean;
 +#define FALSE 0
 +#define TRUE 1
@@ -5625,8 +5628,8 @@ index 0000000000000000000000000000000000000000..d7c4b483d09176336cac4882992c207b
 +static struct player_control_globals_data fixture_globals;
 +static struct player_control_globals_data *player_control_globals = &fixture_globals;
 +static boolean controls_swapped;
-+static int vr_active, cinematic_skip, coop_skip, voted, skipped, votes, notes, checks;
-+int halo_vr_active(void) { return vr_active; }
++static int cinematic_skip, coop_skip, voted, skipped, votes, notes, checks;
++void fixture_set_vr_running(int initialized);
 +static int cinematic_can_be_skipped(void) { return cinematic_skip; }
 +static int network_coop_skip_offered(void) { return coop_skip; }
 +static int network_coop_vote_skip(void) { ++votes; return voted; }
@@ -5692,7 +5695,8 @@ index 0000000000000000000000000000000000000000..d7c4b483d09176336cac4882992c207b
 +    int swapped;
 +    for(swapped=0;swapped<2;++swapped) {
 +        struct input_blob input;
-+        controls_swapped=swapped; vr_active=1; memset(&fixture_globals,0,sizeof(fixture_globals));
++        controls_swapped=swapped; fixture_set_vr_running(1); memset(&fixture_globals,0,sizeof(fixture_globals));
++        CHECK(halo_vr_running());
 +        CHECK(!player_control_action_test_back()); input=button_input(TRUE);
 +        original_action_test_input(&input);
 +        CHECK(TEST_FLAG(input.unit_control_flags,_unit_control_use_equipment_bit));
@@ -5715,7 +5719,8 @@ index 0000000000000000000000000000000000000000..d7c4b483d09176336cac4882992c207b
 +}
 +static void flat_equivalence(void) {
 +    unsigned requested,suppressed; int swapped,accept,back;
-+    vr_active=0;
++    fixture_set_vr_running(0);
++    CHECK(!halo_vr_running());
 +    for(requested=0;requested<8;++requested) for(suppressed=0;suppressed<8;++suppressed)
 +    for(swapped=0;swapped<2;++swapped) for(accept=0;accept<2;++accept) for(back=0;back<2;++back) {
 +        struct player_control_globals_data initial={0}, expected;
@@ -5732,7 +5737,7 @@ index 0000000000000000000000000000000000000000..d7c4b483d09176336cac4882992c207b
 +}
 +static void inversion_and_accept(void) {
 +    struct input_blob input={0};
-+    vr_active=1; controls_swapped=0; memset(&fixture_globals,0,sizeof(fixture_globals));
++    fixture_set_vr_running(1); controls_swapped=0; memset(&fixture_globals,0,sizeof(fixture_globals));
 +    memset(&player_ui_globals,0,sizeof(player_ui_globals));
 +    player_ui_globals.local_players[0].active_profile_index=7;
 +    player0_look_invert_pitch(TRUE);
@@ -5778,11 +5783,23 @@ index 0000000000000000000000000000000000000000..d7c4b483d09176336cac4882992c207b
 +    args = parser.parse_args()
 +    controls = (ROOT / 'source/game/player_control.c').read_text()
 +    profile = (ROOT / 'source/interface/player_ui.c').read_text()
++    vr = (ROOT / 'port/linux/src/vr.c').read_text()
++    vr_header = ROOT / 'port/linux/src/vr.h'
++    header = vr_header.read_text()
 +    assert 'input->back = gamepad->buttons[_gamepad_analog_button_b];' in controls
 +    assert 'player_profile_save(' in function(profile, 'player0_look_invert_pitch')
 +    actual = function(controls, 'player_control_action_test_check_reset_input_blob')
++    assert 'halo_vr_active' not in actual, 'Do not mask a nonexistent VR activity API.'
++    assert 'halo_vr_running() != 0' in actual
++    assert re.search(r'\bint\s+halo_vr_running\s*\(\s*void\s*\)\s*;', header)
++    production_activity = function(vr, 'halo_vr_running')
++    include = '#include "' + vr_header.as_posix() + '"'
++    activity_source = (include + '\nstatic struct { int initialized; } vr;\n' +
++                       production_activity + '\nvoid fixture_set_vr_running(int initialized) {\n' +
++                       '    vr.initialized = initialized;\n}\n')
 +    harness = HARNESS.replace('@@INPUT@@', actual).replace('@@LEGACY@@', actual.replace(
 +        'player_control_action_test_check_reset_input_blob', 'original_action_test_input'))
++    harness = harness.replace('@@VR_HEADER@@', include)
 +    for placeholder,name in (('@@BACK@@','player_control_action_test_back'),
 +                             ('@@ACCEPT@@','player_control_action_test_accept')):
 +        harness = harness.replace(placeholder,function(controls,name))
@@ -5800,21 +5817,27 @@ index 0000000000000000000000000000000000000000..d7c4b483d09176336cac4882992c207b
 +    compiler = str(Path(shutil.which(compiler) or compiler).resolve())
 +    with tempfile.TemporaryDirectory(prefix='halo-vr-buttons-',ignore_cleanup_errors=True) as directory:
 +        temp=Path(directory); source=temp/'test.c'; executable=temp/('test.exe' if os.name=='nt' else 'test')
++        activity=temp/'vr_activity.c'; activity_object=temp/('vr_activity.obj' if os.name=='nt' else 'vr_activity.o')
 +        source.write_text(harness)
++        activity.write_text(activity_source)
 +        if Path(compiler).name.lower() in ('cl','cl.exe'):
++            activity_command=[compiler,'/nologo','/std:c11','/W4','/WX','/c',
++                              '/Fo:'+str(activity_object),str(activity)]
 +            command=[compiler,'/nologo','/std:c11','/W4','/WX','/D_CRT_SECURE_NO_WARNINGS',
-+                     '/Fe:'+str(executable),'/Fo:'+str(temp/'test.obj'),str(source)]
++                     '/Fe:'+str(executable),'/Fo:'+str(temp/'test.obj'),str(source),str(activity_object)]
 +        else:
-+            command=[compiler,'-std=c11','-Wall','-Wextra','-Werror',str(source),'-o',str(executable)]
-+        if vcvars:
-+            for path in (vcvars,Path(compiler),temp):
-+                if any(character in str(path) for character in '\r\n"&|<>^%!'):
-+                    raise SystemExit('Unsupported shell metacharacter in compiler/temp path.')
-+            batch=temp/'compile.cmd'
-+            batch.write_text('@echo off\ncall "'+str(vcvars)+'" x64 >nul\nif errorlevel 1 exit /b 1\n'+
-+                             subprocess.list2cmdline(command)+'\n')
-+            command=['cmd.exe','/d','/c',str(batch)]
-+        subprocess.run(command,cwd=temp,check=True)
++            activity_command=[compiler,'-std=c11','-Wall','-Wextra','-Werror','-c',str(activity),'-o',str(activity_object)]
++            command=[compiler,'-std=c11','-Wall','-Wextra','-Werror',str(source),str(activity_object),'-o',str(executable)]
++        for index,step in enumerate((activity_command,command)):
++            if vcvars:
++                for path in (vcvars,Path(compiler),temp):
++                    if any(character in str(path) for character in '\r\n"&|<>^%!'):
++                        raise SystemExit('Unsupported shell metacharacter in compiler/temp path.')
++                batch=temp/('compile-'+str(index)+'.cmd')
++                batch.write_text('@echo off\ncall "'+str(vcvars)+'" x64 >nul\nif errorlevel 1 exit /b 1\n'+
++                                 subprocess.list2cmdline(step)+'\n')
++                step=['cmd.exe','/d','/c',str(batch)]
++            subprocess.run(step,cwd=temp,check=True)
 +        subprocess.run([str(executable)],cwd=temp,check=True)
 +
 +

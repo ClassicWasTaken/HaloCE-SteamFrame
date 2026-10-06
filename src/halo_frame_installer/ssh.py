@@ -300,8 +300,18 @@ class SSHConnection:
                 marker = safe.find("HFI_ERROR ")
                 if marker >= 0:
                     safe = safe[marker + len("HFI_ERROR "):]
-                safe = safe.replace(self.settings.password, "[redacted]")
-                raise SSHError(safe[-12000:].strip() or f"Remote step failed (exit {status}).")
+                if self.settings.password:
+                    safe = safe.replace(self.settings.password, "[redacted]")
+                safe = safe.strip()
+                if len(safe) > 12000:
+                    # Keep the helper's summary as well as the final compiler
+                    # diagnostics. A tail-only slice hid "Native build failed"
+                    # and made the popup begin in an unrelated object filename.
+                    summary = safe.splitlines()[0][:500]
+                    separator = "\n... [earlier details omitted]\n"
+                    remaining = 12000 - len(summary) - len(separator)
+                    safe = summary + separator + safe[-remaining:]
+                raise SSHError(safe or f"Remote step failed (exit {status}).")
             return result
         except (paramiko.SSHException, OSError, EOFError):
             if cancel_event is not None and cancel_event.is_set():
