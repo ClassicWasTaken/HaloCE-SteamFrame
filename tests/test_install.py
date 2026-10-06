@@ -596,6 +596,44 @@ def test_repair_preserves_custom_sun_glow_strength(remote):
     assert updated['vr']['sun_glow_strength'] == 0.25
 
 
+def legacy_install(remote, source_commit):
+    game = remote.GAME
+    game.mkdir(parents=True)
+    header = bytearray(64)
+    header[:6] = b'ELF'
+    struct.pack_into('<H', header, 18, 183)
+    for name in ('halo', 'libSDL3.so.0'):
+        (game / name).write_bytes(header)
+    maps = xbox_maps(game, remote)
+    (game / 'xbox-data-manifest.json').write_text(json.dumps(maps))
+    (game / remote.MARKER).write_text(json.dumps({'owner': remote.OWNER,
+        'sourceCommit': source_commit,
+        'files': {name: remote.digest(game / name) for name in ('halo', 'libSDL3.so.0')}}))
+    return game
+
+
+@pytest.mark.parametrize('repair', [False, True])
+def test_interrupted_upgrade_with_played_saves_no_longer_blocks_the_operation(remote, repair):
+    game = legacy_install(remote, remote.LEGACY_SOURCE_COMMIT)
+    (game / 'config.toml').write_text('[paths]\ndata = %s\nsaves = %s\n'
+        % (json.dumps(str(game)), json.dumps(str(remote.save_root()))))
+    remote.save_root().mkdir(parents=True)
+    (remote.save_root() / 'checkpoint.sav').write_bytes(b'played after the interrupted upgrade')
+    assert remote.existing_install(repair=repair)['mapsVerified']
+    assert (remote.save_root() / 'checkpoint.sav').read_bytes() == b'played after the interrupted upgrade'
+
+
+@pytest.mark.parametrize('repair', [False, True])
+def test_foreign_save_destination_still_refused_during_migration(remote, repair):
+    game = legacy_install(remote, remote.LEGACY_SOURCE_COMMIT)
+    (game / 'config.toml').write_text('[paths]\ndata = %s\nsaves = %s\n'
+        % (json.dumps(str(game)), json.dumps(str(game / 'save'))))
+    remote.save_root().mkdir(parents=True)
+    (remote.save_root() / 'foreign.sav').write_bytes(b'not ours')
+    with pytest.raises(ValueError, match='save destination already contains files'):
+        remote.existing_install(repair=repair)
+
+
 @pytest.mark.parametrize('repair', [False, True])
 @pytest.mark.parametrize('unsafe', ['legacy-save-config', 'copied-experimental-config', 'symlinked-save-directory', 'missing-paths'])
 def test_new_reuse_and_repair_guard_save_format_and_keep_experimental_instance(remote, repair, unsafe):

@@ -273,7 +273,18 @@ def existing_install(repair=False, adopt=False):
     migrating = source != SOURCE_COMMIT
     beneath(save_root(), GAME)
     if save_root().exists() and (not save_root().is_dir() or (migrating and any(save_root().iterdir()))):
-        raise ValueError("The version 1.4 save destination already contains files or is not a directory. Existing saves were kept.")
+        # A non-empty save destination during migration is expected when an
+        # interrupted upgrade already published the redirecting configuration:
+        # those files are the user's own version 1.4 saves, written through
+        # that configuration, and must not block finishing the upgrade.
+        interrupted_upgrade = False
+        if migrating and save_root().is_dir() and (GAME / "config.toml").is_file():
+            try:
+                interrupted_upgrade = configured_save_path(tomllib.loads((GAME / "config.toml").read_text())) == str(save_root())
+            except (OSError, ValueError, tomllib.TOMLDecodeError):
+                interrupted_upgrade = False
+        if not interrupted_upgrade:
+            raise ValueError("The version 1.4 save destination already contains files or is not a directory. Existing saves were kept.")
     if (GAME / "config.toml").exists():
         ordinary(GAME / "config.toml")
         settings = tomllib.loads((GAME / "config.toml").read_text())
