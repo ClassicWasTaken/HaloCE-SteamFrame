@@ -224,6 +224,22 @@ class SSHConnection:
                 raise SSHError(str(exc)) from None
             self._usb_forward = None
 
+    handshake_grace = 5.0
+    """Extra seconds a handshake may take past its step timeout before the
+    transport is force-closed; paramiko's internal waits are otherwise
+    unbounded on a live-but-silent session."""
+
+    def _abort_stalled_transport(self) -> None:
+        # Called only by the handshake watchdog: closing the transport unblocks
+        # exec_command/open_sftp waits that ignore every timeout. The session is
+        # unusable anyway and the caller reports a retryable connection error.
+        try:
+            transport = self.client.get_transport()
+            if transport is not None:
+                transport.close()
+        except Exception:
+            pass
+
     def run(self, argv: list[str], *, progress: Callable[[str], None] | None = None,
             cancel_event: threading.Event | None = None, timeout: float = 3600,
             on_cancel: Callable[[], None] | None = None,
@@ -241,6 +257,9 @@ class SSHConnection:
             raise CancelledError("Installation cancelled. Existing games and saves were kept.")
         command = shlex.join([str(arg) for arg in argv])
         started = time.monotonic()
+        watchdog = threading.Timer(min(30, timeout) + self.handshake_grace, self._abort_stalled_transport)
+        watchdog.daemon = True
+        watchdog.start()
         try:
             _, stdout, _ = self.client.exec_command(command, timeout=min(30, timeout))
         except (paramiko.SSHException, OSError, EOFError):
@@ -248,6 +267,8 @@ class SSHConnection:
                 notify_cancelled()
                 raise CancelledError("Installation cancelled. Existing games and saves were kept.") from None
             raise SSHError("The remote command could not be started. Check the Frame's connection and retry.") from None
+        finally:
+            watchdog.cancel()
         channel = stdout.channel
         self._command_channels.add(channel)
         # Build output is delivered live to the activity callback. Keep only a
@@ -266,6 +287,15 @@ class SSHConnection:
                     notify_cancelled()
                     raise RemoteTimeoutError(timeout_message or "The remote step timed out. You can reconnect and retry; existing games and saves were kept.")
                 while channel.recv_ready():
+                    # These checks live inside the receive loop on purpose: a
+                    # device that keeps the channel readable must not make the
+                    # cancel button or the step timeout unreachable.
+                    if cancel_event is not None and cancel_event.is_set():
+                        notify_cancelled()
+                        raise CancelledError("Installation cancelled. Existing games and saves were kept.")
+                    if time.monotonic() - started > timeout:
+                        notify_cancelled()
+                        raise RemoteTimeoutError(timeout_message or "The remote step timed out. You can reconnect and retry; existing games and saves were kept.")
                     data = channel.recv(65536)
                     if not data:
                         break
@@ -280,6 +310,10 @@ class SSHConnection:
                         else:
                             retained_bytes -= len(first)
                     pending.extend(data)
+                    if len(pending) > 1024 * 1024:
+                        # Endless newline-free output must not grow host memory
+                        # without bound; keep only the most recent tail.
+                        del pending[:len(pending) - 64 * 1024]
                     while b"\n" in pending:
                         line, _, rest = pending.partition(b"\n")
                         pending[:] = rest
@@ -338,6 +372,9 @@ class SSHConnection:
         if cancel_event is not None and cancel_event.is_set():
             raise CancelledError("Installation cancelled. Existing games and saves were kept.")
         sftp = None
+        watchdog = threading.Timer(20 + self.handshake_grace, self._abort_stalled_transport)
+        watchdog.daemon = True
+        watchdog.start()
         try:
             sftp = self.client.open_sftp()
             self._sftp_clients.add(sftp)
@@ -348,6 +385,7 @@ class SSHConnection:
                 raise CancelledError("Installation cancelled. Existing games and saves were kept.") from None
             raise SSHError("The encrypted file transfer stopped. Check the Frame's connection and retry.") from None
         finally:
+            watchdog.cancel()
             if sftp is not None:
                 try:
                     sftp.close()

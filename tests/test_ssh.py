@@ -384,3 +384,63 @@ def test_eof_connect_or_keepalive_failure_is_redacted_and_tears_down(monkeypatch
         SSHConnection(Settings('frame', 'private')).connect()
     assert 'private' not in str(error.value)
     client.close.assert_called_once()
+
+
+def test_silent_exec_handshake_is_bounded_by_a_watchdog(monkeypatch):
+    import time as time_module
+    release = threading.Event()
+    transport = Mock()
+    transport.close.side_effect = release.set
+    client = Mock()
+    client.get_transport.return_value = transport
+
+    def blocked_exec(command, timeout=None):
+        release.wait(60)
+        raise paramiko.SSHException('SSH session not active')
+
+    client.exec_command.side_effect = blocked_exec
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    connection = SSHConnection(Settings('frame', 'private'))
+    connection.handshake_grace = 0.05
+    started = time_module.monotonic()
+    with pytest.raises(SSHError, match='could not be started'):
+        connection.run(['python3', 'helper.py'], timeout=0.5)
+    assert time_module.monotonic() - started < 5  # unbounded waits defeat this without the watchdog
+
+
+def test_newline_free_flood_keeps_only_the_recent_tail(monkeypatch):
+    from collections import deque
+    payload = b'A' * (2 * 1024 * 1024) + b'B\n'
+    packets = deque(payload[index:index + 65536] for index in range(0, len(payload), 65536))
+    channel = Mock()
+    channel.recv_ready.side_effect = lambda: bool(packets)
+    channel.recv.side_effect = lambda count: packets.popleft()
+    channel.exit_status_ready.side_effect = lambda: not packets
+    channel.recv_exit_status.return_value = 0
+    client = Mock()
+    client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    lines = []
+    SSHConnection(Settings('frame', 'private')).run(['python3', 'helper.py'], progress=lines.append)
+    assert lines and len(lines[-1]) < 200 * 1024
+
+
+def test_cancel_is_honored_inside_a_readable_channel(monkeypatch):
+    cancel = threading.Event()
+    calls = [0]
+    channel = Mock()
+    channel.recv_ready.return_value = True
+    channel.exit_status_ready.return_value = False
+
+    def recv(count):
+        calls[0] += 1
+        if calls[0] == 3:
+            cancel.set()
+        return b'y' * 65536
+
+    channel.recv.side_effect = recv
+    client = Mock()
+    client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    with pytest.raises(CancelledError):
+        SSHConnection(Settings('frame', 'private')).run(['python3', 'helper.py'], cancel_event=cancel)
