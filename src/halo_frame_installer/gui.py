@@ -102,6 +102,8 @@ class App(tk.Tk):
         self.entries = []
         self.checks = []
         self.last_result = None
+        self._asset_generation = 0
+        self._inspection_cancel = None
         self._build()
         self.source.trace_add("write", lambda *args:self._source_changed())
         self.mode.trace_add("write", lambda *args:self._mode_changed())
@@ -308,26 +310,16 @@ class App(tk.Tk):
         mode_card = self._card(body, "SELECT OPERATION")
         choices = tk.Frame(mode_card, bg=SURFACE)
         choices.pack(fill="x")
-        choices.columnconfigure((0, 1, 2, 3), weight=1, uniform="operations")
+        choices.columnconfigure((0, 1, 2), weight=1, uniform="operations")
         self.mode_choices = []
         for index, title, subtitle, value in (
             (0, "Install", "New native game", "install"),
             (1, "Repair", "Keep saves", "repair"),
-            (2, "Steam info", "Update library", "library"),
-            (3, "Uninstall", "Remove game", "uninstall")):
+            (2, "Uninstall", "Remove game", "uninstall")):
             choice = Choice(choices, title, subtitle, self.mode, value, self._mode_changed)
             choice.grid(row=0, column=index, sticky="ew",
-                        padx=(0, 6) if index == 0 else (6, 0) if index == 3 else (6, 6))
+                        padx=(0, 6) if index == 0 else (6, 0) if index == 2 else (6, 6))
             self.mode_choices.append(choice)
-
-        library = self._card(body, "UPDATE STEAM INFO")
-        self.library_card = library.master
-        self._label(library,
-            "Add Halo cover, banner, logo, and icon artwork, plus a game description in Steam Notes.\n"
-            "Use the native game already installed at ~/Games/HaloCENativeVR.\n"
-            "No ISO or rebuild is needed. Your game, saves, and custom library content are kept.",
-            10, background=SURFACE, wraplength=620).pack(anchor="w")
-        self.library_card.pack_forget()
 
         data_panel = self._card(body)
         self.data_panel = data_panel.master
@@ -540,6 +532,13 @@ class App(tk.Tk):
             pass
 
     def _source_changed(self):
+        self._asset_generation += 1
+        if self._inspection_cancel is not None:
+            self._inspection_cancel.set()
+            self._inspection_cancel = None
+            if self.busy and getattr(self, "operation", None) == "data":
+                self._set_busy(False)
+                self.status.set("Game data selection changed. Choose an original Xbox image or maps folder to continue.")
         source = self.source.get()
         self.source_label.set(Path(source).name if source else "No game data selected")
         if not source:
@@ -550,8 +549,7 @@ class App(tk.Tk):
     def _mode_changed(self):
         repair = self.mode.get() == "repair"
         uninstall = self.mode.get() == "uninstall"
-        library = self.mode.get() == "library"
-        if uninstall or library:
+        if uninstall:
             self.data_panel.pack_forget()
             self.data_consent.pack_forget()
         else:
@@ -561,17 +559,12 @@ class App(tk.Tk):
             self.uninstall_card.pack(fill="x", pady=(0, 10))
         else:
             self.uninstall_card.pack_forget()
-        if library:
-            self.library_card.pack(fill="x", pady=(0, 10))
-        else:
-            self.library_card.pack_forget()
         self.data_title.configure(text="Replacement game data (optional)" if repair else "Your original Xbox game data")
         self.data_note.configure(text="Use valid installed Xbox maps, or choose data to replace them." if repair
                                   else "Choose a disc image or an extracted maps folder.")
         self.connection_steam_note.configure(text="Steam Home and SteamVR stay running. Uninstall may need a manual library step." if uninstall
                                             else "Steam Home and SteamVR stay running. Setup will show any manual library steps.")
         self.install_note.configure(text="Keep this window open until the uninstall finishes and setup disconnects." if uninstall
-                                    else "Keep this window open until Steam info is updated and setup disconnects. No rebuild is needed." if library
                                     else "Keep this window open during setup. Allow 12 GB free on the Frame.\nThe first native build can take a while.")
         self._update_summary()
         self._update_navigation()
@@ -583,24 +576,21 @@ class App(tk.Tk):
     def _update_summary(self):
         source = self.source.get()
         uninstall = self.mode.get() == "uninstall"
-        library = self.mode.get() == "library"
-        self.summary_heading.set("UNINSTALL SUMMARY" if uninstall else "STEAM INFO SUMMARY" if library else "INSTALLATION SUMMARY")
-        self.summary_data_heading.set("NATIVE GAME FOLDER" if uninstall or library else "GAME DATA")
-        self.summary_source.set("~/Games/HaloCENativeVR" if uninstall or library else
+        self.summary_heading.set("UNINSTALL SUMMARY" if uninstall else "INSTALLATION SUMMARY")
+        self.summary_data_heading.set("NATIVE GAME FOLDER" if uninstall else "GAME DATA")
+        self.summary_source.set("~/Games/HaloCENativeVR" if uninstall else
                                 Path(source).name if source else "Use valid Xbox maps already installed on the Frame")
         if self.transport.get() == "usb":
             serial = self.usb_serial.get().strip()
             self.summary_frame.set("USB-C cable" + (f" · {serial}" if serial else " · Detect connected Frame"))
         else:
             self.summary_frame.set(self.host.get().strip() or "Enter your Frame address")
-        self.summary_action_heading.set("CAMPAIGN SAVES" if uninstall else "STEAM LIBRARY" if library else "XBOX CONTROLS")
+        self.summary_action_heading.set("CAMPAIGN SAVES" if uninstall else "XBOX CONTROLS")
         self.summary_action.set(("Keep saves in a backup on the Frame" if self.keep_saves.get()
                                  else "Remove saves contained in the native game folder") if uninstall else
-                                "Cover, banner, logo, icon, and description in Steam Notes" if library else
                                 "A  Jump   ·   B  Melee   ·   X  Reload / use   ·   Y  Change weapon")
         self.summary_note.set("The native game files and its Steam entry will be removed." if uninstall else
-                              "Only Steam library info changes. Existing custom artwork and notes are preserved." if library else
-                              "Motion aiming and the full Xbox-style layout are included.")
+                              "Motion aiming and Xbox-style controls are included. Steam artwork and game Notes are added automatically.")
 
     def _show_page(self, index):
         if not 0 <= index < len(self.pages):
@@ -611,15 +601,12 @@ class App(tk.Tk):
         self.canvas = self.pages[index].canvas
         self.step_count.set(f"SETUP / 0{index + 1} OF 03")
         uninstall = self.mode.get() == "uninstall"
-        library = self.mode.get() == "library"
-        titles = ("UNINSTALL HALO VR" if uninstall else "STEAM INFO" if library else "GAME DATA", "CONNECT FRAME",
-                  "UNINSTALL HALO VR" if uninstall else "UPDATE STEAM INFO" if library else "INSTALL HALO VR")
+        titles = ("UNINSTALL HALO VR" if uninstall else "GAME DATA", "CONNECT FRAME",
+                  "UNINSTALL HALO VR" if uninstall else "INSTALL HALO VR")
         subtitles = ("Choose your save preference before removing the native game." if uninstall else
-                     "Update library art and game notes for your installed native game." if library else
-                     "Install, repair, update Steam info, or uninstall native Halo VR.",
+                     "Install, repair, or uninstall native Halo VR.",
                      "Prepare SSH, then connect to your Steam Frame.",
                      "Review the native game and saves before removing them." if uninstall else
-                     "Refresh the library page without reinstalling the game." if library else
                      "Native VR. Xbox controls. Your Steam library.")
         self.page_title.configure(text=titles[index])
         self.page_subtitle.configure(text=subtitles[index])
@@ -643,7 +630,7 @@ class App(tk.Tk):
             return
         if self.current_page == 0:
             repair = self.mode.get() == "repair"
-            if self.mode.get() not in ("uninstall", "library") and (not self.authorized.get() or (not repair and not self.source.get())):
+            if self.mode.get() != "uninstall" and (not self.authorized.get() or (not repair and not self.source.get())):
                 messagebox.showinfo("Choose game data",
                     "Confirm that you are authorized to use the installed Xbox game data." if repair else
                     "Choose your original Xbox Halo CE image or maps, and confirm you are authorized to use them.", parent=self)
@@ -660,14 +647,11 @@ class App(tk.Tk):
                 messagebox.showinfo("Close games first", GAME_CLOSE_NOTE, parent=self)
                 return
             self.status.set("Setup removes the native game and its Steam entry, with your selected save preference." if self.mode.get() == "uninstall" else
-                            "Setup updates Halo's Steam library art and game notes without rebuilding." if self.mode.get() == "library" else
-                            "Setup builds the native game, applies Xbox controls, and adds Halo to Steam.")
+                            "Setup builds the native game, applies Xbox controls, and automatically adds Steam artwork and game Notes.")
             self._show_page(2)
         else:
             if self.mode.get() == "uninstall":
                 self._uninstall()
-            elif self.mode.get() == "library":
-                self._retry_steam()
             else:
                 self._install(repair=self.mode.get() == "repair")
 
@@ -679,7 +663,6 @@ class App(tk.Tk):
             nav.configure(state="disabled" if self.busy or index > self.max_page else "normal")
         self.back_button.configure(state="disabled" if self.busy or self.current_page == 0 else "normal")
         label = ("Continue" if self.current_page < 2 else "Uninstall Halo VR" if self.mode.get() == "uninstall"
-                 else "Update Steam info" if self.mode.get() == "library"
                  else "Repair Halo VR" if self.mode.get() == "repair" else "Install Halo VR")
         self.next_button.configure(text=label, state="disabled" if self.busy else "normal")
         if self.busy:
@@ -749,6 +732,8 @@ class App(tk.Tk):
             self.status.set("Finishing removal; please wait until setup disconnects.")
             return
         self.cancel.set()
+        if self._inspection_cancel is not None:
+            self._inspection_cancel.set()
         self.phase.set("Cancelling setup…")
         self.status.set("Keep this window open until setup stops. Check activity for the uninstall result." if getattr(self, "operation", None) == "uninstall"
                         else "Keep this window open until setup stops. Existing saves will be kept.")
@@ -838,7 +823,7 @@ class App(tk.Tk):
             "• Save and close games. Steam Home and SteamVR stay running.\n"
             "• Install SteamVR and allow at least 12 GB free on your Frame.\n"
             "• Repair refreshes the program and controls while preserving saves.\n"
-            "• Steam info updates artwork and a Steam Notes description without an ISO or rebuild.\n"
+            "• Install and repair automatically add Steam artwork and a game description in Steam Notes.\n"
             "• Online play uses the native port's own multiplayer protocol.",
             10, background=SURFACE, wraplength=530).pack(anchor="w")
         links = self._card(body, "Project references")
@@ -877,20 +862,50 @@ class App(tk.Tk):
             self.adb_path.set(selected)
 
     def _inspect(self, selected):
-        if self.busy:
+        if self.busy and getattr(self, "operation", None) != "data":
             return
+        selected = Path(selected)
+        if self._inspection_cancel is not None:
+            self._inspection_cancel.set()
+        self._asset_generation += 1
+        generation = self._asset_generation
+        cancel = self._inspection_cancel = threading.Event()
         self.operation = "data"
         self.asset_status.set("Checking original Xbox game data…")
+        self.status.set("Checking the selected Xbox game data…")
+        self.music.load(None)
         self._set_busy(True)
         def worker():
+            summary = error = None
             try:
-                info = inspect_maps(selected) if selected.is_dir() else inspect_image(selected)
-                self.events.put(("asset", str(selected), f"Validated {info.map_count} original Xbox maps • {info.estimated_bytes / 1e9:.2f} GB • {info.build}"))
+                info = (inspect_maps(selected, cancel_event=cancel) if selected.is_dir()
+                        else inspect_image(selected, cancel_event=cancel))
+                summary = f"Validated {info.map_count} original Xbox maps • {info.estimated_bytes / 1e9:.2f} GB • {info.build}"
             except Exception as exc:
-                self.events.put(("error", str(exc)))
+                error = str(exc)
             finally:
-                self.events.put(("idle",))
+                # A single generation-bound result cannot clear the busy state
+                # or report an error for a different, newer selection.
+                self.events.put(("asset", generation, cancel, str(selected), summary, error))
         threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_asset_check(self, generation, cancel, selected, summary, error):
+        if generation != self._asset_generation or cancel is not self._inspection_cancel:
+            return
+        self._inspection_cancel = None
+        self._set_busy(False)
+        if cancel.is_set() or self.cancel.is_set():
+            self.asset_status.set("Game data check cancelled. Choose an original Xbox image or maps folder to retry.")
+            self.status.set("Game data check cancelled. Your previous selection was kept.")
+            self.phase.set("Game data check cancelled")
+            return
+        if error is not None:
+            self._show_setup_error(error)
+            return
+        self.source.set(selected)
+        self.asset_status.set(summary)
+        self.music.load(Path(selected))
+        self.status.set("Game data validated. Connect your Frame next.")
 
     def _settings(self):
         usb = self.transport.get() == "usb"
@@ -932,7 +947,12 @@ class App(tk.Tk):
             choice.configure(state="disabled" if value else "normal")
         for choice in self.transport_choices:
             choice.configure(state="disabled" if value else "normal")
-        allow_steam_retry = self.last_result is not None and self.mode.get() != "uninstall"
+        steam = self.last_result.steam if self.last_result is not None else {}
+        pending_steam = (bool(self.last_result and self.last_result.requires_manual_steam_step)
+                         or steam.get("artwork", {}).get("status") == "manual"
+                         or steam.get("artwork", {}).get("icon", {}).get("status") == "manual"
+                         or steam.get("notes", {}).get("status") == "manual")
+        allow_steam_retry = self.last_result is not None and pending_steam and self.mode.get() != "uninstall"
         self.retry_button.configure(state="normal" if not value and allow_steam_retry else "disabled")
         if allow_steam_retry:
             self.retry_button.pack(anchor="w", pady=(11, 0))
@@ -1032,7 +1052,8 @@ class App(tk.Tk):
                     result = run(settings, None, report, self.cancel)
                     self.events.put(("complete", result))
                     return
-                info = inspect_maps(source) if source.is_dir() else inspect_image(source)
+                info = (inspect_maps(source, cancel_event=self.cancel) if source.is_dir()
+                        else inspect_image(source, cancel_event=self.cancel))
                 if shutil.disk_usage(tempfile.gettempdir()).free < info.estimated_bytes + 512 * 1024**2:
                     raise ValueError("Not enough free temporary space on this computer to prepare the maps.")
                 with tempfile.TemporaryDirectory(prefix="halo-frame-") as temporary:
@@ -1143,9 +1164,7 @@ class App(tk.Tk):
                 event = self.events.get_nowait()
                 kind = event[0]
                 if kind == "asset":
-                    self.source.set(event[1]); self.asset_status.set(event[2])
-                    self.music.load(Path(event[1]))
-                    self.status.set("Game data validated. Connect your Frame next.")
+                    self._finish_asset_check(*event[1:])
                 elif kind == "music":
                     self.music_status.set(self._redact(event[1]))
                 elif kind == "fingerprint":
@@ -1260,18 +1279,7 @@ class App(tk.Tk):
                     self.retry_button.pack_forget()
                     messagebox.showinfo("Uninstall needs attention" if pending else "Uninstall complete", done, parent=self)
                 elif kind == "error":
-                    text = self._redact(event[1])
-                    self.status.set("Setup stopped. See the message below; you can retry.")
-                    self.phase.set("Let's try that again")
-                    if getattr(self, "operation", None) == "connection":
-                        self.connection_status.set("Connection check needs attention. See setup activity, then retry.")
-                    elif getattr(self, "operation", None) == "data":
-                        self.asset_status.set("Couldn't validate this data. Choose an original Xbox image or maps folder.")
-                    self._append(text)
-                    summary = text.strip().splitlines()[0] if text.strip() else "Setup could not finish. You can retry."
-                    if len(summary) > 500 or "\n" in text:
-                        summary = summary[:500] + "\n\nUse the setup activity panel (Show activity) for full details, or Save log for troubleshooting."
-                    messagebox.showerror("Setup needs attention", summary, parent=self)
+                    self._show_setup_error(event[1])
                 elif kind == "clear_password":
                     self.password.set(""); self.password_to_redact = ""
                 elif kind == "idle":
@@ -1283,6 +1291,20 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         self.after(10 if not self.events.empty() else 80, self._drain)
+
+    def _show_setup_error(self, text):
+        text = self._redact(text)
+        self.status.set("Setup stopped. See the message below; you can retry.")
+        self.phase.set("Let's try that again")
+        if getattr(self, "operation", None) == "connection":
+            self.connection_status.set("Connection check needs attention. See setup activity, then retry.")
+        elif getattr(self, "operation", None) == "data":
+            self.asset_status.set("Couldn't validate this data. Choose an original Xbox image or maps folder.")
+        self._append(text)
+        summary = text.strip().splitlines()[0] if text.strip() else "Setup could not finish. You can retry."
+        if len(summary) > 500 or "\n" in text:
+            summary = summary[:500] + "\n\nUse the setup activity panel (Show activity) for full details, or Save log for troubleshooting."
+        messagebox.showerror("Setup needs attention", summary, parent=self)
 
     def _remember(self, host, port, value):
         identity = host if port is None or host.startswith("usb:") else f"{host}:{port}"
@@ -1316,6 +1338,9 @@ class App(tk.Tk):
         self.destroy()
 
     def destroy(self):
+        self._asset_generation += 1
+        if self._inspection_cancel is not None:
+            self._inspection_cancel.set()
         music = getattr(self, "music", None)
         if music is not None:
             music.close()

@@ -198,6 +198,118 @@ class AssetTests(unittest.TestCase):
         self.assertFalse(dest.exists())
         self.assertFalse(list(self.root.glob(".halo-assets-*")))
 
+    def test_cancelled_inspection_does_not_access_source_paths(self):
+        event = threading.Event()
+        event.set()
+        with patch.object(assets, "_XboxImage") as image_reader, \
+                patch.object(assets, "_maps_source") as maps_reader:
+            for inspect in (assets.inspect_image, assets.inspect_maps):
+                with self.subTest(inspect=inspect.__name__):
+                    with self.assertRaises(assets.ExtractionCancelled):
+                        inspect(self.root / "does-not-exist", cancel_event=event)
+            image_reader.assert_not_called()
+            maps_reader.assert_not_called()
+
+    def test_image_directory_inspection_cancels_and_closes_its_file(self):
+        event = threading.Event()
+        opened, inspected_names = [], []
+        original_open, original_name = Path.open, assets._safe_name
+
+        def capture_open(path, *args, **kwargs):
+            stream = original_open(path, *args, **kwargs)
+            opened.append(stream)
+            return stream
+
+        def cancel_after_first_name(name):
+            original_name(name)
+            inspected_names.append(name)
+            event.set()
+
+        with patch.object(Path, "open", capture_open), \
+                patch.object(assets, "_safe_name", cancel_after_first_name):
+            with self.assertRaises(assets.ExtractionCancelled):
+                assets.inspect_image(self.image, cancel_event=event)
+        self.assertEqual(inspected_names, ["maps"])
+        self.assertEqual(len(opened), 1)
+        self.assertTrue(opened[0].closed)
+
+    def test_image_header_inspection_cancels_including_after_last_header(self):
+        original_header, original_open = assets._cache_header, Path.open
+        for cancel_after in (1, len(assets.REQUIRED_MAPS)):
+            with self.subTest(cancel_after=cancel_after):
+                event = threading.Event()
+                opened, inspected = [], []
+
+                def capture_open(path, *args, **kwargs):
+                    stream = original_open(path, *args, **kwargs)
+                    opened.append(stream)
+                    return stream
+
+                def cancel_during_headers(header, name, size):
+                    value = original_header(header, name, size)
+                    inspected.append(name)
+                    if len(inspected) == cancel_after:
+                        event.set()
+                    return value
+
+                with patch.object(Path, "open", capture_open), \
+                        patch.object(assets, "_cache_header", cancel_during_headers):
+                    with self.assertRaises(assets.ExtractionCancelled):
+                        assets.inspect_image(self.image, cancel_event=event)
+                self.assertEqual(len(inspected), cancel_after)
+                self.assertTrue(all(stream.closed for stream in opened))
+
+    def test_maps_inspection_cancels_during_directory_enumeration(self):
+        maps = self.root / "synthetic-maps"
+        maps.mkdir()
+        for name in assets.REQUIRED_MAPS:
+            (maps / name).write_bytes(cache_header())
+        event = threading.Event()
+        inspected_names = []
+        original_name = assets._safe_name
+
+        def cancel_after_first_name(name):
+            original_name(name)
+            inspected_names.append(name)
+            event.set()
+
+        with patch.object(assets, "_safe_name", cancel_after_first_name), \
+                patch.object(assets, "_cache_header") as header_reader:
+            with self.assertRaises(assets.ExtractionCancelled):
+                assets.inspect_maps(maps, cancel_event=event)
+            header_reader.assert_not_called()
+        self.assertEqual(len(inspected_names), 1)
+
+    def test_maps_inspection_and_copy_cancel_during_source_header_validation(self):
+        maps = self.root / "synthetic-maps"
+        maps.mkdir()
+        for name in assets.REQUIRED_MAPS:
+            (maps / name).write_bytes(cache_header())
+        original_header = assets._cache_header
+        for operation in ("inspect", "copy"):
+            for cancel_after in (1, len(assets.REQUIRED_MAPS)):
+                with self.subTest(operation=operation, cancel_after=cancel_after):
+                    event = threading.Event()
+                    inspected = []
+
+                    def cancel_during_headers(header, name, size):
+                        value = original_header(header, name, size)
+                        inspected.append(name)
+                        if len(inspected) == cancel_after:
+                            event.set()
+                        return value
+
+                    dest = self.root / "not-published"
+                    with patch.object(assets, "_cache_header", cancel_during_headers):
+                        with self.assertRaises(assets.ExtractionCancelled):
+                            if operation == "inspect":
+                                assets.inspect_maps(maps, cancel_event=event)
+                            else:
+                                assets.copy_maps(maps, dest, cancel_event=event)
+                    self.assertEqual(len(inspected), cancel_after)
+                    self.assertFalse(dest.exists())
+                    self.assertFalse(list(self.root.glob(".halo-assets-*")))
+
     def test_write_error_removes_owned_staging_and_does_not_publish(self):
         dest = self.root / "failed"
         with patch.object(assets.os, "fsync", side_effect=OSError("synthetic disk full")):

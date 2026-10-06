@@ -32,6 +32,19 @@ STEP = (7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,
 INDEX = (-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8)
 
 
+# The Xbox predictor/index transition depends only on these 89 x 16 states.
+# Calculate it once instead of doing shifts and clamps for every audio sample.
+def _transition(index, nibble):
+    step = STEP[index]
+    difference = (step >> 3) + (step >> 2 if nibble & 1 else 0) + (step >> 1 if nibble & 2 else 0) + (step if nibble & 4 else 0)
+    return (-difference if nibble & 8 else difference), max(0, min(88, index+INDEX[nibble]))
+
+
+TRANSITIONS = tuple(tuple(_transition(index, nibble) for nibble in range(16)) for index in range(89))
+DECODE_BATCH_BLOCKS = 64
+DECODE_YIELD_SECONDS = 0.001
+
+
 class MusicError(ValueError):
     pass
 
@@ -182,24 +195,33 @@ def decode_adpcm(source: bytes, channels: int, cancel_event=None, gain=QUIET_GAI
     block_size = 36*channels
     samples = array('h', [0]) * (len(source)//block_size*64*channels)
     for block in range(len(source)//block_size):
-        if block % 128 == 0:
+        if block % DECODE_BATCH_BLOCKS == 0:
             _cancel(cancel_event)
+            if block:
+                # A background Python thread still competes with Tk for the GIL.
+                # Give the window a regular scheduling opportunity while decoding
+                # long tracks, and promptly abandon a superseded ISO selection.
+                time.sleep(DECODE_YIELD_SECONDS)
+                _cancel(cancel_event)
         position = block*block_size
         for channel in range(channels):
             predictor, index, _ = _fields(source, position+channel*4, '<hBB')
             if index > 88:
                 raise MusicError('Invalid ADPCM predictor index.')
+            sample_position = block*64*channels+channel
             for group in range(8):
                 base = position+4*channels+(group*channels+channel)*4
                 for byte in range(4):
                     packed = source[base+byte]
-                    for half, nibble in enumerate((packed & 15, packed >> 4)):
-                        step = STEP[index]
-                        difference = (step >> 3) + (step >> 2 if nibble & 1 else 0) + (step >> 1 if nibble & 2 else 0) + (step if nibble & 4 else 0)
-                        predictor = max(-32768, min(32767, predictor + (-difference if nibble & 8 else difference)))
-                        index = max(0, min(88, index+INDEX[nibble]))
-                        frame = block*64+group*8+byte*2+half
-                        samples[frame*channels+channel] = int(predictor*gain)
+                    for nibble in (packed & 15, packed >> 4):
+                        difference, index = TRANSITIONS[index][nibble]
+                        predictor += difference
+                        if predictor < -32768:
+                            predictor = -32768
+                        elif predictor > 32767:
+                            predictor = 32767
+                        samples[sample_position] = int(predictor*gain)
+                        sample_position += channels
     if sys.byteorder != 'little':
         samples.byteswap()
     return samples.tobytes()

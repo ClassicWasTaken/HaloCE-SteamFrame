@@ -51,7 +51,7 @@ def smoke_test(resources: Path) -> dict:
                      and hasattr(app, '_game_cover') and hasattr(app, 'music'))
             if str(app.progress['mode']) != 'determinate':
                 raise RuntimeError('Packaged progress bar is not determinate')
-            if {choice.value for choice in app.mode_choices} != {'install', 'repair', 'library', 'uninstall'}:
+            if {choice.value for choice in app.mode_choices} != {'install', 'repair', 'uninstall'}:
                 raise RuntimeError('Packaged operation choices are incomplete')
             if {choice.value for choice in app.transport_choices} != {'network', 'usb'}:
                 raise RuntimeError('Packaged connection choices are incomplete')
@@ -72,17 +72,12 @@ def smoke_test(resources: Path) -> dict:
                 raise RuntimeError('Packaged USB setup must keep Steam Home running')
             settings.password = ''
             app.password.set('')
-            app.mode.set('library')
-            app.source.set('')
-            app.authorized.set(False)
-            app._show_page(0)
-            app._continue()
-            if (app.current_page != 1 or app.data_panel.winfo_manager()
-                    or app.data_consent.winfo_manager() or not app.library_card.winfo_manager()
-                    or 'No ISO or rebuild' not in '\n'.join(
-                        str(widget.cget('text')) for widget in app.library_card.winfo_children()[0].winfo_children()
-                        if 'text' in widget.keys())):
-                raise RuntimeError('Packaged Steam info update requires game data or lost its no-rebuild guidance')
+            for mode in ('install', 'repair'):
+                app.mode.set(mode)
+                guidance = app.summary_note.get()
+                if ('Steam artwork and game Notes are added automatically' not in guidance
+                        or hasattr(app, 'library_card')):
+                    raise RuntimeError('Packaged install/repair lost automatic Steam info setup')
         finally:
             for callback in app.tk.call('after', 'info'):
                 app.after_cancel(callback)
@@ -96,7 +91,7 @@ def smoke_test(resources: Path) -> dict:
             'automaticMusicWithoutToggle': True,
             'keepsSteamSessionRunning': True,
             'usbTransferAvailable': True,
-            'steamInfoUpdateWithoutRebuild': True,
+            'steamInfoAutomaticOnInstall': True,
             'steamDescriptionUsesNotes': True,
             'usbToolsBundled': usb_bundled,
             'passwordReprRedacted': True, 'networkConnections': 0}

@@ -1,6 +1,8 @@
 """Synthetic cache/audio tests; no Halo recordings or game data are fixtures."""
 from pathlib import Path
+import hashlib
 import io
+import random
 import struct
 import sys
 import threading
@@ -87,6 +89,43 @@ def test_stereo_channel_headers_and_interleaving_remain_distinct():
     samples = struct.unpack("<256h", output)
     assert samples[::2] == (120,) * 128
     assert samples[1::2] == (-120,) * 128
+
+
+@pytest.mark.parametrize("channels,expected", [
+    (1, "08af960a705a06d131940dc54952955876058e449f7f37f92727a9ddf37188df"),
+    (2, "62a98442266869a1c78911817c0ab5f4685fc01d5ad42649f60151675baf9d83"),
+])
+def test_batched_decoder_preserves_pcm_for_every_predictor_index(channels, expected):
+    # Golden hashes from the original decoder: varied nibbles, all valid index
+    # states, both clipping limits, and mono/stereo sample ordering.
+    randomizer = random.Random(516)
+    blocks = []
+    for index in range(89):
+        headers = b"".join(struct.pack("<hBB", -32768 if channel % 2 else 32767, index, 0)
+                           for channel in range(channels))
+        blocks.append(headers + bytes(randomizer.randrange(256) for _ in range(32*channels)))
+    output = music.decode_adpcm(b"".join(blocks), channels)
+    assert hashlib.sha256(output).hexdigest() == expected
+
+
+def test_long_decode_yields_regularly_and_checks_cancellation_after_yield(monkeypatch):
+    block = struct.pack("<hBB", 1000, 0, 0) + bytes(32)
+    batches = 3
+    pauses = []
+    monkeypatch.setattr(music.time, "sleep", pauses.append)
+    output = music.decode_adpcm(block*(music.DECODE_BATCH_BLOCKS*batches+1), 1)
+    assert len(output) == (music.DECODE_BATCH_BLOCKS*batches+1)*128
+    assert pauses == [music.DECODE_YIELD_SECONDS]*batches
+
+    cancel = threading.Event()
+
+    def cancel_while_yielded(seconds):
+        assert seconds == music.DECODE_YIELD_SECONDS
+        cancel.set()
+
+    monkeypatch.setattr(music.time, "sleep", cancel_while_yielded)
+    with pytest.raises(music.MusicError, match="cancelled"):
+        music.decode_adpcm(block*(music.DECODE_BATCH_BLOCKS+1), 1, cancel)
 
 
 def test_quiet_gain_is_bounded_and_zero_gain_is_silent():

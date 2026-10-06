@@ -7,9 +7,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/download/v1.3.2/Halo-Steam-Frame-Setup-1.3.2.exe"><strong>DOWNLOAD v1.3.2 — WINDOWS EXE</strong></a><br>
+  <a href="https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/download/v1.3.3/Halo-Steam-Frame-Setup-1.3.3.exe"><strong>DOWNLOAD v1.3.3 — WINDOWS EXE</strong></a><br>
   <sub>One installer file · No administrator rights needed</sub><br>
-  <a href="https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/tag/v1.3.2">Release notes &amp; checksum</a>
+  <a href="https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/tag/v1.3.3">Release notes &amp; checksum</a>
 </p>
 
 Bring Halo: Combat Evolved to Steam Frame with a native ARM64/OpenXR VR port, Xbox-style controls, and Halo artwork in your Steam library. The guided installer uses an original Xbox dashboard style and the classic Halo PC desktop icon.
@@ -20,7 +20,7 @@ You need **Windows 10/11 x64**, a **Steam Frame**, and your own authorized **ori
 2. Enable Frame Developer Mode, set its user password, and connect over **USB-C** or **Wi-Fi / Ethernet**. The app guides you through SSH setup.
 3. Save and close games, keep **Steam Home** running, and click **Install Halo VR**. The first build can take tens of minutes; your Frame needs internet access.
 
-Already installed? Choose **Repair** to refresh the game, **Steam info** to update library artwork and description in Steam Notes without rebuilding, or **Uninstall** to remove it with an optional save backup.
+Steam artwork and the description/control guide in **Notes** are added automatically during Install and Repair. Already installed? Choose **Repair** to refresh the game, or **Uninstall** to remove it with an optional save backup.
 
 The port is experimental; newer USB and library features still need physical Frame verification.
 

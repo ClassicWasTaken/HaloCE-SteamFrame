@@ -149,7 +149,7 @@ def test_gui_offline_smoke():
     from halo_frame_installer import __version__
     assert result['version'] == __version__
     assert result['guiPagesInitialized'] == ['gameData', 'connection', 'install']
-    assert result['steamInfoUpdateWithoutRebuild'] and result['steamDescriptionUsesNotes']
+    assert result['steamInfoAutomaticOnInstall'] and result['steamDescriptionUsesNotes']
     assert result['networkConnections'] == 0
 
 
@@ -883,7 +883,7 @@ def test_revision_guidance_names_validated_rev_2_and_checked_cache_builds(app):
 
 
 @WINDOWS_GUI
-@pytest.mark.parametrize('mode', ['install', 'repair', 'library', 'uninstall'])
+@pytest.mark.parametrize('mode', ['install', 'repair', 'uninstall'])
 @pytest.mark.parametrize('games_closed', [False, True])
 def test_game_closed_acknowledgment_never_authorizes_steam_shutdown(app, mode, games_closed):
     app.mode.set(mode)
@@ -940,37 +940,30 @@ def test_manual_library_fallback_uses_steam_ui_without_teardown_instructions(app
 
 
 @WINDOWS_GUI
-def test_steam_info_navigation_requires_connection_but_no_iso_or_authorization(app):
-    app.mode.set('library')
-    assert app.library_card.winfo_manager()
-    assert not app.data_panel.winfo_manager() and not app.data_consent.winfo_manager()
-    assert not app.uninstall_card.winfo_manager()
-    assert 'No ISO or rebuild' in '\n'.join(_display_text(app.library_card))
-    app._continue()
-    assert app.current_page == 1
-    app._continue()
-    assert app.current_page == 1
-    app.password.set('offline-secret')
-    app._continue()
-    assert app.current_page == 1  # Existing game-close acknowledgement remains required.
-    app.steam_closed.set(True)
-    app._continue()
-    assert app.current_page == 2
-    assert app.primary_button.cget('text') == 'Update Steam info'
-    assert app.summary_source.get() == '~/Games/HaloCENativeVR'
-    assert 'Steam Notes' in app.summary_action.get()
-    assert 'custom artwork and notes are preserved' in app.summary_note.get()
-    app.mode.set('install')
-    app._show_page(0)
-    app._continue()
-    assert app.current_page == 0
-    assert not app.library_card.winfo_manager()
+@pytest.mark.parametrize('mode', ['install', 'repair'])
+def test_install_and_repair_describe_automatic_steam_info_without_separate_choice(app, mode):
+    import tkinter as tk
+    app.mode.set(mode)
+    assert {choice.value for choice in app.mode_choices} == {'install', 'repair', 'uninstall'}
+    assert not hasattr(app, 'library_card')
+    assert 'Steam artwork and game Notes are added automatically' in app.summary_note.get()
     assert app.data_panel.winfo_manager() and app.data_consent.winfo_manager()
+    app._show_page(2)
+    assert app.primary_button.cget('text') == ('Install Halo VR' if mode == 'install' else 'Repair Halo VR')
+    app._show_help()
+    dialogs = [widget for widget in app.winfo_children() if isinstance(widget, tk.Toplevel)]
+    try:
+        text = '\n'.join(_display_text(dialogs[0]))
+        assert 'Install and repair automatically add Steam artwork and a game description in Steam Notes' in text
+        assert 'Steam info updates' not in text
+    finally:
+        for dialog in dialogs:
+            dialog.destroy()
 
 
 @WINDOWS_GUI
 @pytest.mark.parametrize('transport', ['network', 'usb'])
-def test_steam_info_worker_does_not_read_game_data_or_build_and_clears_credentials(app, monkeypatch, transport):
+def test_pending_steam_retry_does_not_read_game_data_or_build_and_clears_credentials(app, monkeypatch, transport):
     from halo_frame_installer import gui, install
     calls = []
 
@@ -990,12 +983,15 @@ def test_steam_info_worker_does_not_read_game_data_or_build_and_clears_credentia
     for name in ('inspect_image', 'inspect_maps', 'extract_image', 'copy_maps'):
         monkeypatch.setattr(gui, name, lambda *args, **kwargs: pytest.fail('Steam info accessed game data.'))
     monkeypatch.setattr(app.music, 'load', lambda *args: pytest.fail('Steam info read game music.'))
-    app.mode.set('library')
     app.transport.set(transport)
     app.steam_closed.set(True)
     app.password.set('offline-secret')
+    app.last_result = install.InstallResult('/home/steamos/Games/HaloCENativeVR', False,
+        {'status': 'added', 'notes': {'status': 'manual', 'title': 'About Halo', 'content': 'Campaign.'}}, None)
     app._show_page(2)
-    app._continue()
+    app._set_busy(False)
+    assert app.retry_button.winfo_manager() and not _disabled(app.retry_button)
+    app.retry_button.invoke()
     _drain_events(app)
     assert len(calls) == 1
     settings, password = calls[0]
@@ -1007,13 +1003,13 @@ def test_steam_info_worker_does_not_read_game_data_or_build_and_clears_credentia
     assert 'native game and saves were kept' in app.status.get()
     assert 'installed.' not in app.status.get()
     assert app._test_dialogs[-1][0] == 'Steam info updated'
+    assert not app.retry_button.winfo_manager()
 
 
 @WINDOWS_GUI
 @pytest.mark.parametrize('pending', ['icon', 'notes', 'artwork'])
 def test_steam_info_partial_results_stay_actionable_without_claiming_complete_update(app, pending):
     from halo_frame_installer.install import InstallResult
-    app.mode.set('library')
     app.operation = 'library'
     app.password_to_redact = 'offline-secret'
     steam = {'status': 'added', 'artwork': {'status': 'added', 'icon': {'status': 'added'}},
@@ -1100,10 +1096,229 @@ def test_all_operation_tile_captions_fit_minimum_width(app):
     app.deiconify()
     app._show_page(0)
     app.update()
-    assert {choice.value for choice in app.mode_choices} == {'install', 'repair', 'library', 'uninstall'}
+    assert {choice.value for choice in app.mode_choices} == {'install', 'repair', 'uninstall'}
     for choice in app.mode_choices:
         for item in choice.find_all():
             if choice.type(item) == 'text':
                 left, top, right, bottom = choice.bbox(item)
                 assert 0 <= left < right <= choice.winfo_width()
                 assert 0 <= top < bottom <= choice.winfo_height()
+
+
+@WINDOWS_GUI
+def test_iso_inspection_runs_off_tk_thread_and_window_remains_responsive(app, monkeypatch, tmp_path):
+    import threading
+    from types import SimpleNamespace
+    from halo_frame_installer import gui
+    real_thread = threading.Thread
+    started, release = threading.Event(), threading.Event()
+    workers, inspected_threads, music_loads = [], [], []
+
+    def inspect(path, *, cancel_event):
+        inspected_threads.append(threading.get_ident())
+        assert path == tmp_path / 'Halo.iso'
+        assert not cancel_event.is_set()
+        started.set()
+        assert release.wait(5)
+        return SimpleNamespace(map_count=24, estimated_bytes=1_000_000_000, build='01.10.12.2276')
+
+    def schedule(**kwargs):
+        thread = real_thread(**kwargs)
+        workers.append(thread)
+        return thread
+
+    monkeypatch.setattr(gui.threading, 'Thread', schedule)
+    monkeypatch.setattr(gui, 'inspect_image', inspect)
+    monkeypatch.setattr(app.music, 'load', music_loads.append)
+    try:
+        app._inspect(tmp_path / 'Halo.iso')
+        assert started.wait(2)
+        assert app.busy and not app.source.get()
+        assert inspected_threads == [workers[0].ident]
+        assert workers[0].ident != threading.get_ident()
+        heartbeat = []
+        app.after(0, lambda: heartbeat.append(True))
+        app.update()
+        assert heartbeat == [True]  # Tk processed a timer while validation was blocked.
+        assert music_loads == [None]  # The old preview stops before reading the new ISO.
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(3)
+    _drain_events(app)
+    assert not app.busy
+    assert app.source.get() == str(tmp_path / 'Halo.iso')
+    assert 'Validated 24 original Xbox maps' in app.asset_status.get()
+    assert music_loads == [None, tmp_path / 'Halo.iso']
+
+
+@pytest.fixture
+def queued_inspection(app, monkeypatch):
+    from types import SimpleNamespace
+    from halo_frame_installer import gui
+    workers, music_loads = [], []
+
+    class DeferredThread:
+        def __init__(self, target, **kwargs):
+            self.target = target
+            workers.append(self)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(gui.threading, 'Thread', DeferredThread)
+    monkeypatch.setattr(app.music, 'load', music_loads.append)
+    return SimpleNamespace(workers=workers, music_loads=music_loads,
+                           info=SimpleNamespace(map_count=24, estimated_bytes=1_000_000_000, build='01.10.12.2276'))
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('old_error', [False, True])
+@pytest.mark.parametrize('old_finishes_first', [False, True])
+def test_late_inspection_results_do_not_replace_new_selection_or_clear_its_busy_state(app, monkeypatch, tmp_path, queued_inspection, old_error, old_finishes_first):
+    from halo_frame_installer import gui
+    old, new = tmp_path / 'old.iso', tmp_path / 'new.iso'
+    cancellations = {}
+
+    def inspect(path, *, cancel_event):
+        cancellations[path] = cancel_event
+        if path == old and old_error:
+            raise ValueError('The old image was invalid.')
+        return queued_inspection.info
+
+    monkeypatch.setattr(gui, 'inspect_image', inspect)
+    app._inspect(old)
+    old_cancel = app._inspection_cancel
+    app._inspect(new)
+    assert old_cancel.is_set()
+    if old_finishes_first:
+        queued_inspection.workers[0].target()
+        _drain_events(app)
+        assert app.busy and not app.source.get()
+        assert app.asset_status.get() == 'Checking original Xbox game data…'
+    queued_inspection.workers[1].target()
+    _drain_events(app)
+    if not old_finishes_first:
+        queued_inspection.workers[0].target()
+        _drain_events(app)
+    assert app.source.get() == str(new)
+    assert app.status.get() == 'Game data validated. Connect your Frame next.'
+    assert not app.busy
+    assert cancellations[old].is_set() and not cancellations[new].is_set()
+    assert queued_inspection.music_loads == [None, None, new]
+    assert not app._test_dialogs
+    assert 'old image' not in '\n'.join(app.log_lines)
+
+
+@WINDOWS_GUI
+def test_clearing_source_cancels_inspection_and_ignores_its_late_success(app, monkeypatch, tmp_path, queued_inspection):
+    from halo_frame_installer import gui
+    monkeypatch.setattr(gui, 'inspect_image', lambda path, **kwargs: queued_inspection.info)
+    app._inspect(tmp_path / 'Halo.iso')
+    cancel = app._inspection_cancel
+    app.source.set('')
+    assert cancel.is_set() and not app.busy
+    queued_inspection.workers[0].target()
+    _drain_events(app)
+    assert not app.source.get()
+    assert app.asset_status.get() == gui.XBOX_REVISION_NOTE
+    assert queued_inspection.music_loads == [None, None]
+    assert not app._test_dialogs
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('folder', [False, True])
+def test_cancelled_source_inspection_keeps_previous_selection_and_does_not_start_music(app, monkeypatch, tmp_path, queued_inspection, folder):
+    from halo_frame_installer import gui
+    selected = tmp_path / ('maps' if folder else 'Halo.iso')
+    if folder:
+        selected.mkdir()
+    calls = []
+
+    def inspect(path, *, cancel_event):
+        calls.append((path, cancel_event.is_set()))
+        # Even a reader finishing after cancellation cannot accept its result.
+        return queued_inspection.info
+
+    monkeypatch.setattr(gui, 'inspect_maps' if folder else 'inspect_image', inspect)
+    app.source.set('previous.iso')
+    app._inspect(selected)
+    app._cancel_setup()
+    queued_inspection.workers[0].target()
+    _drain_events(app)
+    assert calls == [(selected, True)]
+    assert app.source.get() == 'previous.iso'
+    assert not app.busy
+    assert app.phase.get() == 'Game data check cancelled'
+    assert 'previous selection was kept' in app.status.get()
+    assert queued_inspection.music_loads == [None]
+    assert not app._test_dialogs
+
+
+@WINDOWS_GUI
+def test_current_inspection_failure_preserves_selection_and_readable_redacted_error(app, monkeypatch, tmp_path, queued_inspection):
+    from halo_frame_installer import gui
+    def invalid(path, *, cancel_event):
+        raise ValueError('Invalid original Xbox image. offline-secret\nHeader validation failed.')
+    monkeypatch.setattr(gui, 'inspect_image', invalid)
+    app.source.set('previous.iso')
+    app.password_to_redact = 'offline-secret'
+    app._inspect(tmp_path / 'invalid.iso')
+    queued_inspection.workers[0].target()
+    _drain_events(app)
+    assert not app.busy
+    assert app.source.get() == 'previous.iso'
+    assert "Couldn't validate this data" in app.asset_status.get()
+    assert len(app._test_dialogs) == 1
+    assert 'Header validation failed.' in '\n'.join(app.log_lines)
+    assert 'offline-secret' not in '\n'.join(app.log_lines)
+    assert 'offline-secret' not in app._test_dialogs[0][1]
+    assert queued_inspection.music_loads == [None]
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('folder', [False, True])
+def test_cancel_during_install_revalidation_stops_before_extraction_and_clears_credentials(app, monkeypatch, tmp_path, folder):
+    from halo_frame_installer import gui, install
+    selected = tmp_path / ('maps' if folder else 'Halo.iso')
+    if folder:
+        selected.mkdir()
+    name = 'inspect_maps' if folder else 'inspect_image'
+    inspect_source = getattr(gui, name)
+    inspections, settings_used = [], []
+    get_settings = app._settings
+
+    def remember_settings():
+        settings = get_settings()
+        settings_used.append(settings)
+        return settings
+
+    def cancel_validation(path, *, cancel_event):
+        assert cancel_event is app.cancel
+        inspections.append(path)
+        # Model Cancel arriving as the worker starts its second validation.
+        cancel_event.set()
+        return inspect_source(path, cancel_event=cancel_event)
+
+    monkeypatch.setattr(app, '_settings', remember_settings)
+    monkeypatch.setattr(gui, name, cancel_validation)
+    monkeypatch.setattr(gui.threading, 'Thread', _ImmediateThread)
+    for action in ('extract_image', 'copy_maps'):
+        monkeypatch.setattr(gui, action, lambda *args, **kwargs: pytest.fail('Cancelled validation extracted maps.'))
+    monkeypatch.setattr(install, 'run', lambda *args, **kwargs: pytest.fail('Cancelled validation began installation.'))
+    app.source.set(str(selected))
+    app.authorized.set(True)
+    app.steam_closed.set(True)
+    app.password.set('offline-secret')
+    app._install()
+    _drain_events(app)
+    assert inspections == [selected]
+    assert app.cancel.is_set()
+    assert not app.busy and not app.installing
+    assert not app.password.get() and not settings_used[0].password
+    assert not app.password_to_redact
+    assert app.source.get() == str(selected)
+    assert 'cancelled' in '\n'.join(app.log_lines).lower()
+    assert 'offline-secret' not in '\n'.join(app.log_lines)
+    assert float(app.progress['value']) == 0
+    assert not _disabled(app.primary_button)

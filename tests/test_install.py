@@ -173,6 +173,60 @@ def test_setup_reports_success_only_after_ssh_disconnects():
     assert seen[-3:] == ['disconnect', 'disconnected', 'complete']
 
 
+@pytest.mark.parametrize("mode", ["fresh", "repair"])
+def test_normal_install_and_repair_automatically_publish_steam_information(tmp_path, mode):
+    steam_info = {"status": "added", "appid": 3732925724, "libraryAdded": True,
+                  "artwork": {"status": "added", "installed": ["cover", "header", "hero", "logo"],
+                              "icon": {"status": "added"}},
+                  "notes": {"ok": True, "status": "added", "title": "About and controls"}}
+
+    class SuccessfulConnection(FakeConnection):
+        def __init__(self, settings):
+            super().__init__(settings, existing=mode == "repair")
+            self.events = []
+
+        def put(self, local, remote, **kwargs):
+            self.events.append(("upload", Path(local).name))
+            super().put(local, remote, **kwargs)
+
+        def run(self, argv, **kwargs):
+            if argv[1] != "-c" and argv[2] in ("build", "finalize", "shortcut"):
+                self.commands.append(argv)
+                self.events.append(("step", argv[2]))
+                responses = {"build": {"built": True},
+                             "finalize": {"gamePath": "/home/steamos/Games/HaloCENativeVR",
+                                          "reused": False, "repaired": mode == "repair"},
+                             "shortcut": steam_info}
+                return "HFI_RESULT " + json.dumps(responses[argv[2]])
+            return super().run(argv, **kwargs)
+
+    settings = Settings("frame", "private", reinstall_existing=mode == "repair",
+                        close_steam_for_shortcut=True)
+    fake = SuccessfulConnection(settings)
+    maps = None
+    if mode == "fresh":
+        maps = tmp_path / "maps"
+        maps.mkdir()
+        for name in EXPECTED_MAPS:
+            (maps / name).write_bytes(name.encode())
+    result = Installer(lambda _: fake, RESOURCES).run(settings, maps)
+
+    steps = [argv[2] for argv in fake.commands if argv[1] != "-c"]
+    assert steps == ["prepare", "build", "finalize", "shortcut"]
+    assert fake.commands[0][3] == "preflight"
+    assert steps.count("shortcut") == 1
+    assert fake.events.index(("step", "finalize")) < fake.events.index(("step", "shortcut"))
+    for filename in ("steam_notes.py", "halo-ce-cover.jpg", "halo-ce-landscape.png",
+                     "halo-ce-hero.jpg", "halo-ce-logo.png", "halo-ce-icon.png"):
+        assert fake.events.index(("upload", filename)) < fake.events.index(("step", "build"))
+    assert result.steam == steam_info
+    assert result.repaired is (mode == "repair")
+    assert fake.closed
+    assert not any("--close-steam" in argv for argv in fake.commands)
+    uploaded_maps = [remote for _, remote in fake.uploads if remote.endswith(".map")]
+    assert len(uploaded_maps) == (len(EXPECTED_MAPS) if mode == "fresh" else 0)
+
+
 def test_default_existing_install_rebuilds_without_uploading_maps():
     fake = FakeConnection(Settings("frame", "private"))
     with pytest.raises(SSHError, match="build failed"):

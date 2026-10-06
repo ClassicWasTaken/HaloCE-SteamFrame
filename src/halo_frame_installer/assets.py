@@ -119,6 +119,7 @@ def _cache_header(header: bytes, name: str, actual_size: int) -> str:
 
 class _XboxImage:
     def __init__(self, path: Path, cancel_event=None):
+        _cancel(cancel_event)
         _regular_file(path)
         self.path = path
         self.image: BinaryIO = path.open("rb")
@@ -161,6 +162,7 @@ class _XboxImage:
                 ranges.append((offset, end))
                 self.image.seek(offset)
                 builds.add(_cache_header(self.image.read(SECTOR_SIZE), entry.name, entry.size))
+            _cancel(cancel_event)
             self.info = _info(builds, sum(entry.size for entry in self.maps), self.partition)
         except BaseException:
             self.image.close()
@@ -170,6 +172,7 @@ class _XboxImage:
         self.image.close()
 
     def entries(self, sector: int, length: int) -> list[_Entry]:
+        _cancel(self.cancel_event)
         if not 0 < length <= MAX_DIRECTORY_BYTES:
             raise AssetError("Invalid Xbox directory length.")
         offset = self.partition + sector * SECTOR_SIZE
@@ -224,15 +227,19 @@ def _info(builds: set[str], total: int, partition: int | None) -> ImageInfo:
     return ImageInfo("original-xbox", next(iter(builds)), total, len(REQUIRED_MAPS), partition)
 
 
-def inspect_image(path: str | Path) -> ImageInfo:
-    image = _XboxImage(Path(path))
+def inspect_image(path: str | Path, cancel_event=None) -> ImageInfo:
+    """Inspect image metadata, checking cancellation throughout validation."""
+    _cancel(cancel_event)
+    image = _XboxImage(Path(path), cancel_event)
     try:
+        _cancel(cancel_event)
         return image.info
     finally:
         image.close()
 
 
-def _maps_source(path: Path) -> tuple[Path, list[Path], ImageInfo]:
+def _maps_source(path: Path, cancel_event=None) -> tuple[Path, list[Path], ImageInfo]:
+    _cancel(cancel_event)
     if not path.is_dir() or _is_link(path):
         raise AssetError("Select a real maps directory, not a link.")
     candidate = path / "maps"
@@ -242,6 +249,7 @@ def _maps_source(path: Path) -> tuple[Path, list[Path], ImageInfo]:
         path = candidate
     names: dict[str, Path] = {}
     for count, entry in enumerate(path.iterdir(), 1):
+        _cancel(cancel_event)
         if count > MAX_DIRECTORY_ENTRIES:
             raise AssetError("The maps directory has too many entries.")
         _safe_name(entry.name)
@@ -251,22 +259,27 @@ def _maps_source(path: Path) -> tuple[Path, list[Path], ImageInfo]:
         if folded in names:
             raise AssetError("Case-insensitive duplicate filenames in the maps directory.")
         names[folded] = entry
+    _cancel(cancel_event)
     missing = set(REQUIRED_MAPS) - names.keys()
     if missing:
         raise AssetError("Incomplete maps directory: missing " + ", ".join(sorted(missing)))
     files = [names[name] for name in REQUIRED_MAPS]
     builds, total = set(), 0
     for file in files:
+        _cancel(cancel_event)
         _regular_file(file)
         with file.open("rb") as source:
             size = os.fstat(source.fileno()).st_size
             builds.add(_cache_header(source.read(SECTOR_SIZE), file.name, size))
             total += size
+    _cancel(cancel_event)
     return path, files, _info(builds, total, None)
 
 
-def inspect_maps(path: str | Path) -> ImageInfo:
-    return _maps_source(Path(path))[2]
+def inspect_maps(path: str | Path, cancel_event=None) -> ImageInfo:
+    """Inspect extracted map headers without copying, with optional cancellation."""
+    _cancel(cancel_event)
+    return _maps_source(Path(path), cancel_event)[2]
 
 
 def _new_staging(dest: Path) -> Path:
@@ -365,7 +378,7 @@ def copy_maps(source: str | Path, dest: str | Path, progress: Progress | None = 
               cancel_event=None) -> dict:
     """Prepare an already extracted retail maps folder using the same validation."""
     _cancel(cancel_event)
-    source, source_files, info = _maps_source(Path(source))
+    source, source_files, info = _maps_source(Path(source), cancel_event)
     dest = Path(dest).absolute()
     stage = _new_staging(dest)
     try:
