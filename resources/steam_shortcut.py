@@ -1,4 +1,4 @@
-"""Add the native game to the most recent Steam account while Steam is closed.
+"""Add or remove native Halo without controlling Steam's headset session.
 
 Steam's binary shortcuts format is undocumented. Unknown types are rejected,
 existing entries retain their type/value structure, and an exact backup is kept.
@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import struct
 import tempfile
 import time
@@ -110,13 +111,18 @@ def dumps(root: OrderedDict) -> bytes:
 
 
 def steam_running(proc: Path = Path("/proc")) -> bool:
+    """Any Steam client blocks file edits, including a client owned by another UID."""
     for item in proc.iterdir():
         if not item.name.isdecimal():
             continue
         try:
             name = (item / "comm").read_text().strip()
+            # /proc/PID/exe can be unreadable for another UID even when comm is
+            # readable. Such a Steam client still forbids library file edits.
+            if name == "steam":
+                return True
             exe = Path(os.readlink(item / "exe")).name
-            if name == "steam" or exe == "steam":
+            if exe == "steam":
                 return True
         except (FileNotFoundError, PermissionError, ProcessLookupError):
             continue
@@ -193,6 +199,8 @@ def _text_vdf(text: str) -> dict:
                 value = value[1]
             else:
                 raise ValueError("Steam config has an invalid value.")
+            if key[1] in fields:
+                raise ValueError("Steam config has duplicate fields.")
             fields[key[1]] = value
         if depth:
             raise ValueError("Steam config has an unterminated object.")
@@ -356,47 +364,36 @@ def _session_environment(proc: Path = Path("/proc")) -> tuple[dict | None, bool]
 
 
 def add_native_shortcut(home: Path, game: Path, close_steam: bool = False) -> dict:
-    """Optionally request Steam's normal shutdown, then restore its GUI session.
+    """Use Steam's live API or closed library; ignore the legacy close flag.
 
-    The GUI must obtain explicit saved/closed-game acknowledgement for close_steam.
-    No signals are sent to Steam, SteamVR, a game or another user's process.
+    Steam Frame's headset session is managed by SteamOS. This helper never shuts
+    down or starts Steam, Steam Home, SteamVR, games or their services.
     """
     return _with_closed_steam(game, close_steam, lambda: _write_native_shortcut(home, game),
-                              _manual, "Add to Steam")
+                              _manual, "Add to Steam", lambda: _live_native(home, game, "add"))
 
 
-def _with_closed_steam(game: Path, close_steam: bool, action, manual, button: str) -> dict:
-    import subprocess
-    if not close_steam or not steam_running():
-        return action()
-    session, game_running = _session_environment()
-    if game_running:
-        return manual(game, f"A game is still running. Save and close games, then click {button} again.")
-    if session is None or not Path("/usr/bin/steam").is_file():
-        return manual(game, f"Steam's desktop session could not be verified. Quit Steam and click {button} again.")
-    try:
-        subprocess.run(["/usr/bin/steam", "-shutdown"], env=session,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
-    except (OSError, subprocess.TimeoutExpired):
-        return manual(game, f"Steam did not complete a normal shutdown. Quit it and click {button} again.")
-    deadline = time.monotonic() + 45
-    while steam_running() and time.monotonic() < deadline:
-        time.sleep(0.5)
+def _with_closed_steam(game: Path, close_steam: bool, action, manual, button: str, live=None) -> dict:
+    """The close_steam argument stays compatible but cannot control the VR session."""
     if steam_running():
-        return manual(game, "Steam is still running after its normal shutdown request. Its library files were left unchanged.")
-    try:
-        return action()
-    finally:
-        # Only restart a client this operation observed running and normally closed.
-        subprocess.Popen(["/usr/bin/steam"], env=session, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
+        if live is not None:
+            try:
+                return live()
+            except (ImportError, OSError, ValueError, RuntimeError, UnicodeError) as error:
+                return manual(game, "Steam's live library API is unavailable or could not verify the update. Steam Home and SteamVR were kept running. " + str(error))
+        return manual(game, "Steam is running on the Frame. Its library files were left unchanged; the installer keeps Steam Home and SteamVR running.")
+    return action()
+
+
+def _live_native(home: Path, game: Path, operation: str) -> dict:
+    from steam_live import add_native, remove_native
+    return add_native(home, game, NAME, LAUNCH_OPTIONS) if operation == "add" else remove_native(home, game, NAME)
 
 
 def _manual(game: Path, reason: str | None = None) -> dict:
     manual = {"status": "manual", "name": NAME, "executable": str(game / "halo"),
               "directory": str(game), "launchOptions": LAUNCH_OPTIONS,
-              "instructions": "Quit Steam and click Add to Steam again, or use Steam > Add a Game > Add a Non-Steam Game and browse to the executable. Set the displayed launch options and leave compatibility tools disabled."}
+              "instructions": "Use Steam > Add a Game > Add a Non-Steam Game and browse to the executable. Set the displayed launch options and leave compatibility tools disabled. Automatic library editing can be retried when Steam is already closed."}
     if reason is not None:
         manual["reason"] = reason
     return manual
@@ -411,7 +408,16 @@ def _artwork_file(path: Path, maximum: int = 8 * 1024 * 1024) -> bytes:
         raise ValueError("An artwork file is hard-linked or too large: " + path.name)
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise ValueError("An artwork file belongs to another user: " + path.name)
-    return path.read_bytes()
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(descriptor, "rb") as stream:
+        current = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1 or current.st_size > maximum
+                or (hasattr(os, "getuid") and current.st_uid != os.getuid())):
+            raise ValueError("An artwork file changed or is not private: " + path.name)
+        content = stream.read(maximum + 1)
+        if len(content) > maximum:
+            raise ValueError("An artwork file exceeds supported bounds: " + path.name)
+        return content
 
 
 def install_artwork(config: Path, appid: int, sources: Path | None = None) -> dict:
@@ -439,7 +445,7 @@ def install_artwork(config: Path, appid: int, sources: Path | None = None) -> di
     if grid.is_symlink() or grid.resolve() != grid or (grid.exists() and not grid.is_dir()):
         raise ValueError("Steam artwork folder is not an ordinary directory.")
     if steam_running():
-        raise ValueError("Steam reopened before its artwork could be added. Quit it and click Add to Steam again.")
+        raise ValueError("Steam is running; its artwork was left unchanged. Use Steam's custom artwork options or retry when Steam is already closed.")
     # Validate both categories before writing either. Different-extension custom
     # art wins too; keep existing user images without creating competing files.
     pending = []
@@ -474,7 +480,7 @@ def install_artwork(config: Path, appid: int, sources: Path | None = None) -> di
             temporary.chmod(0o600)
         for (target, _, expected), temporary in zip(pending, staged):
             if steam_running():
-                raise ValueError("Steam reopened while artwork was being added. Quit it and click Add to Steam again.")
+                raise ValueError("Steam reopened while artwork was being added. Use Steam's custom artwork options or retry when Steam is already closed.")
             # A custom file with another extension may have appeared after our
             # initial scan. Keep it and require an explicit retry.
             if any((grid / (target.stem + ext)).exists() or (grid / (target.stem + ext)).is_symlink() for ext in ARTWORK_EXTENSIONS):
@@ -512,7 +518,7 @@ def _artwork_result(config: Path, appid: int) -> dict:
         return install_artwork(config, appid)
     except (OSError, ValueError, UnicodeError) as error:
         return {"status": "manual", "reason": str(error),
-                "instructions": "Quit Steam and click Add to Steam again to retry adding Halo box art."}
+                "instructions": "Use Steam's custom artwork options, or retry adding Halo box art when Steam is already closed."}
 
 
 def _write_native_shortcut(home: Path, game: Path) -> dict:
@@ -566,12 +572,13 @@ def _write_native_shortcut(home: Path, game: Path) -> dict:
 def _remove_manual(game: Path, reason: str | None = None) -> dict:
     return {"status": "manual", "name": NAME, "executable": str(game / "halo"),
             "reason": reason or "Steam must be closed before uninstalling.",
-            "instructions": "Save and close games, then quit Steam or allow its normal shutdown and retry Uninstall. The native game files were kept."}
+            "instructions": "Use Steam's Remove Non-Steam Game option for this native Halo entry. Automatic uninstall can be retried when Steam is already closed. The native game files were kept."}
 
 
 def remove_native_shortcut(home: Path, game: Path, close_steam: bool = False) -> dict:
+    """Use Steam's live API or closed library; ignore the legacy close flag."""
     return _with_closed_steam(game, close_steam, lambda: _write_removed_shortcuts(home, game),
-                              _remove_manual, "Uninstall")
+                              _remove_manual, "Uninstall", lambda: _live_native(home, game, "remove"))
 
 
 def _private_steam_directory(path: Path):

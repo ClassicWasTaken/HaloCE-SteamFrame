@@ -25,6 +25,12 @@ from .ui import (BG, SIDEBAR, SURFACE, TEXT, MUTED, BORDER,
 SETUP_URL = "https://partner.steamgames.com/doc/steamhardware/steamframe/setup"
 SOURCE_URL = "https://github.com/OpenCommunityEdition/OpenCE/pull/85"
 XBOX_REVISION_NOTE = "Original Xbox USA Rev 2 validated; other retail revisions are checked automatically."
+GAME_CLOSE_NOTE = "Save and close running games before changing Halo files. Keep Steam Home and SteamVR running."
+STEAM_ADD_NOTE = ("In Steam, choose Add a Game → Add a Non-Steam Game and select the native halo executable. "
+                  "Use the displayed launch options, then click Add to Steam again to retry available library setup.")
+STEAM_ART_NOTE = "Use Steam's custom artwork controls to add Halo box art, or click Add to Steam again to retry."
+STEAM_REMOVE_NOTE = ("Use Steam's Remove Non-Steam Game option for Halo: Combat Evolved VR (Native). "
+                     "Retry when library cleanup is available or Steam is already closed.")
 CONTROLS = (
     "A  Jump / accept     B  Melee / back     X  Reload / use     Y  Change weapon\n"
     "RT  Fire     LT  Grenade     LB  Change grenade     RB  Flashlight\n"
@@ -399,7 +405,7 @@ class App(tk.Tk):
         acknowledgement = self._card(body)
         self._check(acknowledgement, "I have saved and closed games on my Frame.", self.steam_closed).pack(anchor="w")
         self.connection_steam_note = self._label(acknowledgement,
-            "Setup may briefly restart Steam to add Halo to your library.",
+            "Steam Home and SteamVR stay running. Setup will show any manual library steps.",
             9, color=MUTED, background=SURFACE, wraplength=620)
         self.connection_steam_note.pack(anchor="w", pady=(2, 0))
 
@@ -495,8 +501,8 @@ class App(tk.Tk):
         self.data_title.configure(text="Replacement game data (optional)" if repair else "Your original Xbox game data")
         self.data_note.configure(text="Use valid installed Xbox maps, or choose data to replace them." if repair
                                   else "Choose a disc image or an extracted maps folder.")
-        self.connection_steam_note.configure(text="Setup may briefly restart Steam to remove Halo from your library." if uninstall
-                                            else "Setup may briefly restart Steam to add Halo to your library.")
+        self.connection_steam_note.configure(text="Steam Home and SteamVR stay running. Uninstall may need a manual library step." if uninstall
+                                            else "Steam Home and SteamVR stay running. Setup will show any manual library steps.")
         self.install_note.configure(text="Keep this window open until the uninstall finishes and setup disconnects." if uninstall
                                     else "Keep this window open during setup. Allow 12 GB free on the Frame.\nThe first native build can take a while.")
         self._update_summary()
@@ -571,7 +577,7 @@ class App(tk.Tk):
                 messagebox.showerror("Connection details", str(exc), parent=self)
                 return
             if not self.steam_closed.get():
-                messagebox.showinfo("Close games first", "Save and close games, then confirm that setup may briefly restart Steam to update the library entry.", parent=self)
+                messagebox.showinfo("Close games first", GAME_CLOSE_NOTE, parent=self)
                 return
             self.status.set("Setup removes the native game and its Steam entry, with your selected save preference." if self.mode.get() == "uninstall" else
                             "Setup builds the native game, applies Xbox controls, and adds Halo to Steam.")
@@ -695,6 +701,7 @@ class App(tk.Tk):
             "  NTSC: 01.10.12.2276 or 01.08.15.1749; PAL: 01.01.14.2342.\n"
             "• PC and Xbox 360 data are not supported.\n"
             "• Keep both devices on the same network.\n"
+            "• Save and close games. Steam Home and SteamVR stay running.\n"
             "• Install SteamVR and allow at least 12 GB free on your Frame.\n"
             "• Repair refreshes the program and controls while preserving saves.\n"
             "• Online play uses the native port's own multiplayer protocol.",
@@ -749,7 +756,7 @@ class App(tk.Tk):
         return Settings(host=host, password=self.password.get(), port=port,
             known_host_fingerprint=self.fingerprints.get(f"{host}:{port}"),
             accept_host_key=lambda h,a,v:self._approve_host(h,a,v,port),
-            close_steam_for_shortcut=self.steam_closed.get())
+            close_steam_for_shortcut=False)
 
     def _approve_host(self, host, algorithm, value, port):
         ready = threading.Event()
@@ -813,7 +820,7 @@ class App(tk.Tk):
             messagebox.showinfo("Choose game data", "Confirm that you are authorized to use the installed Xbox game data." if repair else "Choose your original Xbox Halo CE image or maps, and confirm you are authorized to use them.", parent=self)
             return
         if not self.steam_closed.get():
-            messagebox.showinfo("Close games first", "Save and close games, then confirm that setup may briefly restart Steam to add the library entry.", parent=self)
+            messagebox.showinfo("Close games first", GAME_CLOSE_NOTE, parent=self)
             return
         try:
             settings = self._settings()
@@ -871,7 +878,7 @@ class App(tk.Tk):
 
     def _retry_steam(self):
         if not self.steam_closed.get():
-            messagebox.showinfo("Close games first", "Save and close games, then confirm that setup may restart Steam.", parent=self)
+            messagebox.showinfo("Close games first", GAME_CLOSE_NOTE, parent=self)
             return
         try:
             settings = self._settings()
@@ -903,7 +910,7 @@ class App(tk.Tk):
         if self.busy:
             return
         if not self.steam_closed.get():
-            messagebox.showinfo("Close games first", "Save and close games, then confirm that setup may briefly restart Steam to remove the native Halo library entry.", parent=self)
+            messagebox.showinfo("Close games first", GAME_CLOSE_NOTE, parent=self)
             return
         try:
             settings = self._settings()
@@ -1003,7 +1010,7 @@ class App(tk.Tk):
                     if getattr(result, "backup_path", None):
                         self._append("Program-file backup: " + result.backup_path)
                     if result.requires_manual_steam_step:
-                        done = "Native Halo VR is installed; its Steam entry needs one more step.\n" + result.steam.get("reason", "") + "\n" + result.steam.get("instructions", "Quit Steam, then click Add to Steam again.")
+                        done = "Native Halo VR is installed; its Steam entry needs one more step.\n" + result.steam.get("reason", "") + "\n" + result.steam.get("instructions", STEAM_ADD_NOTE)
                         self._append("Executable: " + result.game_path + "/halo")
                         self._append("Launch options: " + result.steam.get("launchOptions", "SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=0 %command%"))
                     artwork = result.steam.get("artwork", {})
@@ -1012,7 +1019,7 @@ class App(tk.Tk):
                     self._display_progress()
                     if artwork_pending:
                         done += "\n\nHalo box art needs one more step.\n" + artwork.get("reason", "")
-                        done += "\n" + artwork.get("instructions", "Quit Steam and click Add to Steam again to retry adding Halo box art.")
+                        done += "\n" + artwork.get("instructions", STEAM_ART_NOTE)
                         self.retry_button.pack(anchor="w", pady=(11, 0))
                     done = self._redact(done)
                     self.phase.set("One more step in Steam" if result.requires_manual_steam_step
@@ -1030,7 +1037,7 @@ class App(tk.Tk):
                     self._display_progress()
                     if pending:
                         done = "Uninstall needs one more step in Steam.\n" + result.steam.get("reason", "")
-                        done += "\n" + result.steam.get("instructions", "Quit Steam, then retry Uninstall Halo VR.")
+                        done += "\n" + result.steam.get("instructions", STEAM_REMOVE_NOTE)
                     elif result.already_absent:
                         done = "Native Halo VR was already absent. Uninstall checks are complete."
                     else:

@@ -315,21 +315,22 @@ def test_second_steam_account_write_failure_restores_first_account_and_game(inst
     assert not list((remote.HOME / "Games").glob("*HaloCENativeVR-saves-*"))
 
 
-def test_normal_steam_shutdown_and_restart_do_not_force_kill_any_process(installation, monkeypatch):
+def test_legacy_close_flag_leaves_active_steam_and_game_running(installation, monkeypatch):
     import subprocess
     remote, steam, _, _, _ = installation
-    states = iter([True, False, False])
-    monkeypatch.setattr(steam, "steam_running", lambda: next(states))
-    monkeypatch.setattr(steam, "_session_environment", lambda: ({"DISPLAY": ":0"}, False))
-    monkeypatch.setattr(steam.Path, "is_file", lambda path: True)
-    monkeypatch.setattr(steam, "_write_removed_shortcuts", lambda home, game: {"status": "removed"})
+    monkeypatch.setattr(steam, "steam_running", lambda: True)
+    session, removal = Mock(), Mock()
+    monkeypatch.setattr(steam, "_session_environment", session)
+    monkeypatch.setattr(steam, "_write_removed_shortcuts", removal)
     shutdown, restart = Mock(), Mock()
     monkeypatch.setattr(subprocess, "run", shutdown)
     monkeypatch.setattr(subprocess, "Popen", restart)
-    assert steam.remove_native_shortcut(remote.HOME, remote.GAME, close_steam=True)["status"] == "removed"
-    assert shutdown.call_args.args[0] == ["/usr/bin/steam", "-shutdown"]
-    assert restart.call_args.args[0] == ["/usr/bin/steam"]
-    assert restart.call_args.kwargs["start_new_session"] is True
+    assert steam.remove_native_shortcut(remote.HOME, remote.GAME, close_steam=True)["status"] == "manual"
+    shutdown.assert_not_called()
+    restart.assert_not_called()
+    session.assert_not_called()
+    removal.assert_not_called()
+    assert remote.GAME.exists()
 
 
 def test_uninstall_preflight_needs_no_game_maps_space_vr_or_compiler(installation, monkeypatch):

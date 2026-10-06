@@ -8,7 +8,7 @@ def smoke_test(resources: Path) -> dict:
     from .gui import App
     from .install import SOURCE_COMMIT
     from .ssh import Settings
-    names = ('remote_install.py', 'steam_shortcut.py', 'build-native.sh',
+    names = ('remote_install.py', 'steam_shortcut.py', 'steam_live.py', 'build-native.sh',
              'frame-controls.patch', 'ui/app-icon.png', 'ui/app-icon.ico',
              'artwork/halo-ce-cover.jpg', 'artwork/halo-ce-landscape.png',
              'artwork/halo-ce-thumbnail.png')
@@ -41,6 +41,11 @@ def smoke_test(resources: Path) -> dict:
                 raise RuntimeError('Packaged operation choices are incomplete')
             if app.music.muted or hasattr(app, 'music_button') or hasattr(app, '_toggle_music'):
                 raise RuntimeError('Packaged music behavior does not match this release')
+            app.host.set('frame')
+            app.password.set('smoke-secret')
+            if app._settings().close_steam_for_shortcut:
+                raise RuntimeError('Packaged setup must keep Steam Home running')
+            app.password.set('')
         finally:
             for callback in app.tk.call('after', 'info'):
                 app.after_cancel(callback)
@@ -52,4 +57,5 @@ def smoke_test(resources: Path) -> dict:
             'guiPagesInitialized': pages_initialized,
             'determinateProgress': True, 'uninstallAvailable': True,
             'automaticMusicWithoutToggle': True,
+            'keepsSteamSessionRunning': True,
             'passwordReprRedacted': True, 'networkConnections': 0}

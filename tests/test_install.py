@@ -67,30 +67,32 @@ def test_forced_proton_mapping_reports_manual_step_without_rewriting_config(tmp_
     assert config.read_text() == before
 
 
-def test_normal_shutdown_does_not_kill_or_touch_running_games(tmp_path, monkeypatch):
-    steam = load_resource("steam_shortcut")
-    monkeypatch.setattr(steam, "steam_running", lambda: True)
-    monkeypatch.setattr(steam, "_session_environment", lambda: ({"DISPLAY": ":0"}, True))
-    result = steam.add_native_shortcut(tmp_path, tmp_path / "game", close_steam=True)
-    assert result["status"] == "manual" and "game is still running" in result["reason"]
-
-
-def test_normal_shutdown_restarts_only_client_it_closed(tmp_path, monkeypatch):
+def test_legacy_shutdown_request_leaves_running_steam_and_games_untouched(tmp_path, monkeypatch):
     import subprocess
     steam = load_resource("steam_shortcut")
-    states = iter([True, False, False])
-    monkeypatch.setattr(steam, "steam_running", lambda: next(states))
-    monkeypatch.setattr(steam, "_session_environment", lambda: ({"DISPLAY": ":0"}, False))
-    monkeypatch.setattr(steam.Path, "is_file", lambda self: True)
+    monkeypatch.setattr(steam, "steam_running", lambda: True)
+    shutdown, restart = Mock(), Mock()
+    monkeypatch.setattr(subprocess, "run", shutdown)
+    monkeypatch.setattr(subprocess, "Popen", restart)
+    result = steam.add_native_shortcut(tmp_path, tmp_path / "game", close_steam=True)
+    assert result["status"] == "manual"
+    shutdown.assert_not_called()
+    restart.assert_not_called()
+    assert not list(tmp_path.iterdir())
+
+
+def test_closed_steam_registration_does_not_start_a_new_client(tmp_path, monkeypatch):
+    import subprocess
+    steam = load_resource("steam_shortcut")
+    monkeypatch.setattr(steam, "steam_running", lambda: False)
     monkeypatch.setattr(steam, "_write_native_shortcut", lambda home, game: {"status": "added", "appid": 42})
     normal_shutdown = Mock()
     restart = Mock()
     monkeypatch.setattr(subprocess, "run", normal_shutdown)
     monkeypatch.setattr(subprocess, "Popen", restart)
     assert steam.add_native_shortcut(tmp_path, tmp_path / "game", close_steam=True)["status"] == "added"
-    assert normal_shutdown.call_args.args[0] == ["/usr/bin/steam", "-shutdown"]
-    assert restart.call_args.args[0] == ["/usr/bin/steam"]
-    assert restart.call_args.kwargs["start_new_session"] is True
+    normal_shutdown.assert_not_called()
+    restart.assert_not_called()
 
 
 def test_original_maps_manifest_never_includes_iso_or_symlinks(tmp_path):
@@ -143,7 +145,7 @@ def test_add_to_steam_retry_reuses_files_and_no_build_or_asset_upload():
     assert any(remote.endswith("/artwork/halo-ce-cover.jpg") for _, remote in fake.uploads)
     assert any(remote.endswith("/artwork/halo-ce-landscape.png") for _, remote in fake.uploads)
     assert not any("build" in command[2:] for command in fake.commands)
-    assert fake.commands[-1][-1] == "--close-steam"
+    assert not any("--close-steam" in command for command in fake.commands)
 
 
 def test_setup_reports_success_only_after_ssh_disconnects():

@@ -281,7 +281,7 @@ def test_manual_steam_completion_keeps_actionable_instructions_redacted(app):
     app._set_busy(True)
     result = InstallResult('/home/steamos/Games/HaloCENativeVR', False,
         {'status': 'manual', 'reason': 'Steam is still running. ' + secret,
-         'instructions': 'Quit Steam, then click Add to Steam again.'}, None)
+         'instructions': 'Use Steam Add a Non-Steam Game, then click Add to Steam again.'}, None)
     app.events.put(('complete', result))
     app.events.put(('idle',))
     _drain_events(app)
@@ -522,6 +522,7 @@ def test_uninstall_worker_uses_no_game_data_and_clears_credentials(app, monkeypa
     _drain_events(app)
     settings, password, saved = calls[0]
     assert password == 'offline-secret' and saved is keep_saves
+    assert settings.close_steam_for_shortcut is False
     assert not settings.password and not app.password.get()
     assert len(confirmations) == 1
     assert '~/Games/HaloCENativeVR' in confirmations[0] and 'Steam library entry' in confirmations[0]
@@ -643,3 +644,60 @@ def test_revision_guidance_names_validated_rev_2_and_checked_cache_builds(app):
     finally:
         for dialog in dialogs:
             dialog.destroy()
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('mode', ['install', 'repair', 'uninstall'])
+@pytest.mark.parametrize('games_closed', [False, True])
+def test_game_closed_acknowledgment_never_authorizes_steam_shutdown(app, mode, games_closed):
+    app.mode.set(mode)
+    app.steam_closed.set(games_closed)
+    app.password.set('offline-secret')
+    assert app._settings().close_steam_for_shortcut is False
+    assert 'Steam Home and SteamVR stay running' in app.connection_steam_note.cget('text')
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('operation', ['continue', 'install', 'retry', 'uninstall'])
+def test_closed_game_gate_only_requests_closing_games(app, operation):
+    app.password.set('offline-secret')
+    app.authorized.set(True)
+    app.steam_closed.set(False)
+    if operation == 'continue':
+        app._show_page(1)
+        app._continue()
+    elif operation == 'install':
+        app._install(repair=True)
+    elif operation == 'retry':
+        app._retry_steam()
+    else:
+        app.mode.set('uninstall')
+        app._uninstall()
+    message = app._test_dialogs[-1][1]
+    assert 'Save and close running games' in message
+    assert 'Keep Steam Home and SteamVR running' in message
+    assert 'restart Steam' not in message and 'Quit Steam' not in message
+    assert not app.busy
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('kind', ['add', 'artwork', 'remove'])
+def test_manual_library_fallback_uses_steam_ui_without_teardown_instructions(app, kind):
+    from halo_frame_installer.install import InstallResult, UninstallResult
+    game = '/home/steamos/Games/HaloCENativeVR'
+    if kind == 'remove':
+        result = UninstallResult(game, False, False, None,
+                                 {'status': 'manual', 'reason': 'Steam is active.'}, None)
+        event = 'uninstall_complete'
+        expected = 'Remove Non-Steam Game'
+    else:
+        steam = ({'status': 'manual', 'reason': 'Steam is active.'} if kind == 'add' else
+                 {'status': 'added', 'artwork': {'status': 'manual', 'reason': 'Artwork is pending.'}})
+        result = InstallResult(game, False, steam, None)
+        event = 'complete'
+        expected = 'Add a Non-Steam Game' if kind == 'add' else 'custom artwork'
+    app.events.put((event, result))
+    _drain_events(app)
+    assert float(app.progress['value']) == 99
+    assert expected in app.status.get()
+    assert 'Quit Steam' not in app.status.get() and 'restart Steam' not in app.status.get()

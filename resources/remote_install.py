@@ -278,7 +278,7 @@ def preflight(repair=False, adopt=False):
     beneath(CACHE / "resources", CACHE).mkdir(exist_ok=True)
     beneath(CACHE / "resources/artwork", CACHE).mkdir(exist_ok=True)
     beneath(CACHE / "runs", CACHE).mkdir(exist_ok=True)
-    for name in ("remote_install.py", "build-native.sh", "steam_shortcut.py", "frame-controls.patch",
+    for name in ("remote_install.py", "build-native.sh", "steam_shortcut.py", "steam_live.py", "frame-controls.patch",
                  "artwork/halo-ce-cover.jpg", "artwork/halo-ce-landscape.png"):
         candidate = beneath(CACHE / "resources" / name, CACHE)
         if candidate.exists() and (not candidate.is_file() or candidate.stat().st_nlink != 1 or candidate.stat().st_uid != os.getuid()):
@@ -312,7 +312,7 @@ def preflight_uninstall():
         directory.mkdir(exist_ok=True)
         if not directory.is_dir() or directory.stat().st_uid != os.getuid():
             raise ValueError("An installer resource directory is not owned by this account.")
-    for relative in ("remote_install.py", "steam_shortcut.py", "artwork/halo-ce-cover.jpg", "artwork/halo-ce-landscape.png"):
+    for relative in ("remote_install.py", "steam_shortcut.py", "steam_live.py", "artwork/halo-ce-cover.jpg", "artwork/halo-ce-landscape.png"):
         path = beneath(CACHE / "resources" / relative, CACHE)
         if path.exists():
             details = ordinary(path).stat()

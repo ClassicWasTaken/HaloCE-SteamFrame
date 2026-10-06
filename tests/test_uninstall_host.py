@@ -45,8 +45,8 @@ class UninstallConnection:
             run_id = argv[argv.index('--run-id') + 1]
             if self.manual:
                 data = {'gamePath': GAME, 'uninstalled': False, 'savedBackupPath': None,
-                        'steam': {'status': 'manual', 'reason': 'Steam could not close safely; the game was kept.',
-                                  'instructions': 'Quit Steam and retry Uninstall Halo VR.'}}
+                        'steam': {'status': 'manual', 'reason': 'Steam removal could not be verified; the game was kept.',
+                                  'instructions': 'Remove the native shortcut using Steam library controls, then retry Uninstall Halo VR.'}}
             else:
                 self.removed = not self.already_absent
                 data = {'gamePath': GAME, 'uninstalled': self.removed, 'alreadyAbsent': self.already_absent,
@@ -66,9 +66,9 @@ def test_uninstall_needs_no_iso_maps_or_build_and_disconnects_before_success():
     result = Installer(lambda settings: fake, RESOURCES).uninstall(fake.settings, progress)
     assert result.uninstalled and not result.requires_manual_steam_step
     assert result.saved_backup_path.startswith('/home/steamos/Games/HaloCENativeVR-saves-')
-    assert [name for name, remote in fake.uploads] == ['remote_install.py', 'steam_shortcut.py']
+    assert [name for name, remote in fake.uploads] == ['remote_install.py', 'steam_shortcut.py', 'steam_live.py']
     assert len(fake.commands) == 2
-    assert '--keep-saves' in fake.commands[-1][0] and '--close-steam' in fake.commands[-1][0]
+    assert '--keep-saves' in fake.commands[-1][0] and '--close-steam' not in fake.commands[-1][0]
     assert stages[-3:] == ['disconnect', 'disconnected', 'complete']
 
 

@@ -46,6 +46,18 @@ Halo PC, Custom Edition, Xbox 360 Anniversary and MCC data are different formats
 
 SteamOS has a read-only system filesystem. This installer uses a user-owned game folder and an unprivileged build container; its process does not require disabling that protection or changing system packages.
 
+### Steam session safeguard
+
+[Valve's Frame debugging documentation](https://partner.steamgames.com/doc/steamhardware/steamframe/debugging) documents the standalone SteamOS environment, developer SSH access, remote headset view, and Steam log location. It does not provide a current Frame-specific command to stop and recreate the headset's Steam session from SSH.
+
+During investigation of a reported loading-logo failure after a 1.2.2 run, the tested Frame's installed SteamOS user service was configured to restart Steam automatically. Device diagnostics showed that service in a failed start-limit state after repeated supervised restarts while the VR service remained active. The installer had timed out waiting for its requested Steam shutdown, leaving the library files unchanged; its separate client-launch path was not reached. These are observations from the installed service and that device, not a claim that every Frame loading-logo problem has the same cause. No private logs or credentials are included here.
+
+Version 1.2.3 removes automatic Steam shutdown and separate client launches. It keeps Steam Home and SteamVR running, guards against directly editing a running client's library/artwork files, and reports manual steps when required. The saved-and-closed-games checkbox permits game-file work; it is not permission to restart Steam. Automatic file registration and removal operate only when Steam is already closed. This safeguard prevents the installer from issuing the problematic shutdown request; recovering a previously failed headset session is a separate action.
+
+The [live library helper](../resources/steam_live.py) uses the currently installed client's `SteamClient.Apps` interface through its existing local CEF context. These are observed, undocumented client interfaces rather than a stable public Steamworks API. The helper checks endpoint ownership, capabilities, exact native executable identity, and readback within bounded requests. Artwork uses the client's `SetCustomArtworkForApp` method, with the active account matched to one owned local profile, existing custom images preserved, and the resulting files verified against the bundled source hashes. It does not enable a new remote debugger, change the session launch command, or write the live shortcut VDF or grid files directly. Unsupported or unverified results produce manual Add/Remove/artwork steps. Live removal affects the active client account and leaves artwork files under Steam's control; already-closed removal can handle local account files and removes only known installer artwork hashes. Future Steam builds may need an updated adapter.
+
+The final 1.2.3 helper was tested on one Frame for native shortcut removal and re-addition, exact executable/launch/VR/compatibility settings, and fresh creation of cover and landscape artwork with exact source-hash readback. A prior check preserved and verified both existing managed image hashes. Steam and VR services remained active and unchanged, and the game binary was unchanged. The user confirmed Steam Home worked after separate recovery through the device's installed managed launcher. These checks do not establish a complete fresh installation, game uninstall, visual artwork check, or listening test.
+
 ## Build and installer dependencies
 
 - [LLVM's signed Ubuntu package repository](https://apt.llvm.org/) supplies LLVM 22 inside the build container for the upstream `arm64_32` guest compiler target.

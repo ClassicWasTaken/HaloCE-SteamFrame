@@ -163,8 +163,6 @@ class Installer:
             if repair and settings.adopt_existing_native:
                 argv.append("--adopt-existing")
             argv += list(extras)
-            if name == "shortcut" and settings.close_steam_for_shortcut:
-                argv.append("--close-steam")
             return parse_result(connection.run(argv, progress=remote_progress,
                                 cancel_event=cancel_event, timeout=timeout,
                                 on_cancel=cancel_remote if prepared else None))
@@ -188,7 +186,7 @@ class Installer:
             if info.get("pcVersionDetected"):
                 progress("detect", "Found an older Halo PC installation. The native VR build requires original Xbox maps.", None)
             remote_resources = info["cachePath"] + "/resources"
-            for name in ("remote_install.py", "build-native.sh", "steam_shortcut.py", "frame-controls.patch"):
+            for name in ("remote_install.py", "build-native.sh", "steam_shortcut.py", "steam_live.py", "frame-controls.patch"):
                 check_cancel()
                 connection.put(self.resource_dir / name, remote_resources + "/" + name, cancel_event=cancel_event)
             # Artwork ships inside the one-file installer; no metadata service or
@@ -251,7 +249,7 @@ class Installer:
                 check_cancel()
                 installed = step("finalize", run_id=True, timeout=600)
             check_cancel()
-            progress("steam", "Adding the native VR game and Halo box art to your Steam account while Steam is closed...", None)
+            progress("steam", "Checking Halo's Steam entry while keeping Steam Home running...", None)
             steam = step("shortcut", timeout=90)
             # Keep the result's public fingerprint before releasing the client.
             host_fingerprint = connection.host_fingerprint
@@ -259,7 +257,7 @@ class Installer:
             connection.close()
             disconnected = True
             progress("disconnected", "Setup has disconnected from your Frame.", None)
-            progress("complete", "Native VR game is ready. Start Steam and launch Halo: Combat Evolved VR (Native)." if steam.get("status") == "added" else "Native VR game is installed. One Steam library step remains.", 100)
+            progress("complete", "Native VR game is ready. Launch Halo: Combat Evolved VR (Native) from your Steam library." if steam.get("status") == "added" else "Native VR game is installed. One Steam library step remains.", 100)
             return InstallResult(installed["gamePath"], bool(installed.get("reused")),
                                  steam, host_fingerprint, repaired=bool(installed.get("repaired")),
                                  backup_path=installed.get("backupPath"))
@@ -313,7 +311,7 @@ class Installer:
                     or info.get("uninstallSupported") is not True):
                 raise SSHError("The Frame returned an unexpected uninstall location or capability.")
             remote_resources = info["cachePath"] + "/resources"
-            for name in ("remote_install.py", "steam_shortcut.py"):
+            for name in ("remote_install.py", "steam_shortcut.py", "steam_live.py"):
                 check_cancel()
                 connection.put(self.resource_dir / name, remote_resources + "/" + name, cancel_event=cancel_event)
             check_cancel()
@@ -321,8 +319,6 @@ class Installer:
             argv = ["python3", remote_resources + "/remote_install.py", "uninstall", "--run-id", run_identifier]
             if keep_saves:
                 argv.append("--keep-saves")
-            if settings.close_steam_for_shortcut:
-                argv.append("--close-steam")
             # Once removal starts, finish the owned transaction rather than
             # abandoning it mid-delete. The GUI disables Cancel for this phase.
             data = parse_result(connection.run(argv, progress=remote_progress, timeout=600,
@@ -332,7 +328,7 @@ class Installer:
                 raise SSHError("The Frame returned an invalid uninstall result.")
             if steam.get("status") == "manual":
                 raise SSHError(steam.get("reason", "Steam could not close safely; the game was kept.")
-                    + "\n" + steam.get("instructions", "Quit Steam and retry Uninstall Halo VR."))
+                    + "\n" + steam.get("instructions", "Use Steam's own interface to remove the native Halo shortcut, then retry when its library can be safely updated."))
             uninstalled, absent = data.get("uninstalled"), data.get("alreadyAbsent", False)
             saved = data.get("savedBackupPath")
             if (data.get("gamePath") != info["gamePath"] or type(uninstalled) is not bool
