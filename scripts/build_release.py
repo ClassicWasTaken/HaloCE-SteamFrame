@@ -9,8 +9,8 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
-VERSION = "1.3.3"
-EXE_NAME = f"Halo-Steam-Frame-Setup-{VERSION}.exe"
+VERSION = "1.3.4"
+EXE_NAME = f"Halo-Steam-Frame-Mod-Setup-{VERSION}.exe"
 
 def allowed_source_files():
     roots = [ROOT / name for name in ("src", "resources", "docs", "scripts", "tests", ".github")]

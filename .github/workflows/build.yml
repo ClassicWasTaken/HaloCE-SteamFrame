@@ -56,7 +56,7 @@ jobs:
         shell: pwsh
         run: |
           $reportPath = Join-Path $env:RUNNER_TEMP 'halo-installer-smoke.json'
-          $installers = @(Get-ChildItem -LiteralPath 'dist' -Filter 'Halo-Steam-Frame-Setup-*.exe')
+          $installers = @(Get-ChildItem -LiteralPath 'dist' -Filter 'Halo-Steam-Frame-Mod-Setup-*.exe')
           if ($installers.Count -ne 1) { throw 'Expected one standalone installer executable' }
           $exePath = $installers[0].FullName
           $process = Start-Process -FilePath $exePath -ArgumentList @('--self-test-report', ('"' + $reportPath + '"')) -WindowStyle Hidden -Wait -PassThru

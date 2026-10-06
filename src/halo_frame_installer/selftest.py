@@ -7,7 +7,7 @@ import subprocess
 
 def smoke_test(resources: Path) -> dict:
     from . import __version__
-    from .gui import App
+    from .gui import App, APP_TITLE, CONTENT_DISCLOSURE
     from .install import SOURCE_COMMIT
     from .ssh import Settings
     names = ('remote_install.py', 'steam_shortcut.py', 'steam_live.py', 'steam_notes.py', 'build-native.sh',
@@ -49,6 +49,8 @@ def smoke_test(resources: Path) -> dict:
                 pages_initialized.append(name)
             valid = (bool(app.asset_status.get()) and app.log.winfo_reqheight() > 1
                      and hasattr(app, '_game_cover') and hasattr(app, 'music'))
+            if app.title() != APP_TITLE or CONTENT_DISCLOSURE not in app.data_disclosure.cget('text'):
+                raise RuntimeError('Packaged community mod installer title or content disclosure is missing')
             if str(app.progress['mode']) != 'determinate':
                 raise RuntimeError('Packaged progress bar is not determinate')
             if {choice.value for choice in app.mode_choices} != {'install', 'repair', 'uninstall'}:

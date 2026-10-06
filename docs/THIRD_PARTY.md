@@ -1,10 +1,12 @@
-# Third-party software notices
+# VR mod and third-party notices
 
-The installer code has its own [MIT license](../LICENSE). Each dependency keeps its own license. Original notice text is included under [resources/licenses](../resources/licenses); [manifest.json](../resources/licenses/manifest.json) records package versions, notice hashes and source URLs from the environment used to build the Windows executable.
+This community VR mod installer's original code has its own [MIT license](../LICENSE). Each dependency keeps its own license. Original notice text is included under [resources/licenses](../resources/licenses); [manifest.json](../resources/licenses/manifest.json) records package versions, notice hashes and source URLs from the environment used to build the Windows executable.
+
+The repository and executable include no retail game executable, disc image, maps, product keys, or soundtrack, and the installer does not download these files. Users supply authorized original Xbox game data. Copyrighted Halo artwork and trademarks remain separate from the installer code's license, as detailed below. Upstream source licenses are reported as published by their maintainers; this project does not independently certify the source's legal status. This is an unaffiliated community project.
 
 The manifest includes build and test dependencies as well as runtime dependencies, so an entry does not imply that every file of that package is embedded in the executable. It records no machine paths, passwords, private SSH keys or game data.
 
-## Windows installer
+## Windows mod installer
 
 | Component | Initial build version | License and use |
 | --- | --- | --- |
@@ -47,7 +49,7 @@ Then rebuild using the provided packaging script. The installer source, resource
 
 ## Native game built on the Frame
 
-The Windows download contains the installer and build instructions, not the commercial game's maps or disc image. The native program is built from pinned upstream source on the Frame. Its upstream license and component notices remain applicable to that build.
+The Windows download contains the mod installer and build instructions; no retail game executable, disc image, maps, product keys, or soundtrack is included. The native program is built from pinned upstream source on the Frame. Its upstream license and component notices remain applicable to that build, separately from rights in retail game content.
 
 | Upstream component | Notice/reference |
 | --- | --- |

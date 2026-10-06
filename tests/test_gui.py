@@ -123,6 +123,29 @@ def test_control_guide_matches_expected_layout():
 
 
 @WINDOWS_GUI
+def test_community_mod_title_and_content_disclosure_are_visible_and_accurate(app):
+    import tkinter as tk
+    from halo_frame_installer.gui import APP_TITLE, CONTENT_DISCLOSURE, ARTWORK_CREDIT
+    assert app.title() == APP_TITLE == 'Halo • Community Steam Frame VR Mod Installer'
+    visible = '\n'.join(_display_text(app))
+    assert 'STEAM FRAME VR MOD' in visible and 'COMMUNITY MOD INSTALLER' in visible
+    assert CONTENT_DISCLOSURE in app.data_disclosure.cget('text')
+    assert 'my original Xbox game data with this mod' in app.data_authorization.cget('text')
+    app._show_help()
+    dialogs = [widget for widget in app.winfo_children() if isinstance(widget, tk.Toplevel)]
+    try:
+        assert len(dialogs) == 1
+        text = '\n'.join(_display_text(dialogs[0]))
+        assert CONTENT_DISCLOSURE in text and ARTWORK_CREDIT in text
+        assert 'public source using your authorized Xbox data' in text
+        for claim in ('copyright-free', 'copyright free', 'unstolen', 'vimm', 'archive.org'):
+            assert claim not in text.lower()
+    finally:
+        for dialog in dialogs:
+            dialog.destroy()
+
+
+@WINDOWS_GUI
 def test_long_build_failure_has_readable_dialog_and_complete_redacted_log(app):
     app.password_to_redact = 'offline-secret'
     details = 'Native build failed. The existing game was kept.\n' + ('compiler diagnostic offline-secret\n' * 200)

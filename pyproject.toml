@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "halo-steam-frame-installer"
-version = "1.3.3"
-description = "Guided USB and network SSH installer for the native ARM64 Halo CE Steam Frame VR port"
+version = "1.3.4"
+description = "Community Halo CE VR mod installer for Steam Frame; original Xbox game data must be supplied separately"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = ["paramiko==4.0.0"]

@@ -1,14 +1,16 @@
-# Detailed setup
+# Halo CE Steam Frame VR mod setup
 
 [Back to the project README](../README.md)
 
-This guide covers installation, USB-C and network connections, repair, Steam library updates, removal, troubleshooting, and rebuilding the Windows executable.
+This community VR mod installer guides you through installing the experimental native Halo CE VR port. This guide covers USB-C and network connections, repair, Steam library updates, removal, troubleshooting, and rebuilding the Windows executable.
 
 ## Before you begin
 
-Download the single **[Halo-Steam-Frame-Setup-1.3.3.exe](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/download/v1.3.3/Halo-Steam-Frame-Setup-1.3.3.exe)** for Windows 10/11 x64. It includes its runtime and USB transfer tools; no administrator rights, Python installation, installer ZIP, or separate Platform Tools download is needed. The [release notes](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/tag/v1.3.3) include the EXE's SHA256 checksum.
+Download the single **[Halo-Steam-Frame-Mod-Setup-1.3.4.exe](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/download/v1.3.4/Halo-Steam-Frame-Mod-Setup-1.3.4.exe)** for Windows 10/11 x64. It includes its runtime and USB transfer tools; no administrator rights, Python installation, installer ZIP, or separate Platform Tools download is needed. The [release notes](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/tag/v1.3.4) include the EXE's SHA256 checksum.
 
-Use your own authorized original Xbox Halo CE ISO/XISO or extracted maps. USA Rev 2 is validated; the supported-build table below explains other retail revisions. Halo PC, Xbox 360 Anniversary, MCC, and Quest packages are unsupported. No commercial game data is bundled.
+Use your own authorized original Xbox Halo CE ISO/XISO or extracted maps. USA Rev 2 is validated; the supported-build table below explains other retail revisions. Halo PC, Xbox 360 Anniversary, MCC, and Quest packages are unsupported. No retail game executable, disc image, maps, product keys, or soundtrack is bundled or downloaded. The project provides no game-download sources.
+
+Halo artwork and trademarks remain copyrighted to their respective owners, and third-party software retains its licenses and notices. This community project is unaffiliated with Microsoft, Xbox, Bungie, or Valve. Its license does not grant rights in retail game data or certify the legal status of upstream source; see [third-party notices](THIRD_PARTY.md).
 
 The Frame needs ARM64 SteamOS, SteamVR/OpenXR, rootless Podman, internet access, and **12 GiB of free internal storage**. Setup checks these before installing. Your Windows computer needs about 2.5 GB of temporary space for maps. The SteamOS root filesystem stays read-only. Podman runs as the ordinary `steamos` host user; dependency installation uses root only inside the rootless container, with `no-new-privileges` retained.
 
@@ -156,7 +158,7 @@ python -m venv .venv
 .\.venv\Scripts\python scripts/build_release.py
 ```
 
-Corresponding installer source and applicable third-party source/notices are available in the **[version 1.3.3 source tag](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/tree/v1.3.3)** so you can modify and rebuild it, including its LGPL Paramiko dependency. GitHub's automatically generated Source code ZIP is optional for developers and is not needed to run setup. ADB binaries are not checked into Git; [bundle_usb_tools.py](../scripts/bundle_usb_tools.py) downloads the pinned official archive during the executable build and verifies its archive and selected-file checksums before packaging. [resources/usb/manifest.json](../resources/usb/manifest.json) records those hashes and provenance, and the original notices are retained. The build script packages installer code/resources and verified ADB components with their notices; no game binary, user ISO, maps, SSH password, or private key is included. GitHub Actions runs tests and builds the Windows setup executable. A local rebuild also writes a source bundle and checksum file to `dist/`; the public release attaches only the clearly named installer executable and prints its checksum in the release description.
+Corresponding installer source and applicable third-party source/notices are available in the **[version 1.3.4 source tag](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/tree/v1.3.4)** so you can modify and rebuild it, including its LGPL Paramiko dependency. GitHub's automatically generated Source code ZIP is optional for developers and is not needed to run setup. ADB binaries are not checked into Git; [bundle_usb_tools.py](../scripts/bundle_usb_tools.py) downloads the pinned official archive during the executable build and verifies its archive and selected-file checksums before packaging. [resources/usb/manifest.json](../resources/usb/manifest.json) records those hashes and provenance, and the original notices are retained. The build script packages installer code/resources and verified ADB components with their notices; no retail game executable, user ISO, maps, SSH password, or private key is included. GitHub Actions runs tests and builds the Windows setup executable. A local rebuild also writes a source bundle and checksum file to `dist/`; the public release attaches only the clearly named mod installer executable and prints its checksum in the release description.
 
 The workflow also includes an ARM64 Linux check, [check-build-container.py](../scripts/check-build-container.py), that uses the same rootless Podman arguments as the Frame build. It checks APT package installation, `setgroups`, `seteuid`, `setegid`, `chown`, and that container output belongs to the ordinary host user. The Windows executable CI job depends on that check as well as the unit tests. This container check uses no game data and does not replace a full Steam Frame installation test.
 

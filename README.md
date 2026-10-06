@@ -7,14 +7,16 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/download/v1.3.3/Halo-Steam-Frame-Setup-1.3.3.exe"><strong>DOWNLOAD v1.3.3 — WINDOWS EXE</strong></a><br>
+  <a href="https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/download/v1.3.4/Halo-Steam-Frame-Mod-Setup-1.3.4.exe"><strong>DOWNLOAD VR MOD INSTALLER v1.3.4 — WINDOWS EXE</strong></a><br>
   <sub>One installer file · No administrator rights needed</sub><br>
-  <a href="https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/tag/v1.3.3">Release notes &amp; checksum</a>
+  <a href="https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/tag/v1.3.4">Release notes &amp; checksum</a>
 </p>
 
-Bring Halo: Combat Evolved to Steam Frame with a native ARM64/OpenXR VR port, Xbox-style controls, and Halo artwork in your Steam library. The guided installer uses an original Xbox dashboard style and the classic Halo PC desktop icon.
+**Community VR mod installer for Halo: Combat Evolved on Steam Frame.** Installs an experimental native ARM64/OpenXR port with Xbox-style controls and Steam library artwork.
 
-You need **Windows 10/11 x64**, a **Steam Frame**, and your own authorized **original Xbox Halo CE ISO/XISO or extracted maps**. **USA Rev 2 is validated**; Halo PC, Xbox 360 Anniversary, and MCC data are unsupported. Game data is not included.
+You need **Windows 10/11 x64**, a **Steam Frame**, and your own authorized **original Xbox Halo CE ISO/XISO or extracted maps**. **USA Rev 2 is validated**; Halo PC, Xbox 360 Anniversary, and MCC data are unsupported.
+
+No retail game executable, disc image, maps, product keys, or soundtrack is included or downloaded. Halo artwork and trademarks retain their owners' rights; software components keep their licenses. This community project is unaffiliated with Microsoft, Xbox, Bungie, or Valve.
 
 1. Run the EXE, choose **Install**, and select your ISO or maps folder.
 2. Enable Frame Developer Mode, set its user password, and connect over **USB-C** or **Wi-Fi / Ethernet**. The app guides you through SSH setup.

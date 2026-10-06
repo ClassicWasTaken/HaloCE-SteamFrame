@@ -25,6 +25,9 @@ from .ui import (BG, SIDEBAR, SURFACE, TEXT, MUTED, BORDER,
 SETUP_URL = "https://partner.steamgames.com/doc/steamhardware/steamframe/setup"
 PLATFORM_TOOLS_URL = "https://developer.android.com/tools/releases/platform-tools"
 SOURCE_URL = "https://github.com/OpenCommunityEdition/OpenCE/pull/85"
+APP_TITLE = "Halo • Community Steam Frame VR Mod Installer"
+CONTENT_DISCLOSURE = "No retail game executable, ISO, maps, product keys, or soundtrack is provided."
+ARTWORK_CREDIT = "Halo artwork is included. Halo artwork and trademarks belong to Microsoft."
 XBOX_REVISION_NOTE = "Original Xbox USA Rev 2 validated; other retail revisions are checked automatically."
 GAME_CLOSE_NOTE = "Save and close running games before changing Halo files. Keep Steam Home and SteamVR running."
 STEAM_ADD_NOTE = ("In Steam, choose Add a Game → Add a Non-Steam Game and select the native halo executable. "
@@ -50,7 +53,7 @@ class App(tk.Tk):
             except (AttributeError, OSError):
                 pass
         super().__init__()
-        self.title("Halo • Steam Frame Setup")
+        self.title(APP_TITLE)
         width = min(1040, max(900, self.winfo_screenwidth() - 100))
         height = min(720, max(620, self.winfo_screenheight() - 100))
         self.geometry(f"{width}x{height}")
@@ -167,7 +170,7 @@ class App(tk.Tk):
         power_orb(icon, 85, 37, 29)
         self._label(brand, "HALO", 25, "bold", color=ACCENT,
                     background=SIDEBAR).pack(anchor="w", pady=(6, 0))
-        self._label(brand, "STEAM FRAME SETUP", 9, "bold", color=TEXT,
+        self._label(brand, "STEAM FRAME VR MOD", 9, "bold", color=TEXT,
                     background=SIDEBAR).pack(anchor="w", pady=(2, 0))
         self._label(brand, f"Version {__version__}", 9, color=MUTED, background=SIDEBAR).pack(anchor="w", pady=(9, 0))
         self._label(sidebar, "INSTALLATION", 8, "bold", MUTED, SIDEBAR).pack(anchor="w", padx=24, pady=(26, 8))
@@ -186,7 +189,7 @@ class App(tk.Tk):
                background=SIDEBAR, subtle=True, width=170).pack(anchor="w", pady=(2, 0))
         self._label(help_area, textvariable=self.music_status, size=8, color=MUTED,
                     background=SIDEBAR, wraplength=170).pack(anchor="w", padx=9, pady=(4, 10))
-        self._label(help_area, "ORIGINAL XBOX · NATIVE VR", 8, color=MUTED,
+        self._label(help_area, "COMMUNITY MOD INSTALLER", 8, color=MUTED,
                     background=SIDEBAR).pack(anchor="w", padx=10)
 
         main = tk.Frame(self, bg=BG)
@@ -215,7 +218,7 @@ class App(tk.Tk):
         self.page_title = self._label(header, "GAME DATA", 24, "bold")
         self.page_title.pack(anchor="w", pady=(6, 4))
         self.page_subtitle = self._label(header,
-            "Install, repair, or uninstall native Halo VR.", 10, color=MUTED)
+            "Install, repair, or uninstall the community VR mod.", 10, color=MUTED)
         self.page_subtitle.pack(anchor="w")
         page_host = tk.Frame(main, bg=BG)
         page_host.grid(row=1, column=0, sticky="nsew", padx=32)
@@ -364,10 +367,12 @@ class App(tk.Tk):
         consent = self._card(body)
         self.data_consent = consent.master
         self.data_authorization = self._check(consent,
-            "I am authorized to use this original Xbox game data.", self.authorized)
+            "I am authorized to use my original Xbox game data with this mod.", self.authorized)
         self.data_authorization.pack(anchor="w")
-        self._label(consent, "Use your own game data. PC and Xbox 360 editions are not supported.",
-                    9, color=MUTED, background=SURFACE, wraplength=630).pack(anchor="w", pady=(2, 0))
+        self.data_disclosure = self._label(consent,
+            CONTENT_DISCLOSURE + "\nUse your own authorized Xbox data. Included Halo artwork: Microsoft.",
+            9, color=MUTED, background=SURFACE, wraplength=630)
+        self.data_disclosure.pack(anchor="w", pady=(2, 0))
         uninstall = self._card(body, "REMOVE NATIVE HALO VR")
         self.uninstall_card = uninstall.master
         self._label(uninstall,
@@ -604,10 +609,10 @@ class App(tk.Tk):
         titles = ("UNINSTALL HALO VR" if uninstall else "GAME DATA", "CONNECT FRAME",
                   "UNINSTALL HALO VR" if uninstall else "INSTALL HALO VR")
         subtitles = ("Choose your save preference before removing the native game." if uninstall else
-                     "Install, repair, or uninstall native Halo VR.",
+                     "Install, repair, or uninstall the community VR mod.",
                      "Prepare SSH, then connect to your Steam Frame.",
                      "Review the native game and saves before removing them." if uninstall else
-                     "Native VR. Xbox controls. Your Steam library.")
+                     "Community VR mod. Xbox controls. Your Steam library.")
         self.page_title.configure(text=titles[index])
         self.page_subtitle.configure(text=subtitles[index])
         self._update_summary()
@@ -808,7 +813,12 @@ class App(tk.Tk):
                     9, color=MUTED, wraplength=530).pack(anchor="w", pady=(0, 8))
 
     def _show_help(self):
-        _, body = self._dialog("Help & sources", "Setup requirements and project references.")
+        _, body = self._dialog("Help & sources", "Community VR mod installer requirements and sources.")
+        disclosure = self._card(body, "COMMUNITY MOD INSTALLER")
+        self._label(disclosure,
+            "This installer builds the pinned Steam Frame VR port from public source using your authorized Xbox data.\n"
+            + CONTENT_DISCLOSURE + "\n" + ARTWORK_CREDIT + " Full credits are in the project documentation.",
+            10, background=SURFACE, wraplength=530).pack(anchor="w")
         card = self._card(body, "BEFORE YOU START")
         self._label(card,
             "• Use original Xbox Halo CE data you are authorized to use.\n"

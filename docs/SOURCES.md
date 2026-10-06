@@ -1,6 +1,6 @@
-# Sources and acknowledgements
+# VR mod sources and acknowledgements
 
-The installer builds the experimental native ARM64 Linux VR port of **Halo: Combat Evolved** from the revision below. It provides a guided installation; the decompilation, renderer, OpenXR implementation and networking are the work of the credited upstream contributors.
+This community VR mod installer builds the experimental native ARM64 Linux VR port of **Halo: Combat Evolved** from the revision below. It provides a guided installation; the decompilation, renderer, OpenXR implementation and networking are the work of the credited upstream contributors. No retail game executable, disc image, maps, product keys, or soundtrack is bundled or downloaded; users provide authorized original Xbox game data.
 
 Sources were checked on 2026-10-05. Links to pinned files describe the build used here; moving documentation may describe newer behavior.
 
@@ -121,7 +121,3 @@ The helper matches the current account and exact native executable before writin
 The preview reads only the `sound\music\title1\loops` sound tag from the user's selected original Xbox `ui.map`, either inside an ISO/XISO or in extracted maps. Cache and sound structures are based on the pinned native port's [cache_files.c](https://github.com/startupfoundry/halo-ce-universal/blob/88142798513ebd99fc7c6224023e8b44c05d0106/source/cache/cache_files.c) and [sound_definitions.h](https://github.com/startupfoundry/halo-ce-universal/blob/88142798513ebd99fc7c6224023e8b44c05d0106/source/sound/sound_definitions.h). Xbox ADPCM decoding follows its [dsound_sdl.c implementation](https://github.com/startupfoundry/halo-ce-universal/blob/88142798513ebd99fc7c6224023e8b44c05d0106/port/linux/src/dsound_sdl.c).
 
 The installer decodes the loop into a private temporary Windows WAV with a fixed 12% sample-amplitude gain. Playback loops automatically after local game data validates. Closing the installer stops playback and clears its temporary audio. No soundtrack is present in the repository or executable, fetched from a website, or uploaded over SSH. Audio-file extensions are rejected by the release packager. Remote-only repair has no local audio preview, and an unavailable preview does not block installation. The original music remains copyrighted game content; the installer's code license does not apply to it. Playback still needs a listening check.
-
-## General preservation resources
-
-User-suggested background links: [Vimm's Lair](https://vimm.net/) and [Internet Archive's about page](https://archive.org/about/). These are general references, not Halo file-download links, software dependencies, or assurances of game-data permissions. The installer selects a local original Xbox image/maps supplied by the user; it does not fetch commercial game files. The PC edition is not an input to the native Frame build.
