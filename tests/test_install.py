@@ -10,7 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from halo_frame_installer.install import EXPECTED_MAPS, Installer, SOURCE_COMMIT, map_manifest, parse_result
+from halo_frame_installer.install import EXPECTED_MAPS, Installer, SOURCE_COMMIT, close_connection, map_manifest, parse_result
 from halo_frame_installer.ssh import CancelledError, Settings, SSHError
 
 RESOURCES = Path(__file__).resolve().parents[1] / "resources"
@@ -246,6 +246,38 @@ def test_failed_build_does_not_finalize_or_modify_game(tmp_path):
         Installer(lambda settings: fake, RESOURCES).run(fake.settings, maps)
     assert not any(command[2] in ("finalize", "shortcut") for command in fake.commands if len(command) > 2 and command[1] != "-c")
     assert fake.closed
+
+
+def test_step_failure_is_not_replaced_by_a_failed_disconnect():
+    class ForwardCleanupFailure(FakeConnection):
+        def close(self):
+            raise SSHError("USB forward cleanup failed")
+
+    fake = ForwardCleanupFailure(Settings("frame", "private"))
+    with pytest.raises(SSHError, match="build failed"):
+        Installer(lambda settings: fake, RESOURCES).run(fake.settings, None)
+
+
+def test_cancelled_install_is_not_replaced_by_a_failed_disconnect():
+    class ForwardCleanupFailure(FakeConnection):
+        def close(self):
+            raise SSHError("USB forward cleanup failed")
+
+    event = threading.Event()
+    event.set()
+    fake = ForwardCleanupFailure(Settings("frame", "private"))
+    with pytest.raises(CancelledError):
+        Installer(lambda settings: fake, RESOURCES).run(fake.settings, None, cancel_event=event)
+
+
+def test_close_connection_reports_a_swallowed_cleanup_failure():
+    class FailingClose:
+        def close(self):
+            raise SSHError("SSH has closed, but the temporary USB forward could not be removed.")
+
+    seen = []
+    close_connection(FailingClose(), lambda *args: seen.append(args))
+    assert seen == [("detail", "SSH has closed, but the temporary USB forward could not be removed.", None)]
 
 
 def test_cancelled_before_connect_has_no_remote_mutation():

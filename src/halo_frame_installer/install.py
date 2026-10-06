@@ -122,6 +122,19 @@ class UninstallResult:
         return self.steam.get("status") not in ("removed", "already-absent")
 
 
+def close_connection(connection, progress: ProgressCallback) -> None:
+    """Disconnect without letting a cleanup failure replace an operation's own outcome.
+
+    SSHConnection releases the transport and socket before USB-forward cleanup
+    can fail, so the connection is down either way. The failure itself can
+    still carry required user action, so it is reported as activity instead.
+    """
+    try:
+        connection.close()
+    except (SSHError, OSError) as error:
+        progress("detail", str(error), None)
+
+
 class Installer:
     def __init__(self, connection_factory=SSHConnection, resource_dir: Path | None = None):
         self.connection_factory = connection_factory
@@ -260,7 +273,7 @@ class Installer:
             # Keep the result's public fingerprint before releasing the client.
             host_fingerprint = connection.host_fingerprint
             progress("disconnect", "Closing the setup SSH connection...", None)
-            connection.close()
+            close_connection(connection, progress)
             disconnected = True
             progress("disconnected", "Setup has disconnected from your Frame.", None)
             progress("complete", "Native VR game is ready. Launch Halo: Combat Evolved VR (Native) from your Steam library." if steam.get("status") == "added" else "Native VR game is installed. One Steam library step remains.", 100)
@@ -276,7 +289,7 @@ class Installer:
         finally:
             if not disconnected:
                 progress("detail", "Closing the setup SSH connection...", None)
-                connection.close()
+                close_connection(connection, progress)
                 progress("detail", "Setup has disconnected from your Frame.", None)
 
     def add_to_steam(self, settings: Settings, progress_callback: ProgressCallback | None = None,
@@ -347,7 +360,7 @@ class Installer:
                 progress("detail", warning, None)
             host_fingerprint = connection.host_fingerprint
             progress("disconnect", "Closing the setup SSH connection...", None)
-            connection.close()
+            close_connection(connection, progress)
             disconnected = True
             progress("disconnected", "Setup has disconnected from your Frame.", None)
             progress("complete", "Native Halo VR has been uninstalled." if uninstalled else "Native Halo VR was already absent; its Steam entry has been checked.", 100)
@@ -355,7 +368,7 @@ class Installer:
         finally:
             if not disconnected:
                 progress("detail", "Closing the setup SSH connection...", None)
-                connection.close()
+                close_connection(connection, progress)
                 progress("detail", "Setup has disconnected from your Frame.", None)
 
 

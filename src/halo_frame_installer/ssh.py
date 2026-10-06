@@ -201,7 +201,10 @@ class SSHConnection:
             timeout_message: str | None = None) -> str:
         """Run an argument vector; no secrets are put into a remote command."""
         command = shlex.join([str(arg) for arg in argv])
-        _, stdout, _ = self.client.exec_command(command, timeout=30)
+        try:
+            _, stdout, _ = self.client.exec_command(command, timeout=30)
+        except (paramiko.SSHException, OSError, socket.timeout) as exc:
+            raise SSHError("The remote command could not be started. Check the Frame's connection and retry.") from exc
         channel = stdout.channel
         self._command_channels.add(channel)
         channel.set_combine_stderr(True)
@@ -212,15 +215,26 @@ class SSHConnection:
         retained_bytes = 0
         pending = bytearray()
         started = time.monotonic()
+
+        def notify_cancelled():
+            # Best effort: a failed notification must not mask the cancellation
+            # or timeout error raised right after it. The host retries the
+            # remote cancel when it handles a cancellation; on a session this
+            # dead no retry could get through either.
+            if on_cancel is None:
+                return
+            try:
+                on_cancel()
+            except (SSHError, OSError, paramiko.SSHException):
+                pass
+
         try:
             while True:
                 if cancel_event is not None and cancel_event.is_set():
-                    if on_cancel is not None:
-                        on_cancel()
+                    notify_cancelled()
                     raise CancelledError("Installation cancelled. Existing games and saves were kept.")
                 if time.monotonic() - started > timeout:
-                    if on_cancel is not None:
-                        on_cancel()
+                    notify_cancelled()
                     raise SSHError(timeout_message or "The remote step timed out. You can reconnect and retry; existing games and saves were kept.")
                 while channel.recv_ready():
                     data = channel.recv(65536)
@@ -273,7 +287,13 @@ class SSHConnection:
                 raise CancelledError("Installation cancelled. Existing games and saves were kept.")
             if callback:
                 callback(done, total)
-        with self.client.open_sftp() as sftp:
+        try:
+            sftp = self.client.open_sftp()
+        except (OSError, EOFError, paramiko.SSHException):
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledError("Installation cancelled. Existing games and saves were kept.") from None
+            raise SSHError("The encrypted file transfer stopped. Check the Frame's connection and retry.") from None
+        with sftp:
             self._sftp_clients.add(sftp)
             sftp.get_channel().settimeout(20)
             try:
