@@ -640,6 +640,23 @@ def test_new_reuse_and_repair_guard_save_format_and_keep_experimental_instance(r
     assert (experimental / 'save/checkpoint').read_bytes() == b'experimental checkpoint'
 
 
+def test_config_repair_rejects_unusual_value_shapes_without_a_traceback(remote):
+    with pytest.raises(ValueError, match="unsupported setting shape"):
+        remote.merge_config('vr = 5\n[update]\nauto = false\n')
+    with pytest.raises(ValueError, match="unsupported setting shape"):
+        remote.merge_config('update = 5\n[vr]\nenabled = true\n')
+    with pytest.raises(ValueError, match="unsupported setting shape"):
+        remote.merge_config('vr = true\n')
+    with pytest.raises(ValueError, match="unsupported setting shape"):
+        remote.merge_config('[[update]]\nauto = false\n')
+    with pytest.raises(ValueError, match="not valid TOML"):
+        remote.merge_config('update.auto = false\n[update]\nauto = true\n')
+    with pytest.raises(ValueError, match="not valid TOML"):
+        remote.merge_config('vr = [unclosed\n')
+    with pytest.raises(ValueError, match="updated configuration could not be parsed"):
+        remote.merge_config('update.auto = false\n[vr]\nenabled = true\n')
+
+
 def test_repair_backup_and_replacements_preserve_saves_and_unrelated_files(remote):
     game = remote.GAME
     game.mkdir(parents=True)
