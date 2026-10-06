@@ -82,17 +82,23 @@ def resolve_adb(selected: str | None = None) -> Path:
         if not path.is_file() or path.name.lower() not in ("adb", "adb.exe"):
             raise USBError("Select adb.exe from the Android SDK platform-tools folder.")
         return path
-    # Prefer an existing client to cooperate with other applications' ADB server.
-    existing = shutil.which("adb")
-    if existing:
-        return Path(existing).resolve()
-    if sys.platform == "win32":
+    if sys.platform == "win32" or getattr(sys, "frozen", False):
+        # Only the hash-verified bundle is known to be the build shipped with
+        # this installer. The search path (which on Windows also covers the
+        # working directory) can surface an unrelated or shadowing adb.exe, so
+        # it is never trusted while a verified tool is available. The bundle
+        # is consulted on every platform it ships on, not just Windows.
         included = bundled_adb()
         if included:
             return included
         sdk = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Android" / "Sdk" / "platform-tools" / "adb.exe"
         if sdk.is_file():
             return sdk
+    # A client found on the search path may cooperate with another
+    # application's ADB server, but its provenance is unknown: last resort.
+    existing = shutil.which("adb")
+    if existing:
+        return Path(existing).resolve()
     raise USBError("USB tools were not found. Install Google's Android SDK Platform Tools and select adb.exe in Advanced settings.")
 
 
