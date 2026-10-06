@@ -611,6 +611,22 @@ def test_error_and_cancel_keep_progress_and_new_attempt_resets_it(app):
 
 
 @WINDOWS_GUI
+def test_password_inside_a_phase_name_still_advances_progress(app):
+    app._begin_setup_progress()
+    app._toggle_activity()
+    assert not app.activity_open
+    app.password_to_redact = 'build'
+    app.events.put(('progress', 'build', 'Preparing the native build container.', 45))
+    _drain_events(app)
+    # The phase is still recognized (bar advances, caption resolves) even though
+    # the caption's display text redacts the password it happens to contain.
+    assert float(app.progress['value']) == 45
+    assert app.phase.get() == 'Preparing the native [redacted] container'
+    assert app.activity_open
+    app.password_to_redact = ''
+
+
+@WINDOWS_GUI
 def test_box_art_pending_stays_at_99_with_retry_action(app):
     from halo_frame_installer.install import InstallResult
     result = InstallResult('/home/steamos/Games/HaloCENativeVR', False,

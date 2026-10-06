@@ -1201,15 +1201,20 @@ class App(tk.Tk):
                     if stage == "uninstall" and getattr(self, "operation", None) == "uninstall":
                         self.uninstall_committing = True
                         self.cancel_button.configure(state="disabled")
-                    stage, message = self._redact(stage), self._redact(message)
                     if detail:
                         self._append(message)
                     else:
+                        # The raw stage drives the phase table and activity choice;
+                        # redaction applies to displayed text only, so a password
+                        # that appears inside a phase name cannot stall the bar.
+                        # _append redacts once on its own.
                         if not self.cancel.is_set() or self.uninstall_committing:
                             self.progress_state.update(stage, percent)
                             self._display_progress()
-                            self.phase.set(self.progress_state.caption(stage))
-                            self.status.set(message[:500])
+                            # Unknown phases fall back to the raw stage name, so the
+                            # caption is redacted too, like every other display text.
+                            self.phase.set(self._redact(self.progress_state.caption(stage)))
+                            self.status.set(self._redact(message)[:500])
                         if self.installing or stage in ("build", "dependencies", "toolchain", "configure", "sdl", "compile", "build-check"):
                             self._show_activity()
                         self._append(f"{stage}: {message}")
