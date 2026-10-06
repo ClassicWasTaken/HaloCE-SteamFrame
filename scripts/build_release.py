@@ -9,7 +9,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
-VERSION = "1.2.3"
+VERSION = "1.3.0"
 EXE_NAME = f"Halo-Steam-Frame-Setup-{VERSION}.exe"
 
 def allowed_source_files():
@@ -31,6 +31,7 @@ def main():
     if sys.platform != "win32":
         raise SystemExit("Build the Windows executable on Windows.")
     DIST.mkdir(exist_ok=True)
+    subprocess.run([sys.executable, str(ROOT / "scripts/bundle_usb_tools.py")], cwd=ROOT, check=True)
     subprocess.run([sys.executable, str(ROOT / "scripts/gather_notices.py"), "--download-sources"], cwd=ROOT, check=True)
     source_files = allowed_source_files()
     snapshots = {path:hashlib.sha256(path.read_bytes()).hexdigest() for path in source_files}

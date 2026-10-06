@@ -20,3 +20,6 @@ hosts.json
 *.reg
 halo
 libSDL3.so*
+resources/usb/adb.exe
+resources/usb/AdbWinApi.dll
+resources/usb/AdbWinUsbApi.dll

@@ -23,6 +23,7 @@ from .ui import (BG, SIDEBAR, SURFACE, TEXT, MUTED, BORDER,
                  INSET, ACCENT, DISABLED, Button, Card, Page, Choice, power_orb)
 
 SETUP_URL = "https://partner.steamgames.com/doc/steamhardware/steamframe/setup"
+PLATFORM_TOOLS_URL = "https://developer.android.com/tools/releases/platform-tools"
 SOURCE_URL = "https://github.com/OpenCommunityEdition/OpenCE/pull/85"
 XBOX_REVISION_NOTE = "Original Xbox USA Rev 2 validated; other retail revisions are checked automatically."
 GAME_CLOSE_NOTE = "Save and close running games before changing Halo files. Keep Steam Home and SteamVR running."
@@ -64,6 +65,9 @@ class App(tk.Tk):
         self.password_to_redact = ""
         self.host = tk.StringVar(value="frame")
         self.port = tk.StringVar(value="22")
+        self.transport = tk.StringVar(value="network")
+        self.adb_path = tk.StringVar()
+        self.usb_serial = tk.StringVar()
         self.password = tk.StringVar()
         self.source = tk.StringVar()
         self.authorized = tk.BooleanVar()
@@ -100,6 +104,8 @@ class App(tk.Tk):
         self._build()
         self.source.trace_add("write", lambda *args:self._source_changed())
         self.mode.trace_add("write", lambda *args:self._mode_changed())
+        self.transport.trace_add("write", lambda *args:self._transport_changed())
+        self.usb_serial.trace_add("write", lambda *args:self._update_summary())
         self.keep_saves.trace_add("write", lambda *args:self._update_summary())
         self._apply_icon()
         self.after_idle(self._apply_window_theme)
@@ -377,31 +383,72 @@ class App(tk.Tk):
         self._label(instructions,
             "1   Settings → System → Enable Developer Mode\n2   Developer → Set User Password",
             10, background=SURFACE).pack(anchor="w")
-        self._label(instructions, "Keep your computer and Frame on the same network.",
-                    9, color=MUTED, background=SURFACE).pack(anchor="w", pady=(7, 0))
-        self._button(instructions, "Valve SSH guide", lambda:webbrowser.open(SETUP_URL), subtle=True,
-                     height=33).pack(anchor="w")
+        self.connection_prepare_note = self._label(instructions,
+            "Keep your computer and Frame on the same network.",
+            9, color=MUTED, background=SURFACE, wraplength=620)
+        self.connection_prepare_note.pack(anchor="w", pady=(7, 0))
         connection = self._card(body, "Connect securely")
-        row = tk.Frame(connection, bg=SURFACE)
-        row.pack(fill="x")
-        row.columnconfigure((0, 1), weight=1)
-        self._label(row, "Frame address", 9, color=MUTED, background=SURFACE).grid(row=0, column=0, sticky="w", pady=(0, 6))
-        self._label(row, "SSH password", 9, color=MUTED, background=SURFACE).grid(row=0, column=1, sticky="w", padx=(12, 0), pady=(0, 6))
-        self._entry(row, textvariable=self.host, width=22).grid(row=1, column=0, sticky="ew")
-        self._entry(row, textvariable=self.password, show="•", width=22).grid(row=1, column=1, sticky="ew", padx=(12, 0))
+        choices = tk.Frame(connection, bg=SURFACE)
+        choices.pack(fill="x", pady=(0, 12))
+        choices.columnconfigure((0, 1), weight=1, uniform="transports")
+        self.transport_choices = []
+        for index, title, subtitle, value in (
+            (0, "Network", "Wi-Fi or Ethernet", "network"),
+            (1, "USB-C cable", "Wired file transfer", "usb")):
+            choice = Choice(choices, title, subtitle, self.transport, value, self._transport_changed)
+            choice.grid(row=0, column=index, sticky="ew", padx=(0, 6) if index == 0 else (6, 0))
+            self.transport_choices.append(choice)
+        self.credentials_row = tk.Frame(connection, bg=SURFACE)
+        self.credentials_row.pack(fill="x")
+        self.network_panel = tk.Frame(self.credentials_row, bg=SURFACE)
+        self._label(self.network_panel, "Frame address", 9, color=MUTED,
+                    background=SURFACE).pack(anchor="w", pady=(0, 6))
+        self._entry(self.network_panel, textvariable=self.host, width=22).pack(fill="x")
+        self.usb_panel = tk.Frame(connection, bg=SURFACE)
+        self._label(self.usb_panel,
+            "USB tools are included. Connect a data-capable USB-C cable directly to the Frame.\n"
+            "Approve this computer on the headset if a USB debugging prompt appears.",
+            9, color=MUTED, background=SURFACE, wraplength=620).pack(anchor="w", pady=(0, 8))
+        password_row = tk.Frame(self.credentials_row, bg=SURFACE)
+        self.connection_password_row = password_row
+        password_row.pack(side="left", fill="x", expand=True)
+        self._label(password_row, "SSH password", 9, color=MUTED,
+                    background=SURFACE).pack(anchor="w", pady=(0, 6))
+        self._entry(password_row, textvariable=self.password, show="•", width=22).pack(fill="x")
         self.connection_label = self._label(connection, textvariable=self.connection_status, size=9,
                                            color=MUTED, background=SURFACE, wraplength=620)
         self.connection_label.pack(anchor="w", pady=(6, 0))
         connection_actions = tk.Frame(connection, bg=SURFACE)
         connection_actions.pack(fill="x", pady=(4, 0))
         self._button(connection_actions, "Test connection", self._test_connection).pack(side="left")
-        self.advanced_button = self._button(connection_actions, "Advanced SSH settings", self._toggle_advanced,
+        self.advanced_button = self._button(connection_actions, "Advanced connection settings", self._toggle_advanced,
                                             subtle=True)
         self.advanced_button.pack(side="right")
         self.advanced_frame = tk.Frame(connection, bg=SURFACE)
-        self._label(self.advanced_frame, "SSH port", 9, color=MUTED, background=SURFACE).pack(side="left")
-        self._entry(self.advanced_frame, textvariable=self.port, width=6).pack(side="left", padx=10)
-        self._label(self.advanced_frame, "Login: steamos", 9, color=MUTED, background=SURFACE).pack(side="left", padx=6)
+        self.network_advanced = tk.Frame(self.advanced_frame, bg=SURFACE)
+        self._label(self.network_advanced, "SSH port", 9, color=MUTED, background=SURFACE).pack(side="left")
+        self._entry(self.network_advanced, textvariable=self.port, width=6).pack(side="left", padx=10)
+        self._label(self.network_advanced, "Login: steamos", 9, color=MUTED, background=SURFACE).pack(side="left", padx=6)
+        self.usb_advanced = tk.Frame(self.advanced_frame, bg=SURFACE)
+        self._label(self.usb_advanced, "Optional alternative adb executable", 9,
+                    color=MUTED, background=SURFACE).pack(anchor="w", pady=(0, 6))
+        adb_row = tk.Frame(self.usb_advanced, bg=SURFACE)
+        adb_row.pack(fill="x")
+        self._entry(adb_row, textvariable=self.adb_path).pack(side="left", fill="x", expand=True)
+        self._button(adb_row, "Browse adb.exe", self._choose_adb, subtle=True,
+                     height=35).pack(side="right", padx=(8, 0))
+        self._label(self.usb_advanced,
+            "Leave blank to use available USB tools. You can select adb.exe from an extracted Platform Tools folder.",
+            8, color=MUTED, background=SURFACE, wraplength=620).pack(anchor="w", pady=(5, 0))
+        self._button(self.usb_advanced, "Download Google Platform Tools",
+                     lambda:webbrowser.open(PLATFORM_TOOLS_URL), subtle=True,
+                     height=33).pack(anchor="w", pady=(3, 8))
+        self._label(self.usb_advanced, "USB device serial (optional)", 9,
+                    color=MUTED, background=SURFACE).pack(anchor="w", pady=(0, 6))
+        self._entry(self.usb_advanced, textvariable=self.usb_serial).pack(fill="x")
+        self._label(self.usb_advanced, "Leave blank when only one Frame is connected. Login: steamos; SSH port: 22.",
+                    8, color=MUTED, background=SURFACE, wraplength=620).pack(anchor="w", pady=(5, 0))
+        self._transport_changed()
         acknowledgement = self._card(body)
         self._check(acknowledgement, "I have saved and closed games on my Frame.", self.steam_closed).pack(anchor="w")
         self.connection_steam_note = self._label(acknowledgement,
@@ -518,7 +565,11 @@ class App(tk.Tk):
         self.summary_data_heading.set("NATIVE GAME FOLDER" if uninstall else "GAME DATA")
         self.summary_source.set("~/Games/HaloCENativeVR" if uninstall else
                                 Path(source).name if source else "Use valid Xbox maps already installed on the Frame")
-        self.summary_frame.set(self.host.get().strip() or "Enter your Frame address")
+        if self.transport.get() == "usb":
+            serial = self.usb_serial.get().strip()
+            self.summary_frame.set("USB-C cable" + (f" · {serial}" if serial else " · Detect connected Frame"))
+        else:
+            self.summary_frame.set(self.host.get().strip() or "Enter your Frame address")
         self.summary_action_heading.set("CAMPAIGN SAVES" if uninstall else "XBOX CONTROLS")
         self.summary_action.set(("Keep saves in a backup on the Frame" if self.keep_saves.get()
                                  else "Remove saves contained in the native game folder") if uninstall else
@@ -638,7 +689,26 @@ class App(tk.Tk):
             self.advanced_frame.pack(fill="x", pady=(9, 0))
         else:
             self.advanced_frame.pack_forget()
-        self.advanced_button.configure(text="Hide SSH settings" if self.advanced_open else "Advanced SSH settings")
+        self.advanced_button.configure(text="Hide connection settings" if self.advanced_open else "Advanced connection settings")
+
+    def _transport_changed(self):
+        usb = self.transport.get() == "usb"
+        self.network_panel.pack_forget()
+        self.usb_panel.pack_forget()
+        if usb:
+            self.usb_panel.pack(fill="x", before=self.credentials_row)
+        else:
+            self.network_panel.pack(side="left", fill="x", expand=True,
+                                    padx=(0, 12), before=self.connection_password_row)
+        self.network_advanced.pack_forget()
+        self.usb_advanced.pack_forget()
+        advanced = self.usb_advanced if usb else self.network_advanced
+        advanced.pack(fill="x")
+        self.connection_prepare_note.configure(text=(
+            "Use a data-capable USB-C cable for transfer. The Frame still needs internet access for downloads and the native build."
+            if usb else "Keep your computer and Frame on the same network. Wi-Fi and Ethernet both work."))
+        self.connection_status.set("Your password stays in memory and is never saved.")
+        self._update_summary()
 
     def _cancel_setup(self):
         if self.uninstall_committing:
@@ -700,7 +770,10 @@ class App(tk.Tk):
             "  are checked for a supported Xbox cache build:\n"
             "  NTSC: 01.10.12.2276 or 01.08.15.1749; PAL: 01.01.14.2342.\n"
             "• PC and Xbox 360 data are not supported.\n"
-            "• Keep both devices on the same network.\n"
+            "• Network: keep both devices on the same Wi-Fi or Ethernet network.\n"
+            "• USB: use a data-capable USB-C cable with Developer Mode enabled.\n"
+            "  USB tools are included. Approve USB debugging if prompted.\n"
+            "• The Frame still needs internet access to download and build the game.\n"
             "• Save and close games. Steam Home and SteamVR stay running.\n"
             "• Install SteamVR and allow at least 12 GB free on your Frame.\n"
             "• Repair refreshes the program and controls while preserving saves.\n"
@@ -708,6 +781,8 @@ class App(tk.Tk):
             10, background=SURFACE, wraplength=530).pack(anchor="w")
         links = self._card(body, "Project references")
         Button(links, "Steam Frame SSH guide", lambda:webbrowser.open(SETUP_URL),
+               subtle=True, background=SURFACE).pack(anchor="w")
+        Button(links, "Google Android Platform Tools", lambda:webbrowser.open(PLATFORM_TOOLS_URL),
                subtle=True, background=SURFACE).pack(anchor="w")
         Button(links, "Native VR source", lambda:webbrowser.open(SOURCE_URL),
                subtle=True, background=SURFACE).pack(anchor="w")
@@ -731,6 +806,14 @@ class App(tk.Tk):
         if selected:
             self._inspect(Path(selected))
 
+    def _choose_adb(self):
+        if self.busy:
+            return
+        selected = filedialog.askopenfilename(title="Select adb executable",
+            filetypes=[("Android Debug Bridge", "adb.exe adb"), ("All files", "*.*")])
+        if selected:
+            self.adb_path.set(selected)
+
     def _inspect(self, selected):
         if self.busy:
             return
@@ -748,13 +831,21 @@ class App(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _settings(self):
-        try:
-            port = int(self.port.get())
-        except ValueError:
-            raise ValueError("Enter a numeric SSH port.") from None
-        host = self.host.get().strip()
+        usb = self.transport.get() == "usb"
+        if usb:
+            host, port = "frame", 22
+        else:
+            try:
+                port = int(self.port.get())
+            except ValueError:
+                raise ValueError("Enter a numeric SSH port.") from None
+            host = self.host.get().strip()
+        serial = self.usb_serial.get().strip() or None
+        identity = f"usb:{serial}" if usb and serial else f"{host}:{port}" if not usb else None
         return Settings(host=host, password=self.password.get(), port=port,
-            known_host_fingerprint=self.fingerprints.get(f"{host}:{port}"),
+            transport=self.transport.get(), adb_path=self.adb_path.get().strip() or None,
+            usb_serial=serial, known_host_fingerprints=dict(self.fingerprints),
+            known_host_fingerprint=self.fingerprints.get(identity) if identity else None,
             accept_host_key=lambda h,a,v:self._approve_host(h,a,v,port),
             close_steam_for_shortcut=False)
 
@@ -776,6 +867,8 @@ class App(tk.Tk):
         for check in self.checks:
             check.configure(state="disabled" if value else "normal")
         for choice in self.mode_choices:
+            choice.configure(state="disabled" if value else "normal")
+        for choice in self.transport_choices:
             choice.configure(state="disabled" if value else "normal")
         allow_steam_retry = self.last_result is not None and self.mode.get() != "uninstall"
         self.retry_button.configure(state="normal" if not value and allow_steam_retry else "disabled")
@@ -800,19 +893,33 @@ class App(tk.Tk):
         self.status.set("Connecting to your Frame…")
         self.connection_status.set("Connecting to your Frame…")
         def worker():
-            connection = SSHConnection(settings)
+            connection = None
+            confirmed = None
+            error = None
             try:
+                connection = SSHConnection(settings)
                 connection.connect()
                 arch = connection.run(["uname", "-m"], cancel_event=self.cancel).strip()
                 if arch not in ("aarch64", "arm64"):
                     raise ValueError("This device is not an ARM64 Steam Frame.")
-                self.events.put(("connected", settings.host, settings.port, connection.host_fingerprint))
+                confirmed = ("connected", settings.host_identity, connection.host_fingerprint)
             except Exception as exc:
-                self.events.put(("error", str(exc)))
+                error = str(exc)
             finally:
-                connection.close()
-                settings.password = ""
-                self.events.put(("idle",))
+                try:
+                    if connection is not None:
+                        connection.close()
+                except Exception as exc:
+                    cleanup = "Setup could not finish disconnecting after the connection check.\n" + str(exc)
+                    error = (error + "\n\n" + cleanup) if error else cleanup
+                finally:
+                    settings.password = ""
+                    if error is not None:
+                        self.events.put(("error", error))
+                        self.events.put(("clear_password",))
+                    elif confirmed is not None:
+                        self.events.put(confirmed)
+                    self.events.put(("idle",))
         threading.Thread(target=worker, daemon=True).start()
 
     def _install(self, repair=False):
@@ -978,9 +1085,9 @@ class App(tk.Tk):
                         self._remember(host, port, value)
                     ready.set()
                 elif kind == "connected":
-                    _, host, port, value = event
+                    _, identity, value = event
                     if value:
-                        self._remember(host, port, value)
+                        self._remember(identity, None, value)
                     self.status.set("Connected to your Frame. Ready to install.")
                     self.connection_status.set("Connected to your Frame. You're ready to continue.")
                     self._append("SSH connection verified. No password was saved.")
@@ -1055,7 +1162,7 @@ class App(tk.Tk):
                     self.status.set("Setup stopped. See the message below; you can retry.")
                     self.phase.set("Let's try that again")
                     if getattr(self, "operation", None) == "connection":
-                        self.connection_status.set("Couldn't connect. Check your address and SSH password, then retry.")
+                        self.connection_status.set("Connection check needs attention. See setup activity, then retry.")
                     elif getattr(self, "operation", None) == "data":
                         self.asset_status.set("Couldn't validate this data. Choose an original Xbox image or maps folder.")
                     self._append(text)
@@ -1076,7 +1183,8 @@ class App(tk.Tk):
         self.after(10 if not self.events.empty() else 80, self._drain)
 
     def _remember(self, host, port, value):
-        self.fingerprints[f"{host}:{port}"] = value
+        identity = host if port is None or host.startswith("usb:") else f"{host}:{port}"
+        self.fingerprints[identity] = value
         try:
             self.state_dir.mkdir(parents=True, exist_ok=True)
             self.state_file.write_text(json.dumps(self.fingerprints, indent=2), encoding="utf-8")

@@ -59,15 +59,25 @@ class Settings:
     close_steam_for_shortcut: bool = False
     reinstall_existing: bool = True
     adopt_existing_native: bool = False
+    transport: str = "network"
+    adb_path: str | None = None
+    usb_serial: str | None = None
+    known_host_fingerprints: dict[str, str] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
-        self.host = validate_host(self.host)
+        if self.transport not in ("network", "usb"):
+            raise ValueError("Choose Wi-Fi / Ethernet or USB-C transfer.")
+        self.host = validate_host(self.host) if self.transport == "network" else "frame"
         if self.username != "steamos":
             raise ValueError("This installer supports the Steam Frame's steamos account.")
         if isinstance(self.port, bool) or not isinstance(self.port, int) or not 1 <= self.port <= 65535:
             raise ValueError("SSH port must be between 1 and 65535.")
         if not self.password:
             raise ValueError("Enter the Frame's SSH password.")
+
+    @property
+    def host_identity(self) -> str:
+        return "usb:" + (self.usb_serial or "auto") if self.transport == "usb" else f"{self.host}:{self.port}"
 
 
 class _VerifyHost(paramiko.MissingHostKeyPolicy):
@@ -77,12 +87,14 @@ class _VerifyHost(paramiko.MissingHostKeyPolicy):
 
     def missing_host_key(self, client, hostname, key):
         value = fingerprint(key)
-        expected = self.settings.known_host_fingerprint
+        expected = (self.settings.known_host_fingerprint
+                    or self.settings.known_host_fingerprints.get(self.settings.host_identity))
         if expected is not None and value != expected:
             raise SSHError("The Frame's SSH host key has changed. Connection refused. Verify the device before updating its saved fingerprint.")
         if expected is None:
             confirm = self.settings.accept_host_key
-            if confirm is None or not confirm(self.settings.host, key.get_name(), value):
+            display = self.settings.host_identity if self.settings.transport == "usb" else self.settings.host
+            if confirm is None or not confirm(display, key.get_name(), value):
                 raise SSHError("SSH host fingerprint was not approved.")
         self.accepted_fingerprint = value
         # Store only in this connection's memory. The GUI may persist the public fingerprint.
@@ -98,31 +110,54 @@ class SSHConnection:
         self._command_channels = set()
         self._sftp_clients = set()
         self._closed = False
+        self._usb_forward = None
 
     @property
     def host_fingerprint(self) -> str | None:
         return self.policy.accepted_fingerprint
 
     def connect(self) -> None:
+        from .usb import USBError, USBForward
         try:
-            self.client.connect(self.settings.host, port=self.settings.port,
+            host, port = self.settings.host, self.settings.port
+            if self.settings.transport == "usb":
+                self._usb_forward = USBForward(self.settings.adb_path, self.settings.usb_serial)
+                self.settings.usb_serial, port = self._usb_forward.open()
+                host = "127.0.0.1"
+            self.client.connect(host, port=port,
                                 username="steamos", password=self.settings.password,
                                 allow_agent=False, look_for_keys=False,
                                 timeout=15, auth_timeout=20, banner_timeout=20)
         except (paramiko.AuthenticationException, paramiko.PasswordRequiredException) as exc:
+            self._close_after_failure()
             raise SSHError("SSH authentication failed. Check the Frame's steamos password.") from None
+        except USBError as exc:
+            self._close_after_failure()
+            raise SSHError(str(exc)) from None
         except SSHError:
+            self._close_after_failure()
             raise
         except (paramiko.SSHException, OSError, socket.timeout) as exc:
+            self._close_after_failure()
             # Avoid displaying a library error that might include submitted credentials.
-            raise SSHError("Could not connect to the Frame over SSH. Check its address, Wi-Fi connection, and SSH service.") from None
+            message = ("Could not connect to the Frame over USB SSH. Check Developer Mode, the USB cable and the Frame's SSH service."
+                       if self.settings.transport == "usb" else
+                       "Could not connect to the Frame over SSH. Check its address, Wi-Fi / Ethernet connection, and SSH service.")
+            raise SSHError(message) from None
         transport = self.client.get_transport()
         if transport is not None:
             transport.set_keepalive(15)
 
+    def _close_after_failure(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass  # Preserve the authentication/connection diagnostic.
+
     def close(self) -> None:
         """Release setup's channels and TCP transport before declaring it done."""
         if self._closed:
+            self._close_usb_forward()
             return
         # A channel failure must not prevent the underlying socket and keepalive
         # thread from being closed. These are only resources opened by this client.
@@ -145,8 +180,20 @@ class SSHConnection:
                     if sock is not None:
                         sock.close()
         finally:
-            self.client.close()
-        self._closed = True
+            try:
+                self.client.close()
+            finally:
+                self._closed = True
+                self._close_usb_forward()
+
+    def _close_usb_forward(self) -> None:
+        if self._usb_forward is not None:
+            from .usb import USBError
+            try:
+                self._usb_forward.close()
+            except USBError as exc:
+                raise SSHError(str(exc)) from None
+            self._usb_forward = None
 
     def run(self, argv: list[str], *, progress: Callable[[str], None] | None = None,
             cancel_event: threading.Event | None = None, timeout: float = 3600,

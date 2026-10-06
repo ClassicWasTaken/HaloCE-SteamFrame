@@ -68,6 +68,10 @@ def app(app_window, monkeypatch):
     instance.source.set('')
     instance.host.set('frame')
     instance.port.set('22')
+    instance.transport.set('network')
+    instance.adb_path.set('')
+    instance.usb_serial.set('')
+    instance.fingerprints = {}
     instance.password.set('')
     instance.password_to_redact = ''
     instance.authorized.set(False)
@@ -81,6 +85,8 @@ def app(app_window, monkeypatch):
     instance.cancel.clear()
     if instance.activity_open:
         instance._toggle_activity()
+    if instance.advanced_open:
+        instance._toggle_advanced()
     instance._set_busy(False)
     instance._show_page(0)
     instance.progress_state.reset()
@@ -163,6 +169,235 @@ def test_pages_preserve_inputs_and_mode(app):
                 app.authorized.get(), app.steam_closed.get(), app.mode.get()) == (
                     'X:/my-original-xbox-image.iso', '192.0.2.24', '2222',
                     'offline-secret', True, True, 'repair')
+
+
+@WINDOWS_GUI
+def test_usb_and_network_choices_preserve_inputs_across_pages(app):
+    app.host.set('192.0.2.24')
+    app.port.set('2222')
+    app.adb_path.set('C:/Platform Tools/adb.exe')
+    app.usb_serial.set('FRAME-SERIAL')
+    app.password.set('offline-secret')
+    app.transport.set('usb')
+    app._show_page(1)
+    app.update_idletasks()
+    assert app.usb_panel.winfo_manager() == 'pack'
+    assert not app.network_panel.winfo_manager()
+    assert app.usb_advanced.winfo_manager() == 'pack'
+    assert not app.network_advanced.winfo_manager()
+    assert app.summary_frame.get() == 'USB-C cable · FRAME-SERIAL'
+    for index in (2, 0, 1):
+        app._show_page(index)
+        assert app.transport.get() == 'usb'
+        assert app.adb_path.get() == 'C:/Platform Tools/adb.exe'
+        assert app.usb_serial.get() == 'FRAME-SERIAL'
+        assert app.password.get() == 'offline-secret'
+    app.transport.set('network')
+    assert app.network_panel.winfo_manager() == 'pack'
+    assert not app.usb_panel.winfo_manager()
+    assert app.network_advanced.winfo_manager() == 'pack'
+    assert not app.usb_advanced.winfo_manager()
+    assert (app.host.get(), app.port.get()) == ('192.0.2.24', '2222')
+    assert app.summary_frame.get() == '192.0.2.24'
+    assert 'Wi-Fi and Ethernet' in app.connection_prepare_note.cget('text')
+
+
+@WINDOWS_GUI
+def test_usb_settings_ignore_hidden_network_inputs_and_use_device_fingerprint(app):
+    app.host.set('invalid hidden address')
+    app.port.set('invalid-port')
+    app.password.set('offline-secret')
+    app.transport.set('usb')
+    app.usb_serial.set(' FRAME-SERIAL ')
+    app.adb_path.set(' C:/Platform Tools/adb.exe ')
+    app.fingerprints = {'usb:FRAME-SERIAL': 'SHA256:usb', '127.0.0.1:2222': 'SHA256:wrong'}
+    settings = app._settings()
+    assert settings.transport == 'usb'
+    assert settings.port == 22
+    assert settings.usb_serial == 'FRAME-SERIAL'
+    assert settings.adb_path == 'C:/Platform Tools/adb.exe'
+    assert settings.host_identity == 'usb:FRAME-SERIAL'
+    assert settings.known_host_fingerprint == 'SHA256:usb'
+    assert settings.known_host_fingerprints == app.fingerprints
+    assert settings.known_host_fingerprints is not app.fingerprints
+    assert settings.close_steam_for_shortcut is False
+
+
+@WINDOWS_GUI
+def test_automatic_usb_selection_supplies_saved_device_fingerprints(app):
+    app.password.set('offline-secret')
+    app.transport.set('usb')
+    app.fingerprints = {'usb:FRAME-SERIAL': 'SHA256:usb'}
+    settings = app._settings()
+    assert settings.usb_serial is None
+    assert settings.adb_path is None
+    assert settings.known_host_fingerprint is None
+    assert settings.known_host_fingerprints == {'usb:FRAME-SERIAL': 'SHA256:usb'}
+    assert app.summary_frame.get() == 'USB-C cable · Detect connected Frame'
+
+
+@WINDOWS_GUI
+def test_trusted_usb_fingerprint_persists_by_serial_without_forwarded_port(app):
+    import threading
+    ready, answer = threading.Event(), []
+    app.events.put(('fingerprint', 'usb:FRAME-SERIAL', 'ssh-ed25519', 'SHA256:usb', 22, ready, answer))
+    _drain_events(app)
+    assert ready.is_set() and answer == [True]
+    assert app.fingerprints == {'usb:FRAME-SERIAL': 'SHA256:usb'}
+    assert json.loads(app.state_file.read_text(encoding='utf-8')) == app.fingerprints
+    app.events.put(('connected', 'usb:FRAME-SERIAL', 'SHA256:usb'))
+    _drain_events(app)
+    assert app.fingerprints == {'usb:FRAME-SERIAL': 'SHA256:usb'}
+    assert app._load_fingerprints() == app.fingerprints
+    assert '127.0.0.1' not in app.state_file.read_text(encoding='utf-8')
+
+
+@WINDOWS_GUI
+def test_network_settings_keep_address_port_and_existing_trust_identity(app):
+    app.host.set('192.0.2.24')
+    app.port.set('2222')
+    app.password.set('offline-secret')
+    app.fingerprints = {'192.0.2.24:2222': 'SHA256:network'}
+    settings = app._settings()
+    assert settings.transport == 'network'
+    assert settings.host_identity == '192.0.2.24:2222'
+    assert settings.known_host_fingerprint == 'SHA256:network'
+    app.events.put(('connected', settings.host_identity, 'SHA256:network'))
+    _drain_events(app)
+    assert app.fingerprints == {'192.0.2.24:2222': 'SHA256:network'}
+
+
+@WINDOWS_GUI
+def test_connection_worker_remembers_resolved_usb_identity_without_opening_network(app, monkeypatch):
+    from halo_frame_installer import gui
+    closed = []
+
+    class OfflineConnection:
+        host_fingerprint = 'SHA256:usb'
+
+        def __init__(self, settings):
+            self.settings = settings
+
+        def connect(self):
+            assert self.settings.transport == 'usb'
+            self.settings.usb_serial = 'FRAME-SERIAL'
+
+        def run(self, argv, **kwargs):
+            assert argv == ['uname', '-m']
+            return 'aarch64'
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(gui, 'SSHConnection', OfflineConnection)
+    monkeypatch.setattr(gui.threading, 'Thread', _ImmediateThread)
+    app.transport.set('usb')
+    app.password.set('offline-secret')
+    app._test_connection()
+    _drain_events(app)
+    assert closed == [True]
+    assert app.fingerprints == {'usb:FRAME-SERIAL': 'SHA256:usb'}
+    assert not app.busy
+    assert 'Connected to your Frame' in app.connection_status.get()
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('connection_fails', [False, True])
+def test_connection_cleanup_failure_restores_controls_clears_password_and_never_reports_success(app, monkeypatch, connection_fails):
+    from halo_frame_installer import gui
+    from halo_frame_installer.ssh import SSHError
+    captured = []
+    actions = []
+
+    class OfflineConnection:
+        host_fingerprint = 'SHA256:usb'
+
+        def __init__(self, settings):
+            self.settings = settings
+            captured.append(settings)
+
+        def connect(self):
+            self.settings.usb_serial = 'FRAME-SERIAL'
+            if connection_fails:
+                raise SSHError('Offline connection failed.')
+
+        def run(self, argv, **kwargs):
+            return 'aarch64'
+
+        def close(self):
+            actions.append('close')
+            raise SSHError('The USB forward could not be removed: offline-secret')
+
+    monkeypatch.setattr(gui, 'SSHConnection', OfflineConnection)
+    monkeypatch.setattr(gui.threading, 'Thread', _ImmediateThread)
+    app.transport.set('usb')
+    app.password.set('offline-secret')
+    app._test_connection()
+    assert actions == ['close']
+    assert captured[0].password == ''
+    queued = list(app.events.queue)
+    assert not any(event[0] == 'connected' for event in queued)
+    assert queued[-1] == ('idle',)
+    _drain_events(app)
+    assert not app.busy
+    assert not app.password.get()
+    assert not _disabled(app.primary_button)
+    assert all(not _disabled(choice) for choice in app.transport_choices)
+    assert app.fingerprints == {}
+    assert 'needs attention' in app.connection_status.get()
+    assert 'SSH connection verified' not in '\n'.join(app.log_lines)
+    log = '\n'.join(app.log_lines)
+    assert 'USB forward could not be removed' in log
+    assert 'offline-secret' not in log
+    assert 'disconnecting' in log
+    assert app._test_dialogs
+    if connection_fails:
+        assert 'Offline connection failed' in log
+    else:
+        assert any('disconnecting' in message for _, message in app._test_dialogs)
+
+
+@WINDOWS_GUI
+def test_adb_browse_retains_selection_and_is_disabled_during_setup(app, monkeypatch):
+    from halo_frame_installer import gui
+    calls = []
+    monkeypatch.setattr(gui.filedialog, 'askopenfilename',
+        lambda **kwargs: calls.append(kwargs) or 'C:/Platform Tools/adb.exe')
+    app.transport.set('usb')
+    app._choose_adb()
+    assert app.adb_path.get() == 'C:/Platform Tools/adb.exe'
+    app._set_busy(True)
+    assert all(_disabled(choice) for choice in app.transport_choices)
+    assert all(_disabled(entry) for entry in app.entries)
+    app._choose_adb()
+    assert len(calls) == 1
+    for choice in app.transport_choices:
+        choice._select()
+    assert app.transport.get() == 'usb'
+    app._set_busy(False)
+    assert all(not _disabled(choice) for choice in app.transport_choices)
+
+
+@WINDOWS_GUI
+def test_usb_help_describes_cable_password_internet_and_official_tools(app):
+    import tkinter as tk
+    app.transport.set('usb')
+    text = '\n'.join(_display_text(app))
+    for phrase in ('USB tools are included', 'data-capable USB-C cable',
+                   'USB debugging prompt', 'SSH password', 'internet access'):
+        assert phrase in text
+    app._show_help()
+    dialogs = [widget for widget in app.winfo_children() if isinstance(widget, tk.Toplevel)]
+    try:
+        assert len(dialogs) == 1
+        text = '\n'.join(_display_text(dialogs[0]))
+        assert 'Developer Mode enabled' in text
+        assert 'Wi-Fi or Ethernet network' in text
+        from halo_frame_installer.gui import PLATFORM_TOOLS_URL
+        assert PLATFORM_TOOLS_URL == 'https://developer.android.com/tools/releases/platform-tools'
+    finally:
+        for dialog in dialogs:
+            dialog.destroy()
 
 
 @WINDOWS_GUI
