@@ -1,24 +1,19 @@
-# Halo Steam Frame Setup 1.3.1
+# Halo Steam Frame Setup 1.3.2
 
-Download only **[DOWNLOAD THIS FILE — Halo-Steam-Frame-Setup-1.3.1.exe](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/download/v1.3.1/Halo-Steam-Frame-Setup-1.3.1.exe)**. This is the complete Windows installer, including USB tools and library artwork; no separate ZIP or Python installation is needed.
+Download only **[DOWNLOAD THIS FILE — Halo-Steam-Frame-Setup-1.3.2.exe](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/download/v1.3.2/Halo-Steam-Frame-Setup-1.3.2.exe)**. This is the complete Windows installer; no separate ZIP or Python installation is needed.
 
-This patch fills out the native Halo non-Steam library entry with an original Halo CE banner, transparent title logo, cover images, and a Master Chief shortcut icon. It adds a game description and Xbox-style control guide in **Steam Notes**. Steam's non-Steam shortcuts do not expose an editable store-style About description: the patch uses the existing Notes feature instead of claiming a store page, achievements, reviews, or another game's Steam identity.
+This small visual patch replaces the Windows setup executable and window icon with the classic Halo PC Master Chief helmet-and-shoulders icon. It uses the exact original ICO artwork matching the requested reference, including all 12 native image entries: 16, 24, 32, and 48 pixels at 4, 8, and 32-bit color. The clean asset has no desktop background, shortcut arrow, or filename label.
 
-Already installed? Choose **Steam info**, connect by USB-C or Wi-Fi/Ethernet, and click **Update Steam info**. This verifies the existing native game and updates its library information without reinstalling or compiling it, uploading maps, or requiring another ISO. Steam Home and SteamVR stay running.
+The GitHub README now shows just the Halo CE banner and title logo as artwork, with the prominent single-EXE download link and setup guide retained.
 
-- Adds missing cover, landscape tile, hero/banner and transparent logo through the running Steam client, or safe library-file registration when Steam is already closed. Custom artwork is preserved.
-- Stores the shortcut icon in the owned native game folder and uses Steam's shortcut-icon interface. Existing custom icons are kept. If the icon's saved shortcut identity cannot be verified, setup shows a retry/manual step instead of guessing.
-- Adds one private **Halo CE VR — About & controls** note using Steam's native Notes interface. Existing notes and edits are preserved. Notes use Steam's normal synchronization; if the feature is unavailable or sync cannot be verified, setup provides text to copy manually.
-- Checks the active Steam account and exact native executable before library changes. Unavailable or unverified artwork, icon, or Notes updates are reported separately from the installed game's status.
-- Retains Xbox controls, original Xbox data validation, tutorial changes, USB transfer, left-to-right progress, redacted logs, save-preserving repair and uninstall, and the Steam Home session safeguard.
-- Refreshes the GitHub README with Halo banner, logo, and helmet artwork and a prominent single-file download link.
+The source ICO was downloaded from [HaloNet](https://halonet.net/favicon.ico) and verified byte-for-byte against the locally installed retail Halo PC executable's icon group 102. Only icon artwork is included, with [exact hashes and attribution](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/blob/v1.3.2/resources/ui/README.md). Halo artwork rights remain separate from the installer's MIT code license.
 
-The new bundled artwork adds less than 1 MB. Hero and logo provenance and file hashes are recorded in the [artwork notice](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/blob/v1.3.1/resources/artwork/README.md). Promotional artwork remains separate from the project's MIT code license.
+This release retains the 1.3.1 Steam banner, title logo, covers, private description/control guide in Steam Notes, and **Steam info > Update Steam info** workflow. The Steam shortcut retains its existing project-drawn helmet icon. USB/network transfer, Xbox controls, repair, uninstall, and Steam Home safeguards continue unchanged. The new installer icon does not require reinstalling the game.
 
-**Validation limits:** the additional artwork, icon, and Notes paths have software tests; their appearance and Notes behavior still need verification on a real Steam Frame. The native game, Xbox controls, and earlier cover-art registration were previously checked on one Frame. Direct USB transfer, a fresh first install, and full game uninstall remain unverified on physical hardware. The upstream ARM64/OpenXR port is experimental. The Frame still needs internet for source and compiler downloads during installation; a Steam-info-only update does not build the game.
+The native ARM64/OpenXR port remains experimental. New Steam library artwork/Notes, direct USB transfer, a fresh first install, and full game uninstall still need physical Frame verification. This cosmetic patch does not establish additional device compatibility or performance improvements.
 
-Use your own authorized original **Xbox** Halo CE data for game installation. USA Rev 2 is validated; other retail revisions are accepted only when their actual map headers match the supported builds. PC, Xbox 360 Anniversary, MCC and Quest inputs remain unsupported. No ISO, game maps, commercial executable, keys or soundtrack is bundled.
+The installer uses user-supplied original **Xbox** Halo CE data: USA Rev 2 is validated; other retail revisions require supported map headers. PC, Xbox 360 Anniversary, MCC, and Quest game-data inputs remain unsupported. No game executable, ISO, maps, product keys, or soundtrack is bundled.
 
-The [source tag](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/tree/v1.3.1) includes the installer source, build scripts and third-party notices. The release attaches one clearly labeled EXE and prints its SHA256 here. The EXE is unsigned.
+The EXE is unsigned. Its SHA256 appears below. [Matching source and third-party notices](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/tree/v1.3.2) remain available for rebuilding. GitHub's automatic source downloads are optional for developers.
 
-Sources: [Valve's library artwork guide](https://partner.steamgames.com/doc/store/assets/libraryassets?language=english), [Valve's Notes announcement](https://store.steampowered.com/news/app/593110/view/3687931965598906184), [Valve's Frame USB/SSH guide](https://partner.steamgames.com/doc/steamhardware/steamframe/debugging), and the [full acknowledgements](SOURCES.md).
+[Full sources and credits](SOURCES.md).

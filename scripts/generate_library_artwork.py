@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import shutil
 from pathlib import Path
 
 from PIL import Image
@@ -55,10 +54,11 @@ def main() -> None:
         logo = source.resize((1000, 431), Image.Resampling.LANCZOS)
         logo.save(destination / "halo-ce-logo.png", optimize=True)
 
-    # Reuse the installer's existing original vector-derived helmet drawing.
-    # Keeping the exact rendition also keeps its attribution and checksums clear.
-    shutil.copyfile(repo / "resources" / "ui" / "app-icon.png",
-                    destination / "halo-ce-icon.png")
+    # The library's original project drawing is independent of the Windows
+    # installer icon. Retain the checked-in rendition instead of copying a
+    # replacement installer icon into existing Steam library artwork.
+    if sha256(destination / "halo-ce-icon.png") != "184620356407e42a33877528c4f14b702df8b026415a99ed16976565fcfbce36":
+        raise ValueError("The existing project-drawn Steam shortcut icon differs")
     for name in ("halo-ce-hero.jpg", "halo-ce-logo.png", "halo-ce-icon.png"):
         path = destination / name
         with Image.open(path) as image:

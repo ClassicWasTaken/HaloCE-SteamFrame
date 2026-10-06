@@ -3,8 +3,6 @@
 </p>
 
 <p align="center">
-  <img src="resources/ui/app-icon.png" alt="Installer Master Chief helmet icon" width="44" height="44">
-  &nbsp;&nbsp;
   <img src="resources/artwork/halo-ce-logo.png" alt="Halo: Combat Evolved" width="180">
   <br>
   <strong>Native VR for Steam Frame</strong><br>
@@ -12,26 +10,26 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/download/v1.3.1/Halo-Steam-Frame-Setup-1.3.1.exe"><strong>DOWNLOAD v1.3.1 — WINDOWS EXE</strong></a><br>
+  <a href="https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/download/v1.3.2/Halo-Steam-Frame-Setup-1.3.2.exe"><strong>DOWNLOAD v1.3.2 — WINDOWS EXE</strong></a><br>
   <sub>One installer file · Windows 10/11 x64 · No administrator rights needed</sub><br>
-  <a href="https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/tag/v1.3.1">Release notes &amp; checksum</a> · <a href="#download-and-run">Setup guide</a> · <a href="#sources-and-credits">Sources &amp; credits</a>
+  <a href="https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/tag/v1.3.2">Release notes &amp; checksum</a> · <a href="#download-and-run">Setup guide</a> · <a href="#sources-and-credits">Sources &amp; credits</a>
 </p>
 
 ---
 
 A Windows setup app for installing the native ARM64/OpenXR Halo: Combat Evolved port on Steam Frame. Its original Xbox dashboard-inspired interface uses dark panels, luminous green accents, and beveled controls to guide you through choosing game data, connecting over USB-C or a network, and installing or repairing the game. Both connection options use encrypted SSH. Setup copies your own original Xbox data, builds the native VR executable on the Frame, applies Xbox-style controls, and guides Steam library registration with Halo CE cover art.
 
-**Version 1.3.1 — Halo library artwork and game Notes.** Adds a CE banner, transparent title logo, and Master Chief shortcut icon alongside the covers. A game description and Xbox-style control guide appear in **Steam Notes**, accessible from the game's details page; Steam does not provide an editable store-style About description for non-Steam games. Choose **Steam info** to update an existing native install without another ISO or rebuild. Custom artwork, icons, and notes are preserved. These additions have automated software coverage; their appearance on a physical Frame still needs verification.
+**Version 1.3.2 — Classic Halo PC installer icon.** The Windows executable now uses the classic Halo PC Master Chief helmet-and-shoulders icon. The README artwork is simplified to the Halo CE banner and title logo. This cosmetic patch retains the 1.3.1 CE banner, transparent title logo, project-drawn Master Chief shortcut icon, and covers for Steam. A game description and Xbox-style control guide appear in **Steam Notes**, accessible from the game's details page; Steam does not provide an editable store-style About description for non-Steam games. Choose **Steam info** to update an existing native install without another ISO or rebuild. Custom artwork, icons, and notes are preserved. The library additions have automated software coverage; their appearance on a physical Frame still needs verification.
 
 Choose a direct USB-C cable or Wi-Fi / Ethernet in the connection step. The wired path uses ADB port forwarding for the same encrypted SSH connection, with no Frame IP required. USB handling is software-tested; a physical Steam Frame USB transfer has not yet been verified. Setup retains the 1.2.3 safeguard that keeps Steam Home and SteamVR running; it never shuts down or starts another Steam client. Direct library-file edits require Steam to be already closed, with manual steps shown when needed. The underlying VR implementation is an open upstream pull request. The pinned native game, Xbox controls, and live Steam shortcut/cover-art helper were previously tested on a real Frame. The complete first-install wizard and full game uninstall still need fresh-device hardware tests. Performance varies by scene and device. This is an independent community project, unaffiliated with Microsoft, Bungie, or Valve.
 
 ## Download and run
 
-**[DOWNLOAD THIS FILE — Halo-Steam-Frame-Setup-1.3.1.exe](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/download/v1.3.1/Halo-Steam-Frame-Setup-1.3.1.exe)**
+**[DOWNLOAD THIS FILE — Halo-Steam-Frame-Setup-1.3.2.exe](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/download/v1.3.2/Halo-Steam-Frame-Setup-1.3.2.exe)**
 
-This is the only installer file you need. It includes the installer runtime and the ADB files needed for USB-C transfer; no installer ZIP, Python installation, or separate Platform Tools download is needed. The bundled ADB files retain their original notices. Run setup on Windows 10/11 x64. You do not need administrator rights. The **[version 1.3.1 release](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/tag/v1.3.1)** description includes the EXE's SHA256 checksum.
+This is the only installer file you need. It includes the installer runtime and the ADB files needed for USB-C transfer; no installer ZIP, Python installation, or separate Platform Tools download is needed. The bundled ADB files retain their original notices. Run setup on Windows 10/11 x64. You do not need administrator rights. The **[version 1.3.2 release](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/tag/v1.3.2)** description includes the EXE's SHA256 checksum.
 
-The executable has a Master Chief helmet icon with olive armor and a gold visor, drawn for this project.
+The executable uses the classic Halo PC Master Chief helmet-and-shoulders icon shown in the requested reference. [Icon source and hashes](resources/ui/README.md) are documented separately from the installer's code license.
 
 1. **Game data.** Choose **Install**, then use **Choose ISO** or **Choose maps folder** to select an original **Xbox** Halo CE `.iso` / `.xiso`, or its extracted `maps` folder, that you are authorized to use. Setup validates the retail Xbox map format and extracts only the required maps. Halo PC, Xbox 360 Anniversary, MCC, and Quest packages are not inputs for this build. The repository and executable contain no commercial game data or download links for it. Click **Continue** to move to the next step.
 2. **Connect Frame.** Enable Developer Mode and set the Frame's user password, then choose **Network (Wi-Fi or Ethernet)** or **USB-C cable**. For network transfer, keep both devices on a network that permits connections between them and enter the Frame's hostname/IP. For USB, connect a data-capable cable directly to the PC and approve device authorization on the headset if prompted; no Frame IP is required. The SSH login remains `steamos`, port 22; username and port are under **Advanced connection settings**. Click **Test connection** and approve the displayed host fingerprint only after identifying your device. Your password is used in memory and is never saved or logged.
@@ -54,12 +52,6 @@ Setup explicitly closes its SFTP and command channels and the underlying SSH con
 The included ADB executable, two companion DLLs, and unmodified notices are checksum-verified before being copied to `%LOCALAPPDATA%/HaloFrameInstaller/usb-tools/37.0.1`. This versioned cache remains after setup closes so a shared ADB server can keep using it without locking the EXE's temporary extraction folder. The selected client's protocol is checked against an already-running local ADB server; a mismatch stops USB setup without restarting that server. Setup also verifies that the temporary forwarded port listens only on this PC's loopback addresses before sending the SSH password. [Bundled-tool provenance and licenses](docs/THIRD_PARTY.md#adb-for-usb-transfer).
 
 These changes apply after you launch the new EXE and start a run. An installation already running in an older EXE keeps its existing behavior; downloading a replacement cannot change that ongoing process.
-
-![The version 1.2.2 installer with its dark original Xbox dashboard styling, green accents, and guided setup](docs/images/installer-1.2.jpg)
-
-Progress preview with sample compiler output:
-
-![Version 1.2.2 showing a left-to-right progress bar and detailed activity with sample compiler output](docs/images/installer-progress-1.2.jpg)
 
 After you select valid local Xbox game data, the installer automatically loops the original Halo menu music. Setup reads the menu loop from your own `ui.map`, decodes it at 12% of the original sample amplitude, and keeps the temporary audio on your Windows computer until the installer closes. No soundtrack is bundled, downloaded, or uploaded to the Frame. Repair using only maps already on the Frame has no local music preview. If music is unavailable, installation can continue.
 
@@ -128,7 +120,7 @@ See [controls and patch details](docs/CONTROLS.md).
 
 Game: `~/Games/HaloCENativeVR`, including `halo`, bundled SDL3, your maps, config, notices, and an ownership/provenance manifest. New-install saves are in that game's separate `save` folder; repairs preserve existing save locations. Build workspace: `~/.cache/halo-frame-installer`. Source is fetched at the fixed commit below, not a moving branch. Build cache is retained for troubleshooting. Setup does not remove another Halo installation or touch unrelated games.
 
-The original Halo CE cover is shown inside the installer. The native shortcut receives missing portrait and landscape covers, a 1,920 × 620 original CE promotional banner, transparent title logo, and the installer's Master Chief helmet icon. With Steam running, setup uses its verified client interface, checks the active account and native executable, and verifies the artwork hashes. The icon is kept in the owned game's `.installer-artwork` folder so it survives the setup EXE closing. Its existing path is verified through read-only shortcut-file checks before changing it through Steam's API. Both running-client and already-closed file paths preserve custom art and icons, including different supported image extensions. An icon that cannot be verified is reported as pending rather than replacing an uncertain user choice.
+The original Halo CE cover is shown inside the installer. The native shortcut receives missing portrait and landscape covers, a 1,920 × 620 original CE promotional banner, transparent title logo, and the project-drawn Master Chief helmet icon. With Steam running, setup uses its verified client interface, checks the active account and native executable, and verifies the artwork hashes. The icon is kept in the owned game's `.installer-artwork` folder so it survives the setup EXE closing. Its existing path is verified through read-only shortcut-file checks before changing it through Steam's API. Both running-client and already-closed file paths preserve custom art and icons, including different supported image extensions. An icon that cannot be verified is reported as pending rather than replacing an uncertain user choice.
 
 The description and Xbox controls use **Steam Game Notes**. Setup appends one bounded note without replacing other notes or an edited installer note. Artwork and Notes have independent pending states; **Steam info**, repair, and **Add to Steam again** use the same handling. No artwork download is needed. The new bundled images total less than 1 MB, with sources and exact hashes in the [artwork resource notice](resources/artwork/README.md). The user confirmed the older entry and covers on the Frame tested with 1.2.3; the 1.3.1 banner, logo, icon, and Notes still need a physical Frame check.
 
@@ -179,7 +171,7 @@ python -m venv .venv
 .\.venv\Scripts\python scripts/build_release.py
 ```
 
-Corresponding installer source and applicable third-party source/notices are available in the **[version 1.3.1 source tag](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/tree/v1.3.1)** so you can modify and rebuild it, including its LGPL Paramiko dependency. GitHub's automatically generated Source code ZIP is optional for developers and is not needed to run setup. ADB binaries are not checked into Git; [bundle_usb_tools.py](scripts/bundle_usb_tools.py) downloads the pinned official archive during the executable build and verifies its archive and selected-file checksums before packaging. [resources/usb/manifest.json](resources/usb/manifest.json) records those hashes and provenance, and the original notices are retained. The build script packages installer code/resources and verified ADB components with their notices; no game binary, user ISO, maps, SSH password, or private key is included. GitHub Actions runs tests and builds the Windows setup executable. A local rebuild also writes a source bundle and checksum file to `dist/`; the public release attaches only the clearly named installer executable and prints its checksum in the release description.
+Corresponding installer source and applicable third-party source/notices are available in the **[version 1.3.2 source tag](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/tree/v1.3.2)** so you can modify and rebuild it, including its LGPL Paramiko dependency. GitHub's automatically generated Source code ZIP is optional for developers and is not needed to run setup. ADB binaries are not checked into Git; [bundle_usb_tools.py](scripts/bundle_usb_tools.py) downloads the pinned official archive during the executable build and verifies its archive and selected-file checksums before packaging. [resources/usb/manifest.json](resources/usb/manifest.json) records those hashes and provenance, and the original notices are retained. The build script packages installer code/resources and verified ADB components with their notices; no game binary, user ISO, maps, SSH password, or private key is included. GitHub Actions runs tests and builds the Windows setup executable. A local rebuild also writes a source bundle and checksum file to `dist/`; the public release attaches only the clearly named installer executable and prints its checksum in the release description.
 
 The workflow also includes an ARM64 Linux check, [check-build-container.py](scripts/check-build-container.py), that uses the same rootless Podman arguments as the Frame build. It checks APT package installation, `setgroups`, `seteuid`, `setegid`, `chown`, and that container output belongs to the ordinary host user. The Windows executable CI job depends on that check as well as the unit tests. This container check uses no game data and does not replace a full Steam Frame installation test.
 

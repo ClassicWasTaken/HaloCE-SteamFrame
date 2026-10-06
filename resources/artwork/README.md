@@ -68,10 +68,10 @@ This record identifies the copyrighted/trademarked CE logo but does not document
 an upstream publisher URL. Do not describe this rendition as a newly licensed
 asset or the project's own original drawing.
 
-`halo-ce-icon.png` is the exact 256 × 256 PNG rendition of the installer's
-existing original Master Chief helmet drawing (`resources/ui/app-icon.svg` and
-`app-icon.png`). It is reused as the shortcut icon, separate from the original
-game's promotional artwork.
+`halo-ce-icon.png` is the exact 256 × 256 PNG rendition of the original project
+Master Chief helmet drawing (`resources/artwork/halo-ce-icon.svg`). It remains
+the Steam shortcut icon. Version 1.3.2 uses a separate classic Halo PC icon for
+the Windows installer, documented in [its notice](../ui/README.md).
 
 Halo promotional artwork and the Halo/Xbox names and logos belong to Microsoft.
 These images identify the user's Halo game in their library. They are separate

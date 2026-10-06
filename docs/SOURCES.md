@@ -95,6 +95,13 @@ These links credit visual and historical references. Dashboard styling is an ind
 
 ## Steam library artwork
 
+The Windows installer uses the classic Halo PC helmet-and-shoulders icon in
+1.3.2. [HaloNet's favicon ICO](https://halonet.net/favicon.ico) is byte-identical
+to icon group 102 of the locally installed retail Halo PC executable. Only the
+icon is bundled; its [resource notice](../resources/ui/README.md) records the
+verification and exact hashes. The README displays only the banner and title
+logo, with the installer icon separate from Steam's retained project drawing.
+
 The bundled portrait image is the original **Halo: Combat Evolved** cover from [Halopedia's cover-art file page](https://www.halopedia.org/File:HCE_Cover_Art.jpg), with the [original JPEG](https://www.halopedia.org/images/8/8e/HCE_Cover_Art.jpg). Halopedia records the [official Halo Facebook image](https://www.facebook.com/Halo/photos/a.137195553028391/1561119617302637/) as its source. The landscape library image arranges the same cover in a wider layout without stretching it.
 
 The cover remains copyrighted Microsoft/Halo artwork; the installer's MIT license does not apply to it. Source attribution and exact hashes are retained in the [artwork resource notice](../resources/artwork/README.md) and described in [THIRD_PARTY.md](THIRD_PARTY.md#dashboard-and-library-artwork). A thumbnail appears inside the installer. The library images are applied only to its native Halo shortcut, preserving user-selected custom art. The user confirmed the entry and covers looked correct on the Frame tested with 1.2.3.
