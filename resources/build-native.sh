@@ -28,11 +28,12 @@ for tool in clang ld.lld llvm-ar; do
 done
 clang --version
 cd /build/src
-phase configure 'Checking Xbox controls, VR tutorial, render-rate reticle, stereo sun glow and LAN/online campaign menus...'
+phase configure 'Checking Xbox controls, VR tutorial, unarmed flashlight, render-rate reticle, stereo sun glow and LAN/online campaign menus...'
 python3 tools/test_vr_locomotion.py --cc clang
 python3 tools/test_vr_tutorial.py --cc clang
 python3 tools/test_vr_tracking.py --cc clang
 python3 tools/test_vr_tutorial_buttons.py --cc clang
+python3 tools/test_vr_flashlight.py --cc clang
 python3 tools/test_vr_sun_glow.py --cc clang
 python3 tools/test_vr_projectile_reticle.py --cc clang
 python3 tools/test_online_coop_menu.py --cc clang

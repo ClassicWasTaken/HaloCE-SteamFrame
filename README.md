@@ -20,7 +20,7 @@
 
 Play native ARM64/OpenXR Halo CE on Steam Frame with **LAN and online campaign co-op**, **head-directed walking**, and **Xbox-style buttons**. Tracked controller aiming, a render-rate reticle, half-strength stereo sun glow, and automatic Steam artwork and Notes are included.
 
-**1.4.1 updates first-mission VR aiming, look-training checks and tutorial buttons.** Install and Repair apply standing mode and snap turning. Choose Repair to update while keeping your existing 1.4.0 profiles and saves.
+**1.4.1 fixes first-mission VR aiming, look-training checks, tutorial buttons and the unarmed flashlight.** Install and Repair apply standing mode and snap turning. Choose Repair to update while keeping your existing 1.4.0 profiles and saves.
 
 ## Install or upgrade
 

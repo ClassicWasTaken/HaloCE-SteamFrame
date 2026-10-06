@@ -40,8 +40,29 @@ jobs:
       - name: Verify package installation in the rootless build container
         run: python scripts/check-build-container.py
 
+  native-arm64:
+    # Fully link the patched VR game; source-only tests cannot catch every
+    # missing guest/host bridge. No retail files or headset runtime are used.
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Build and fully link the shipped native ARM64 VR game
+        run: python scripts/check-native-build.py --timeout-seconds 2400 --report "$RUNNER_TEMP/native-build-proof.json"
+      - name: Save build proof without publishing native game binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: HaloFrameSetup-native-build-proof
+          path: ${{ runner.temp }}/native-build-proof.json
+          if-no-files-found: error
+
   windows-executable:
-    needs: [test, build-container]
+    needs: [test, build-container, native-arm64]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

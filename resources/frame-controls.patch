@@ -742,7 +742,7 @@ index 7d098faad67b44185095673ab6019668945f5b9f..19a001895aca7bbf2adfca4a20a2dab0
  			*widget_deleted = TRUE;
  		}
 diff --git a/port/linux/game/vr_render.c b/port/linux/game/vr_render.c
-index 6b98a0b7739800bc5c90de07b0a821629e462705..f950307f1b1f79baa265e52ed11305da6a7632f5 100644
+index 6b98a0b7739800bc5c90de07b0a821629e462705..1a290927f48107f754b10052a1ea4f98fd6af45b 100644
 --- a/port/linux/game/vr_render.c
 +++ b/port/linux/game/vr_render.c
 @@ -30,9 +30,12 @@ they belong on the layer before the eyes.
@@ -899,7 +899,7 @@ index 6b98a0b7739800bc5c90de07b0a821629e462705..f950307f1b1f79baa265e52ed11305da
  }
  
  /* the object is the player's unit, which the eye pass views its vehicle
-@@ -578,41 +662,165 @@ boolean vr_render_hud_camera(struct render_camera *camera)
+@@ -578,41 +662,206 @@ boolean vr_render_hud_camera(struct render_camera *camera)
  		view_rotate(base_yaw, pitch, view->head_forward, &camera->forward);
  		view_rotate(base_yaw, pitch, view->head_up, &camera->up);
  		camera->vertical_field_of_view = 2.0f * (real)atan(view->hud_tangent);
@@ -979,6 +979,47 @@ index 6b98a0b7739800bc5c90de07b0a821629e462705..f950307f1b1f79baa265e52ed11305da
 +		return FALSE;
 +	*origin = pose.camera_position;
 +	*forward = pose.forward;
++	return TRUE;
++}
++
++/* A weapon's flashlight marker is posed each render frame. Without a
++weapon, use that same rendered controller camera instead of the biped's
++30 Hz attachment. All outputs are presentation copies, shared by both eyes. */
++boolean vr_render_player_flashlight_pose(long unit_index, real_point3d *position,
++	real_vector3d *forward, real_vector3d *up)
++{
++	long player_index = local_player_get_player_index(0);
++	struct unit_datum *unit;
++	real_point3d ignored_origin, source;
++	real_vector3d direction, vertical;
++	real along, length;
++	if (!position || !forward || !up || !vr_render.active ||
++		!vr_render.weapon_camera_set || !vr_render.weapon_camera_valid ||
++		render.local_player_index != 0 || player_index == NONE || unit_index == NONE ||
++		(director_camera_scripted && *director_camera_scripted) ||
++		player_get(player_index)->unit_index != unit_index || !(unit = unit_try_and_get(unit_index)) ||
++		!halo_vr_aiming() || !halo_vr_gaze_tracking_valid() ||
++		!vr_render_unarmed_ray(player_index, unit_index, unit, &vr_render.view, vr_render.base_yaw,
++			&ignored_origin, &direction))
++		return FALSE;
++	source = vr_render.weapon_camera.position;
++	vertical = vr_render.weapon_camera.up;
++	if (!isfinite(source.x) || !isfinite(source.y) || !isfinite(source.z) ||
++		!isfinite(vertical.i) || !isfinite(vertical.j) || !isfinite(vertical.k))
++		return FALSE;
++	/* Preserve controller roll while accommodating the same pitch limits
++	used by the unarmed reticle; never apply body yaw or HMD pitch twice. */
++	along = dot_product3d(&vertical, &direction);
++	vertical.i -= direction.i * along;
++	vertical.j -= direction.j * along;
++	vertical.k -= direction.k * along;
++	length = magnitude3d(&vertical);
++	if (!isfinite(length) || length <= 0.00001f)
++		return FALSE;
++	normalize3d(&vertical);
++	*position = source;
++	*forward = direction;
++	*up = vertical;
 +	return TRUE;
 +}
 +
@@ -1094,7 +1135,7 @@ index 6b98a0b7739800bc5c90de07b0a821629e462705..f950307f1b1f79baa265e52ed11305da
  first-person weapon is, and as large as in the HUD's layer. In that layer,
  in front of the head, they were placed for the head's pose as the frame was
  drawn, which the compositor moved them with to the pose shown while it
-@@ -624,65 +832,19 @@ rounding to the HUD's pixels). */
+@@ -624,65 +873,19 @@ rounding to the HUD's pixels). */
  void vr_render_crosshairs(void)
  {
  	struct halo_vr_view *view = &vr_render.view;
@@ -2368,6 +2409,223 @@ index a9c5c8308e82e1ff2ada96554b92a582fc639606..f451943f30ad6485f8a131faef5afd6b
  
  /* ---------- public code */
  
+diff --git a/source/objects/object_lights.c b/source/objects/object_lights.c
+index 919df847818bd36658fdf9448404ea67d8eead2a..3b1e447d48831e7d6fe26db60d317d53e3356ec4 100644
+--- a/source/objects/object_lights.c
++++ b/source/objects/object_lights.c
+@@ -157,6 +157,9 @@ symbols in this file:
+ #include "cache/texture_cache.h"
+ #include "game/game.h"
+ #include "game/game_engine.h"
++#ifdef HALO_VR
++#include "game/players.h"
++#endif
+ #include "interface/first_person_weapons.h"
+ #include "math/periodic_functions.h"
+ #include "memory/data.h"
+@@ -450,12 +453,19 @@ static void light_compute_bounding_sphere(
+ 	boolean lens_flare_only,
+ 	real_point3d *position,
+ 	real *radius);
++static void light_compute_render_bounding_sphere(
++	long light_index, boolean maximum, boolean specular, boolean lens_flare_only,
++	real_point3d *position, real *radius);
+ static void render_debug_light(
+ 	long light_index);
+ static void light_get_bounding_sphere(
+ 	long light_index,
+ 	real_point3d *position,
+ 	real *radius);
++#ifdef HALO_VR
++extern boolean vr_render_player_flashlight_pose(long unit_index, real_point3d *position,
++	real_vector3d *forward, real_vector3d *up);
++#endif
+ 
+ /* ---------- globals */
+ 
+@@ -815,6 +825,61 @@ long light_new_unattached(
+ 	return light_index;
+ }
+ 
++/* Only a living local unarmed VR player's actual flashlight has a
++render-time pose. Ordinary lights, weapon markers and simulation datums
++retain their original paths. */
++static boolean light_vr_unarmed_flashlight_pose(struct light_datum const *light,
++	real_point3d *position, real_vector3d *forward, real_vector3d *up)
++{
++#ifdef HALO_VR
++	if (light->parent_light_index == NONE && light->object_index != NONE &&
++		TEST_FLAG(light->flags, _point_light_dynamic_bit) &&
++		TEST_FLAG(light_definition_get(light->definition_index)->flags,
++			_light_definition_is_first_person_flashlight_bit))
++		return vr_render_player_flashlight_pose(light->object_index, position, forward, up);
++#else
++	(void)light; (void)position; (void)forward; (void)up;
++#endif
++	return FALSE;
++}
++
++/* Simulation cluster membership can lag behind a controller that points
++elsewhere between ticks. Include this one local render light without
++changing the partition. Reserve no extra capacity or unbounded writes. */
++static void lights_vr_include_unarmed_flashlights(void)
++{
++#ifdef HALO_VR
++	long light_index, player_index;
++	real_point3d source;
++	real_vector3d direction, vertical;
++	if (render.local_player_index != 0 || (player_index = local_player_get_player_index(0)) == NONE ||
++		!vr_render_player_flashlight_pose(player_get(player_index)->unit_index, &source, &direction, &vertical))
++		return;
++	for (light_index = data_next_index(light_data, NONE); light_index != NONE;
++		light_index = data_next_index(light_data, light_index))
++	{
++		real_point3d position;
++		real_vector3d forward, up;
++		if (light_unmarked(light_index) && light_vr_unarmed_flashlight_pose(light_get(light_index),
++			&position, &forward, &up))
++		{
++			struct light_datum const *light = light_get(light_index);
++			real intensity;
++			short slot = lights_globals.scene_point_light_count;
++			object_get_function_value(light->object_index, light->function_index, &intensity);
++			if (intensity <= 0.0f)
++				continue;
++			if (slot < MAXIMUM_RENDERED_LIGHTS)
++				lights_globals.scene_point_light_count++;
++			else
++				slot = MAXIMUM_RENDERED_LIGHTS - 1;
++			lights_globals.scene_point_lights[slot] = light_index;
++			light_mark(light_index);
++		}
++	}
++#endif
++}
++
+ void lights_preprocess_scene(
+ 	void)
+ {
+@@ -869,6 +934,7 @@ void lights_preprocess_scene(
+ 		light_get_bounding_sphere,
+ 		light_unmarked,
+ 		light_mark);
++	lights_vr_include_unarmed_flashlights();
+ 	light_marker_end();
+ 	rasterizer_lights_begin();
+ 	for (rendered_cluster_index = 0;
+@@ -1053,6 +1119,8 @@ void lights_preprocess_scene(
+ 								TRUE);
+ 						}
+ 					}
++					light_vr_unarmed_flashlight_pose(light, &light_parameters.position,
++						&light_parameters.forward, &light_parameters.up);
+ 
+ 					light->rasterizer_light_index = rasterizer_light_submit(
+ 						&light_parameters);
+@@ -1550,15 +1618,14 @@ static long cluster_get_next_light(
+ 		reference_index);
+ }
+ 
+-static void light_compute_bounding_sphere(
+-	long light_index,
++static void light_compute_bounding_sphere_from_basis(
++	struct light_datum const *light,
+ 	boolean maximum,
+ 	boolean specular,
+ 	boolean lens_flare_only,
+ 	real_point3d *position,
+ 	real *radius)
+ {
+-	struct light_datum *light = light_get(light_index);
+ 	struct point_light_definition *definition = light_definition_get(light->definition_index);
+ 	real light_radius = maximum
+ 		? definition->radius_modifier_upper_bound * definition->radius
+@@ -1602,6 +1669,34 @@ static void light_compute_bounding_sphere(
+ 	return;
+ }
+ 
++/* Tick attachment/reconnection continues using the simulation basis. */
++static void light_compute_bounding_sphere(long light_index, boolean maximum,
++	boolean specular, boolean lens_flare_only, real_point3d *position, real *radius)
++{
++	light_compute_bounding_sphere_from_basis(light_get(light_index), maximum, specular,
++		lens_flare_only, position, radius);
++}
++
++/* Visibility and diffuse/specular use the same frame pose as submission.
++The effective light is a stack copy; neither its datum nor clusters move. */
++static void light_compute_render_bounding_sphere(long light_index, boolean maximum,
++	boolean specular, boolean lens_flare_only, real_point3d *position, real *radius)
++{
++	struct light_datum effective = *light_get(light_index);
++	light_vr_unarmed_flashlight_pose(&effective, &effective.position, &effective.forward, &effective.up);
++	light_compute_bounding_sphere_from_basis(&effective, maximum, specular, lens_flare_only, position, radius);
++}
++
++static boolean light_render_skips_clusters(struct light_datum const *light)
++{
++	real_point3d position;
++	real_vector3d forward, up;
++	return (TEST_FLAG(light->flags, _point_light_attached_to_first_person_weapon_bit) &&
++		TEST_FLAG(light_definition_get(light->definition_index)->flags,
++			_light_definition_supersize_in_first_person_bit)) ||
++		light_vr_unarmed_flashlight_pose(light, &position, &forward, &up);
++}
++
+ static short light_build_cluster_array(
+ 	long light_index,
+ 	short maximum_count,
+@@ -1636,7 +1731,7 @@ static void light_get_bounding_sphere(
+ 	real_point3d *position,
+ 	real *radius)
+ {
+-	light_compute_bounding_sphere(
++	light_compute_render_bounding_sphere(
+ 		light_index,
+ 		TRUE,
+ 		FALSE,
+@@ -1666,10 +1761,7 @@ void lights_render_diffuse(
+ 			if (TEST_FLAG(light->flags, _point_light_dynamic_bit)
+ 				&& light->rasterizer_light_index != NONE)
+ 			{
+-				boolean skip_clusters = TEST_FLAG(light->flags,
+-						_point_light_attached_to_first_person_weapon_bit)
+-					&& TEST_FLAG(light_definition_get(light->definition_index)->flags,
+-						_light_definition_supersize_in_first_person_bit);
++				boolean skip_clusters = light_render_skips_clusters(light);
+ 				short cluster_count = 0;
+ 				real_point3d center;
+ 				real radius;
+@@ -1681,7 +1773,7 @@ void lights_render_diffuse(
+ 						MAXIMUM_CLUSTERS_PER_LIGHT,
+ 						cluster_indices);
+ 				}
+-				light_compute_bounding_sphere(
++				light_compute_render_bounding_sphere(
+ 					lights_globals.scene_point_lights[light_index],
+ 					FALSE,
+ 					FALSE,
+@@ -1723,10 +1815,7 @@ void lights_render_specular(
+ 				&& !TEST_FLAG(light_definition_get(light->definition_index)->flags,
+ 					_light_definition_no_specular_bit))
+ 			{
+-				boolean skip_clusters = TEST_FLAG(light->flags,
+-						_point_light_attached_to_first_person_weapon_bit)
+-					&& TEST_FLAG(light_definition_get(light->definition_index)->flags,
+-						_light_definition_supersize_in_first_person_bit);
++				boolean skip_clusters = light_render_skips_clusters(light);
+ 				short cluster_count = 0;
+ 				real_point3d center;
+ 				real radius;
+@@ -1738,7 +1827,7 @@ void lights_render_specular(
+ 						MAXIMUM_CLUSTERS_PER_LIGHT,
+ 						cluster_indices);
+ 				}
+-				light_compute_bounding_sphere(
++				light_compute_render_bounding_sphere(
+ 					lights_globals.scene_point_lights[light_index],
+ 					FALSE,
+ 					TRUE,
 diff --git a/source/rasterizer/xbox/rasterizer_xbox_lights.c b/source/rasterizer/xbox/rasterizer_xbox_lights.c
 index 2cfc3f9be838a7c92c6c43484b7fcea5b6557afa..5c8e7b0b4c35e45de68a5a2b1f115584d2d8bdc0 100644
 --- a/source/rasterizer/xbox/rasterizer_xbox_lights.c
@@ -3211,6 +3469,294 @@ index 0000000000000000000000000000000000000000..72086bda0960abfdbd70213e48f3e4f8
 +            subprocess.run(command, cwd=temp, check=True)
 +            subprocess.run([str(executable)], cwd=temp, check=True)
 +    print('PASS: generated five-route XML, LAN discovery, and single-player campaign integration')
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/tools/test_vr_flashlight.py b/tools/test_vr_flashlight.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b0f6b83d8e2a90962c81eac5ae46a8110b61c1f
+--- /dev/null
++++ b/tools/test_vr_flashlight.py
+@@ -0,0 +1,282 @@
++#!/usr/bin/env python3
++"""Host checks of production unarmed VR flashlight pose and rendering bounds.
++
++Reuses the real projectile/reticle regression harness, the actual VR view
++layout and extracted production light functions. Deterministic engine services
++stand in for maps/GPU/headset; this does not validate physical beam placement
++or dynamic object-light cluster selection on hardware.
++"""
++from pathlib import Path
++import re
++import subprocess
++
++import test_vr_projectile_reticle as reticle
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++LIGHT_FIXTURE = r'''
++#define MAXIMUM_RENDERED_LIGHTS 2
++#define MAXIMUM_CLUSTERS_PER_LIGHT 8
++static const real _pi=3.14159265358979323846f;
++enum { _point_light_dynamic_bit=0, _point_light_attached_to_first_person_weapon_bit=3 };
++enum { _light_definition_no_specular_bit=1, _light_definition_supersize_in_first_person_bit=3,
++       _light_definition_is_first_person_flashlight_bit=4 };
++struct light_datum {
++    unsigned flags; long definition_index,object_index,parent_light_index,rasterizer_light_index; short function_index;
++    real_point3d position; real_vector3d forward,up; real radius;
++};
++struct point_light_definition {
++    unsigned flags; real radius,radius_modifier_upper_bound,cutoff_angle,lens_flare_radius;
++    real runtime_cosine_cutoff_angle,runtime_sine_cutoff_angle,specular_radius_multiplier;
++};
++static struct light_datum fixture_lights[4];
++static struct point_light_definition fixture_light_definition;
++static struct { short scene_point_light_count; long scene_point_lights[MAXIMUM_RENDERED_LIGHTS]; } lights_globals;
++static int light_data=1,marked[4],cluster_reads,diffuse_calls,specular_calls,diffuse_skip,specular_skip,data_next_calls;
++static real_point3d diffuse_center,specular_center;
++static real diffuse_radius,specular_radius;
++static real fixture_light_intensity;
++static boolean object_get_function_value(long object_index,short function_index,real *value) {
++    CHECK(object_index==0 && function_index==0); *value=fixture_light_intensity; return TRUE;
++}
++static struct light_datum *light_get(long index) { CHECK(index>=0 && index<4); return &fixture_lights[index]; }
++static struct point_light_definition *light_definition_get(long index) { CHECK(index==0); return &fixture_light_definition; }
++static long data_next_index(int data,long index) { CHECK(data==light_data); data_next_calls++; return index<3 ? index+1 : NONE; }
++static boolean light_unmarked(long index) { CHECK(index>=0 && index<4); return !marked[index]; }
++static boolean light_mark(long index) { CHECK(index>=0 && index<4); marked[index]=1; return TRUE; }
++static boolean should_render_lights(void) { return TRUE; }
++static short light_build_cluster_array(long index,short maximum,short *clusters) {
++    CHECK(index>=0 && index<4 && maximum==MAXIMUM_CLUSTERS_PER_LIGHT); cluster_reads++; clusters[0]=17; return 1;
++}
++static void rasterizer_environment_diffuse_lights_begin(void) { }
++static void rasterizer_environment_diffuse_lights_end(void) { }
++static void rasterizer_environment_specular_lights_begin(void) { }
++static void rasterizer_environment_specular_lights_end(void) { }
++static void structure_render_diffuse_light(long index,real_point3d const *center,real radius,short count,short const *clusters) {
++    CHECK(index==3); diffuse_calls++; diffuse_center=*center; diffuse_radius=radius;
++    diffuse_skip=clusters==NULL; CHECK(count==(diffuse_skip ? 0 : 1));
++}
++static void structure_render_specular_light(long index,real_point3d const *center,real radius,short count,short const *clusters) {
++    CHECK(index==3); specular_calls++; specular_center=*center; specular_radius=radius;
++    specular_skip=clusters==NULL; CHECK(count==(specular_skip ? 0 : 1));
++}
++@@FLASHLIGHT_FUNCTIONS@@
++static void flashlight_reset(void) {
++    int index;
++    reset(); inventory[0]=NONE; fixture_weapon_count[0]=0;
++    unit_definitions[0].unit.flags=1u<<_unit_fires_from_camera_bit;
++    vr_render.weapon_camera_set=TRUE; vr_render.weapon_camera_valid=TRUE;
++    vr_render.weapon_camera.position=(real_point3d){3,4,0.4f};
++    vr_render.weapon_camera.up=(real_vector3d){0,0,1};
++    render.local_player_index=0;
++    memset(fixture_lights,0,sizeof(fixture_lights)); memset(marked,0,sizeof(marked));
++    memset(&lights_globals,0,sizeof(lights_globals));
++    memset(&fixture_light_definition,0,sizeof(fixture_light_definition));
++    fixture_light_definition.flags=1u<<_light_definition_is_first_person_flashlight_bit;
++    fixture_light_definition.radius=5; fixture_light_definition.radius_modifier_upper_bound=2;
++    fixture_light_definition.cutoff_angle=0.3f;
++    fixture_light_definition.runtime_cosine_cutoff_angle=cosf(0.3f);
++    fixture_light_definition.runtime_sine_cutoff_angle=sinf(0.3f);
++    fixture_light_definition.specular_radius_multiplier=1.2f;
++    for(index=0;index<4;index++) {
++        fixture_lights[index].flags=1u<<_point_light_dynamic_bit;
++        fixture_lights[index].object_index=index ? 1 : 0;
++        fixture_lights[index].parent_light_index=NONE;
++        fixture_lights[index].rasterizer_light_index=3;
++        fixture_lights[index].radius=5;
++        fixture_lights[index].position=(real_point3d){7,8,9};
++        fixture_lights[index].forward=(real_vector3d){1,0,0};
++        fixture_lights[index].up=(real_vector3d){0,0,1};
++    }
++    cluster_reads=diffuse_calls=specular_calls=diffuse_skip=specular_skip=0;
++    data_next_calls=0;
++    fixture_light_intensity=1;
++}
++static void check_flashlight_render_refresh(void) {
++    int frame;
++    real_point3d position,expected_position,ignored_origin;
++    real_vector3d forward,up,expected_forward;
++    struct light_datum tick;
++    flashlight_reset(); tick=fixture_lights[0];
++    /* Ninety rendered poses with a completely unchanged simulation unit/light. */
++    for(frame=0;frame<90;frame++) {
++        real angle=(real)frame*0.025f, pitch=sinf(angle)*0.7f;
++        vr_render.base_yaw=0.5f;
++        vr_render.view.hand_forward[0]=cosf(angle)*cosf(pitch);
++        vr_render.view.hand_forward[1]=sinf(angle)*cosf(pitch);
++        vr_render.view.hand_forward[2]=sinf(pitch);
++        vr_render.weapon_camera.position.z=(real)frame*0.003f;
++        expected_position=vr_render.weapon_camera.position;
++        CHECK(vr_render_unarmed_ray(0,0,&units[0],&vr_render.view,vr_render.base_yaw,&ignored_origin,&expected_forward));
++        CHECK(vr_render_player_flashlight_pose(0,&position,&forward,&up));
++        point_equal(position,expected_position); direction_equal(forward,expected_forward);
++        CHECK(near(dot_product3d(&forward,&up),0)); CHECK(near(magnitude3d(&up),1));
++        CHECK(memcmp(&tick,&fixture_lights[0],sizeof(tick))==0);
++        direction_equal(units[0].unit.aiming_vector,(real_vector3d){1,0,0});
++        /* The second eye queries identical centre-frame presentation, not a new locate. */
++        CHECK(vr_render_player_flashlight_pose(0,&position,&forward,&up));
++        point_equal(position,expected_position); direction_equal(forward,expected_forward);
++    }
++    /* Hand/controller height must not be replaced by the observer/HMD origin. */
++    fixture_observer.position.z=12; vr_render.weapon_camera.position.z=-0.2f;
++    CHECK(vr_render_player_flashlight_pose(0,&position,&forward,&up)); CHECK(near(position.z,-0.2f));
++    vr_render.view.hand_forward[0]=0; vr_render.view.hand_forward[1]=0; vr_render.view.hand_forward[2]=1;
++    CHECK(vr_render_player_flashlight_pose(0,&position,&forward,&up));
++    CHECK(near(forward.k,sinf(DEGREES_TO_RADIANS(85.f)))); CHECK(near(dot_product3d(&forward,&up),0));
++    vr_render.view.hand_forward[2]=-1;
++    CHECK(vr_render_player_flashlight_pose(0,&position,&forward,&up)); CHECK(near(forward.k,-sinf(DEGREES_TO_RADIANS(85.f))));
++    vr_render.view.hand_forward[0]=1; vr_render.view.hand_forward[2]=0; vr_render.base_yaw=0;
++    vr_render.weapon_camera.up=(real_vector3d){0,1,0};
++    CHECK(vr_render_player_flashlight_pose(0,&position,&forward,&up)); direction_equal(up,(real_vector3d){0,1,0});
++}
++static void check_flashlight_rejection(void) {
++    int scenario;
++    for(scenario=0;scenario<20;scenario++) {
++        real_point3d position={11,12,13}; real_vector3d forward={14,15,16},up={17,18,19};
++        flashlight_reset();
++        switch(scenario) {
++        case 0: vr_render.active=FALSE; break;
++        case 1: vr_render.weapon_camera_set=FALSE; break;
++        case 2: vr_render.weapon_camera_valid=FALSE; break;
++        case 3: fixture_vr_aiming=FALSE; break;
++        case 4: fixture_tracking_valid=FALSE; break;
++        case 5: render.local_player_index=1; break;
++        case 6: fixture_weapon_count[0]=1; break;
++        case 7: inventory[0]=0; break;
++        case 8: units[0].object.damage_flags=1u<<_object_dead_bit; break;
++        case 9: units[0].object.parent_object_index=1; break;
++        case 10: units[0].unit.gunner_object_index=1; break;
++        case 11: fixture_cinematic=TRUE; break;
++        case 12: fixture_inhibited=TRUE; break;
++        case 13: fixture_perspective=0; break;
++        case 14: vr_render.weapon_camera.position.z=NAN; break;
++        case 15: vr_render.weapon_camera.up.i=NAN; break;
++        case 16: vr_render.weapon_camera.up=(real_vector3d){0,1,0}; break; /* parallel to default pointing */
++        case 17: vr_render.view.hand_forward[1]=NAN; break;
++        case 18: fixture_local_player=NONE; break;
++        case 19: fixture_scripted_camera=TRUE; break;
++        }
++        CHECK(!vr_render_player_flashlight_pose(0,&position,&forward,&up));
++        point_equal(position,(real_point3d){11,12,13}); direction_equal(forward,(real_vector3d){14,15,16});
++        direction_equal(up,(real_vector3d){17,18,19});
++        lights_vr_include_unarmed_flashlights(); CHECK(data_next_calls==0);
++    }
++    flashlight_reset(); {
++        real_point3d position; real_vector3d forward,up;
++        CHECK(!vr_render_player_flashlight_pose(1,&position,&forward,&up));
++        CHECK(!vr_render_player_flashlight_pose(NONE,&position,&forward,&up));
++        CHECK(!vr_render_player_flashlight_pose(0,NULL,&forward,&up));
++        CHECK(!vr_render_player_flashlight_pose(0,&position,NULL,&up));
++        CHECK(!vr_render_player_flashlight_pose(0,&position,&forward,NULL));
++    }
++}
++static void check_flashlight_bounds_and_clusters(void) {
++    int scenario;
++    flashlight_reset(); {
++        struct light_datum tick=fixture_lights[0];
++        real_point3d center,tick_center,position; real_vector3d forward,up; real radius,tick_radius;
++        /* Tick cone points right; current rendered controller points left. */
++        vr_render.view.hand_forward[0]=-1; vr_render.view.hand_forward[1]=0;
++        light_get_bounding_sphere(0,&center,&radius);
++        light_compute_bounding_sphere(0,TRUE,FALSE,TRUE,&tick_center,&tick_radius);
++        CHECK(center.x<vr_render.weapon_camera.position.x); CHECK(tick_center.x>tick.position.x);
++        CHECK(near(radius,tick_radius)); CHECK(memcmp(&tick,&fixture_lights[0],sizeof(tick))==0);
++        CHECK(light_vr_unarmed_flashlight_pose(&fixture_lights[0],&position,&forward,&up));
++        CHECK(near(center.x,position.x+radius*forward.i));
++        /* Missing from stale clusters: included once without partition/datum edits. */
++        lights_vr_include_unarmed_flashlights(); CHECK(lights_globals.scene_point_light_count==1);
++        CHECK(data_next_calls>0);
++        CHECK(lights_globals.scene_point_lights[0]==0);
++        lights_vr_include_unarmed_flashlights(); CHECK(lights_globals.scene_point_light_count==1);
++        lights_render_diffuse(); lights_render_specular();
++        CHECK(diffuse_calls==1 && specular_calls==1 && diffuse_skip && specular_skip && cluster_reads==0);
++        CHECK(near(diffuse_center.x,position.x+diffuse_radius*forward.i));
++        CHECK(near(specular_center.x,position.x+specular_radius*forward.i));
++        CHECK(memcmp(&tick,&fixture_lights[0],sizeof(tick))==0);
++    }
++    /* Full visibility budget stays bounded and keeps the player's flashlight. */
++    flashlight_reset(); lights_globals.scene_point_light_count=MAXIMUM_RENDERED_LIGHTS;
++    lights_globals.scene_point_lights[0]=2; lights_globals.scene_point_lights[1]=3;
++    marked[2]=marked[3]=1; lights_vr_include_unarmed_flashlights();
++    CHECK(lights_globals.scene_point_light_count==MAXIMUM_RENDERED_LIGHTS);
++    CHECK(lights_globals.scene_point_lights[0]==2 && lights_globals.scene_point_lights[1]==0);
++    flashlight_reset(); fixture_light_intensity=0;
++    lights_globals.scene_point_light_count=MAXIMUM_RENDERED_LIGHTS;
++    lights_globals.scene_point_lights[0]=2; lights_globals.scene_point_lights[1]=3;
++    marked[2]=marked[3]=1; lights_vr_include_unarmed_flashlights();
++    CHECK(lights_globals.scene_point_light_count==MAXIMUM_RENDERED_LIGHTS);
++    CHECK(lights_globals.scene_point_lights[0]==2 && lights_globals.scene_point_lights[1]==3);
++    for(scenario=0;scenario<6;scenario++) {
++        real_point3d rendered,tick; real radius,tick_radius;
++        flashlight_reset();
++        switch(scenario) {
++        case 0: fixture_light_definition.flags=0; break; /* ordinary dynamic light */
++        case 1: fixture_lights[0].parent_light_index=5; break; /* transient effect */
++        case 2: fixture_lights[0].flags=0; break; /* static light */
++        case 3: inventory[0]=0; fixture_weapon_count[0]=1; break; /* armed marker path */
++        case 4: vr_render.active=FALSE; break; /* flat/HUD/ended pass */
++        case 5: fixture_lights[0].object_index=1; break; /* remote owner */
++        }
++        light_get_bounding_sphere(0,&rendered,&radius);
++        light_compute_bounding_sphere(0,TRUE,FALSE,TRUE,&tick,&tick_radius);
++        point_equal(rendered,tick); CHECK(near(radius,tick_radius));
++        CHECK(!light_render_skips_clusters(&fixture_lights[0]));
++        lights_vr_include_unarmed_flashlights(); CHECK(lights_globals.scene_point_light_count==0);
++        if(scenario==3 || scenario==4) CHECK(data_next_calls==0);
++    }
++    /* Armed supersize convention remains exactly as before. */
++    flashlight_reset(); inventory[0]=0; fixture_weapon_count[0]=1;
++    fixture_lights[0].flags|=1u<<_point_light_attached_to_first_person_weapon_bit;
++    fixture_light_definition.flags|=1u<<_light_definition_supersize_in_first_person_bit;
++    CHECK(light_render_skips_clusters(&fixture_lights[0]));
++}
++'''
++
++
++def main():
++    render = (ROOT / 'port/linux/game/vr_render.c').read_text()
++    lights = (ROOT / 'source/objects/object_lights.c').read_text()
++    first_person = (ROOT / 'source/interface/first_person_weapons.c').read_text()
++    old_first_person = subprocess.check_output(['git', 'show', reticle.ORIGINAL_ENGINE_COMMIT +
++                                               ':source/interface/first_person_weapons.c'], cwd=ROOT, text=True)
++    assert reticle.function(first_person, 'first_person_weapon_center_flashlight') == reticle.function(old_first_person, 'first_person_weapon_center_flashlight'), 'Armed marker behavior changed'
++    old_lights = subprocess.check_output(['git', 'show', reticle.ORIGINAL_ENGINE_COMMIT +
++                                        ':source/objects/object_lights.c'], cwd=ROOT, text=True)
++    # Preserve recovered cone math and its simulation-only wrapper exactly.
++    old_body = reticle.function(old_lights, 'light_compute_bounding_sphere')
++    old_body = old_body[old_body.index('{'):].replace('struct light_datum *light = light_get(light_index);', '')
++    new_body = reticle.function(lights, 'light_compute_bounding_sphere_from_basis')
++    assert reticle.normalized(old_body) == reticle.normalized(new_body[new_body.index('{'):])
++    reconnect = reticle.function(lights, 'light_reconnect_to_map')
++    assert 'light_compute_render_bounding_sphere' not in reconnect and 'light_compute_bounding_sphere(' in reconnect
++    preprocess = reticle.function(lights, 'lights_preprocess_scene')
++    assert preprocess.index('lights_vr_include_unarmed_flashlights();') < preprocess.index('light_marker_end();')
++    assert preprocess.index('light_vr_unarmed_flashlight_pose(light, &light_parameters.position,') < preprocess.index('rasterizer_light_submit(')
++    helper = reticle.function(render, 'vr_render_player_flashlight_pose')
++    assert 'halo_vr_view(' not in helper and 'weapon_camera.position' in helper
++    names = ['light_vr_unarmed_flashlight_pose', 'lights_vr_include_unarmed_flashlights',
++             'light_compute_bounding_sphere_from_basis', 'light_compute_bounding_sphere',
++             'light_compute_render_bounding_sphere', 'light_render_skips_clusters',
++             'light_get_bounding_sphere', 'lights_render_diffuse', 'lights_render_specular']
++    production = helper + '\n\n' + '\n\n'.join(reticle.function(lights, name) for name in names)
++    extension = LIGHT_FIXTURE.replace('@@FLASHLIGHT_FUNCTIONS@@', production)
++    harness = reticle.HARNESS
++    view_header = (ROOT / 'port/linux/src/vr.h').read_text()
++    view_begin = view_header.index('struct halo_vr_view\n{')
++    view_end = reticle.block_end(view_header, view_header.index('{', view_begin))
++    harness = re.sub(r'struct halo_vr_view \{[^\n]+\};',
++                     lambda match: view_header[view_begin:view_end] + ';', harness)
++    harness = harness.replace('boolean active,crosshairs_drawn;',
++                              'boolean active,crosshairs_drawn,weapon_camera_set,weapon_camera_valid; struct render_camera weapon_camera;')
++    harness = harness.replace('static struct { struct render_camera camera; } render;',
++                              'static struct { struct render_camera camera; short local_player_index; } render;')
++    harness = harness.replace('int main(void) {', extension + '\nint main(void) {\n' +
++                              '    check_flashlight_render_refresh(); check_flashlight_rejection(); check_flashlight_bounds_and_clusters();')
++    reticle.HARNESS = harness
++    reticle.main()
++    print('PASS: actual render-rate flashlight pose, unchanged armed/tick math and read-only visibility/diffuse/specular bounds')
 +
 +
 +if __name__ == '__main__':

@@ -2,7 +2,7 @@
 
 [**Download Halo-Steam-Frame-Mod-Setup-1.4.1.exe**](https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/v1.4.1/Halo-Steam-Frame-Mod-Setup-1.4.1.exe) for Windows 10/11 x64. This is the release's only installer asset. Its SHA256 is listed on the [release page](https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/tag/v1.4.1); matching installer source is in the [v1.4.1 tag](https://github.com/ClassicWasTaken/HaloSteamFrameMod/tree/v1.4.1).
 
-This patch addresses the first mission's VR tutorial:
+This patch fixes VR tutorial behavior, unarmed lighting and setup completion:
 
 - **Aim before receiving a weapon:** the unarmed/default reticle follows the tracked aiming hand. Equipped weapons retain the existing nominal bullet-hit alignment and render-rate preview.
 - **Look at the technician and panel:** person checks use headset gaze. The five tutorial dots also accept the unarmed hand reticle within their original five-degree target cone.
@@ -10,6 +10,7 @@ This patch addresses the first mission's VR tutorial:
 - **Standing and snap defaults:** Install and Repair apply standing mode and snap turning. Other preferences, including snap angle and refresh rate, remain intact.
 - **Inversion prompt buttons:** tutorial Back no longer leaks into melee or other mapped gameplay actions while pressed or held. The reported crash still needs confirmation in the headset test; the profile's inversion-setting and save logic remain intact.
 - **Tracking loss:** a failed or partial OpenXR pose query cannot reuse an old valid head or hand pose to complete a tutorial target.
+- **Unarmed flashlight:** the beam follows the current rendered controller pose with bounded aim and matching render bounds, instead of the slower simulation attachment. Equipped-weapon flashlight markers retain their behavior.
 - **Native build fix:** tutorial button handling uses the engine's existing VR-session function, avoiding the missing-symbol failure at the final linking step. Long build errors retain their failure summary in the setup dialog.
 - **Completion display:** an optional Steam shortcut icon that has not loaded no longer holds a successful Install or Repair at 99%. Setup shows Complete at 100%; icon details remain in the activity log.
 
@@ -19,7 +20,7 @@ Upgrading from 1.3.5 retains its old saves and backs up the original config/prog
 
 Source remains pinned to `2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4`, native peer protocol **17**. LAN/online campaign, head-directed walking, Xbox-style buttons, stereo sun glow and automatic Steam artwork/Notes are retained. Use matching builds/maps for co-op; retail Halo clients cannot join. Restrictive NAT can prevent Internet connections because there is no gameplay relay.
 
-The earlier headset report verified the 1.4.0 baseline, not these new tutorial changes. This patch needs its own headset verification; automated checks do not establish tutorial behavior or Frame performance on hardware.
+The earlier headset report verified the 1.4.0 baseline, not these new tutorial or flashlight changes. This patch needs its own headset verification; automated checks do not establish tutorial behavior or Frame performance on hardware.
 
 Supply your own authorized original Xbox Halo CE data. No retail executable, ISO, maps, keys, or soundtrack is bundled or downloaded. Halo identification artwork and licensed components retain their notices. The EXE is unsigned; verify it against the SHA256 shown on the release page.
 

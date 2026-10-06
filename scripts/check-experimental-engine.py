@@ -33,6 +33,7 @@ PATCH_FILES = frozenset((
     "source/units/units.c", "source/units/units.h",
     "source/hs/hs_library_external.c", "port/linux/arm64/host_vr.c",
     "tools/test_vr_tutorial.py", "tools/test_vr_tracking.py", "tools/test_vr_tutorial_buttons.py",
+    "source/objects/object_lights.c", "tools/test_vr_flashlight.py",
 ))
 
 
@@ -302,6 +303,61 @@ def check_nominal_projectile_reticle(source):
             "Unit preview must share the original camera/muzzle projection math.")
 
 
+def check_unarmed_flashlight(source):
+    read = lambda path: (source / path).read_text(encoding="utf-8")
+    renderer = read("port/linux/game/vr_render.c")
+    pose = c_function(renderer, "vr_render_player_flashlight_pose")
+    for guard in ("!vr_render.active", "!vr_render.weapon_camera_set",
+                  "!vr_render.weapon_camera_valid", "render.local_player_index != 0",
+                  "director_camera_scripted && *director_camera_scripted",
+                  "!halo_vr_aiming()", "!halo_vr_gaze_tracking_valid()",
+                  "vr_render_unarmed_ray("):
+        require(guard in pose, "Missing unarmed flashlight render-pose guard: " + guard)
+    require("vr_render.weapon_camera.position" in pose and "vr_render.weapon_camera.up" in pose
+            and "dot_product3d(" in pose and "normalize3d(" in pose
+            and "halo_vr_view(" not in pose,
+            "The flashlight must use the cached rendered hand pose with a perpendicular up vector.")
+    lights = read("source/objects/object_lights.c")
+    override = c_function(lights, "light_vr_unarmed_flashlight_pose")
+    for guard in ("#ifdef HALO_VR", "light->parent_light_index == NONE",
+                  "light->object_index != NONE", "_point_light_dynamic_bit",
+                  "_light_definition_is_first_person_flashlight_bit",
+                  "vr_render_player_flashlight_pose("):
+        require(guard in override, "Missing local flashlight light-definition guard: " + guard)
+    bounds = c_function(lights, "light_compute_render_bounding_sphere")
+    require("struct light_datum effective = *light_get(light_index)" in bounds
+            and "&effective.position" in bounds and "&effective.forward" in bounds
+            and "light_compute_bounding_sphere_from_basis(&effective" in bounds,
+            "Render flashlight bounds must use a copy of the simulation light.")
+    simulation = c_function(lights, "light_compute_bounding_sphere")
+    reconnect = c_function(lights, "light_reconnect_to_map")
+    require("light_compute_bounding_sphere_from_basis(light_get(light_index)" in simulation
+            and "light_compute_render_bounding_sphere(" not in reconnect
+            and "light_vr_unarmed_flashlight_pose(" not in reconnect,
+            "Flashlight presentation must not move the simulation light's BSP partition.")
+    include = c_function(lights, "lights_vr_include_unarmed_flashlights")
+    require("light_unmarked(light_index)" in include and "object_get_function_value(" in include
+            and "intensity <= 0.0f" in include and "slot < MAXIMUM_RENDERED_LIGHTS" in include
+            and "MAXIMUM_RENDERED_LIGHTS - 1" in include,
+            "Adding a local flashlight outside stale visibility must respect scene-list capacity.")
+    preprocess = c_function(lights, "lights_preprocess_scene")
+    require(0 <= preprocess.find("structure_visibility_find_objects(")
+            < preprocess.find("lights_vr_include_unarmed_flashlights()")
+            < preprocess.find("light_marker_end()"),
+            "The current flashlight must be included before finishing scene-light visibility.")
+    require("light_vr_unarmed_flashlight_pose(light, &light_parameters.position" in preprocess
+            and "first_person_weapon_center_flashlight(" in preprocess,
+            "The local unarmed override must be integrated without replacing armed flashlight markers.")
+    for name in ("light_get_bounding_sphere", "lights_render_diffuse", "lights_render_specular"):
+        require("light_compute_render_bounding_sphere(" in c_function(lights, name),
+                "Flashlight visibility and drawing must share rendered bounds: " + name)
+    for name in ("lights_render_diffuse", "lights_render_specular"):
+        require("light_render_skips_clusters(light)" in c_function(lights, name),
+                "The unarmed beam must not use stale tick cluster restrictions: " + name)
+    require((source / "tools/test_vr_flashlight.py").is_file(),
+            "Missing production C flashlight regression.")
+
+
 def check_tutorial(source):
     read = lambda path: (source / path).read_text(encoding="utf-8")
     player = read("source/game/player_control.c")
@@ -422,6 +478,7 @@ def check_source(source: Path):
         check_stereo_glow_and_online_menu(projection)
         check_nominal_projectile_reticle(projection)
         check_tutorial(projection)
+        check_unarmed_flashlight(projection)
         result = subprocess.run([sys.executable, "-I", "-c", GRAPH_SMOKE], cwd=projection,
                                 capture_output=True, text=True, timeout=30)
         require(result.returncode == 0, "Offline ARM64 configuration generation failed: " + result.stderr[-2000:])
@@ -429,7 +486,7 @@ def check_source(source: Path):
             "protocolVersion": 17, "rendererTwoPassBinding": True, "campaignCoopIntegration": True,
             "headDirectedMovementIntegration": True, "xboxControlsPreserved": True,
             "stereoSunGlowIntegration": True, "boundedSunGlowStrength": True, "vrInternetCampaignMenu": True,
-            "nominalProjectileReticleIntegration": True,
+            "nominalProjectileReticleIntegration": True, "renderRateUnarmedFlashlightIntegration": True,
             "renderRateProjectilePreviewIntegration": True,
             "networkCampaignOnlyIntegration": True,
             "vrTutorialIntegration": True,

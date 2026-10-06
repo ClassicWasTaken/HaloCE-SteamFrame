@@ -26,6 +26,8 @@ Install and Repair apply controller aiming, standing height and snap turning. A 
 
 When a weapon is equipped, the reticle previews the nominal primary shot using Halo's firing calculation and projectile collision mask. On foot it uses render-frame aim, so its direction is no longer limited to the unit's 30 Hz updates; the hit is traced anew each frame. The headset tester confirmed this behavior in the 1.4.0 baseline. Random spread and ballistic motion can still move individual impacts away from that point. Stereo sun glow defaults to `vr.sun_glow_strength = 0.5` in `config.toml`; 0 disables its glow, and 1 restores full intensity. Repair preserves a custom value.
 
+Before a weapon is equipped, the flashlight also follows the rendered aiming hand with bounded elevation. Its presentation uses current light bounds without changing the simulation's light state. Equipped weapons keep their original flashlight markers.
+
 ## Local changes to upstream
 
 The [included patch](../resources/frame-controls.patch) includes these controls and menu changes:

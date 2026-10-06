@@ -101,4 +101,5 @@ def test_actual_exact_pinned_engine_and_shipped_patch_when_checkout_is_supplied(
     assert result["renderRateProjectilePreviewIntegration"]
     assert result["networkCampaignOnlyIntegration"]
     assert result["vrTutorialIntegration"] and result["freshFullPoseTrackingIntegration"]
+    assert result["renderRateUnarmedFlashlightIntegration"]
     assert not result["arm64LinkedBuild"] and not result["hardwareValidated"]

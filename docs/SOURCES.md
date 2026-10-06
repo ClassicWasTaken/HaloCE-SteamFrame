@@ -2,7 +2,7 @@
 
 This community VR mod installer builds the experimental native ARM64 Linux VR port of **Halo: Combat Evolved** from the revision below. It provides a guided installation; the decompilation, renderer, OpenXR implementation and networking are the work of the credited upstream contributors. No retail game executable, disc image, maps, product keys, or soundtrack is bundled or downloaded; users provide authorized original Xbox game data.
 
-Sources were checked on 2026-10-06 against a local checkout at the exact engine revision. Release 1.4.1 adds tutorial fixes to the 1.4.0 baseline. The earlier headset report confirmed the baseline's reticle motion and LAN/online campaign co-op; it does not verify the new tutorial fixes. That report contains no measured FPS, frame timings, or peer-distance details. Source and production C checks provide additional software coverage.
+Sources were checked on 2026-10-06 against a local checkout at the exact engine revision. Release 1.4.1 adds tutorial, unarmed flashlight and setup-completion fixes to the 1.4.0 baseline. The earlier headset report confirmed the baseline's reticle motion and LAN/online campaign co-op; it does not verify the new tutorial or flashlight fixes. That report contains no measured FPS, frame timings, or peer-distance details. Source and production C checks provide additional software coverage.
 
 ## Installer contributions
 
@@ -22,7 +22,7 @@ Those contributions remain in 1.4.1. The 1.4.0 release changed the engine pin an
 | [bnunu/halo-1](https://github.com/bnunu/halo-1) and [punpckhdq/halo](https://github.com/punpckhdq/halo) | Decompilation lineage identified by the upstream README. |
 | [Upstream XDK declarations](https://github.com/startupfoundry/halo-ce-universal/blob/2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4/port/include/xdk/README.md) | The port supplies its own declarations; installing the proprietary Xbox SDK is unnecessary. |
 
-The installer applies [its documented controls, reticle, tutorial and campaign-menu patch](../resources/frame-controls.patch) to that pinned revision. The 1.4.1 patch's SHA256 is `25b08aac6d725dd33bc294aa41bbc281be15128e79517b78c33c5ed4ade2cd92`. The 1.4.0 baseline patch's SHA256 was `639f2694cf9574eefca6204e74193b95a72b642128884189ad398c86f7c1b30e`. [Controls and defaults](CONTROLS.md) distinguish these changes from upstream behavior. Performance depends on game scene, headset software and settings; native ARM64 does not imply unlimited performance.
+The installer applies [its documented controls, reticle, tutorial, flashlight and campaign-menu patch](../resources/frame-controls.patch) to that pinned revision. The 1.4.1 patch's SHA256 is `1c1f8f7961831bdc543a82dd1f1ce95475a942e29c3c0fbe41b74d82439ab7f6`. The 1.4.0 baseline patch's SHA256 was `639f2694cf9574eefca6204e74193b95a72b642128884189ad398c86f7c1b30e`. [Controls and defaults](CONTROLS.md) distinguish these changes from upstream behavior. Performance depends on game scene, headset software and settings; native ARM64 does not imply unlimited performance.
 
 ### 1.4.1 tutorial changes
 
@@ -31,6 +31,12 @@ The local patch adds a controller-directed unarmed/default reticle without repla
 Tutorial Back consumes the gameplay actions mapped to B until the physical button is released, while keeping the original inversion-setting and profile-save logic. Production C checks reproduce the prior melee leak; the reported headset crash has not been reproduced locally. OpenXR pose queries clear old validity before querying and require both position and orientation validity, so failed or partial tracking cannot complete a gaze/hand target with an old pose. Focused tests cover those failure and recovery paths using the checked-in Khronos headers.
 
 The tutorial-button regression includes the actual `vr.h` declaration and links the extracted production `halo_vr_running` definition from a separate translation unit. This avoids a test stub masking a missing session-query function. An offline ARM64 relocatable-link check also verifies the new tutorial bridges across the compiled guest objects; it is not a fully linked game or hardware test.
+
+### 1.4.1 unarmed flashlight and build verification
+
+The unarmed flashlight uses the current cached rendered controller camera for its origin and roll, with the same bounded direction as the unarmed reticle. A rendering-only light copy supplies its visibility and diffuse/specular bounds. The active local flashlight is included despite stale tick cluster membership, with scene-list capacity checks and a zero-intensity guard. Equipped weapon markers, remote lights, simulation attachment/reconnection and actual shot calculations retain their behavior. Dynamic object-light selection remains tick-based; physical beam placement and appearance need a headset test.
+
+`tools/test_vr_flashlight.py` compiles the actual presentation and light-bounds functions and checks render poses between simulation ticks, elevation, roll, eligibility, stale culling, capacity and unchanged armed/tick math. The release workflow also runs [the full native ARM64 VR build check](../scripts/check-native-build.py), using the exact shipped source pin, patch, build script and rootless container flags. It exports JSON proof only, without game data or a native game binary. A successful compile/link does not establish headset appearance or measured frame rate.
 
 ### Retained 1.4.0 engine changes
 
