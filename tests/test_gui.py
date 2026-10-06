@@ -149,6 +149,7 @@ def test_gui_offline_smoke():
     from halo_frame_installer import __version__
     assert result['version'] == __version__
     assert result['guiPagesInitialized'] == ['gameData', 'connection', 'install']
+    assert result['steamInfoUpdateWithoutRebuild'] and result['steamDescriptionUsesNotes']
     assert result['networkConnections'] == 0
 
 
@@ -596,7 +597,7 @@ def test_box_art_pending_stays_at_99_with_retry_action(app):
     app.events.put(('idle',))
     _drain_events(app)
     assert float(app.progress['value']) == 99
-    assert 'box art pending' in app.phase.get()
+    assert 'Steam info pending' in app.phase.get()
     assert not _disabled(app.retry_button)
 
 
@@ -882,7 +883,7 @@ def test_revision_guidance_names_validated_rev_2_and_checked_cache_builds(app):
 
 
 @WINDOWS_GUI
-@pytest.mark.parametrize('mode', ['install', 'repair', 'uninstall'])
+@pytest.mark.parametrize('mode', ['install', 'repair', 'library', 'uninstall'])
 @pytest.mark.parametrize('games_closed', [False, True])
 def test_game_closed_acknowledgment_never_authorizes_steam_shutdown(app, mode, games_closed):
     app.mode.set(mode)
@@ -936,3 +937,173 @@ def test_manual_library_fallback_uses_steam_ui_without_teardown_instructions(app
     assert float(app.progress['value']) == 99
     assert expected in app.status.get()
     assert 'Quit Steam' not in app.status.get() and 'restart Steam' not in app.status.get()
+
+
+@WINDOWS_GUI
+def test_steam_info_navigation_requires_connection_but_no_iso_or_authorization(app):
+    app.mode.set('library')
+    assert app.library_card.winfo_manager()
+    assert not app.data_panel.winfo_manager() and not app.data_consent.winfo_manager()
+    assert not app.uninstall_card.winfo_manager()
+    assert 'No ISO or rebuild' in '\n'.join(_display_text(app.library_card))
+    app._continue()
+    assert app.current_page == 1
+    app._continue()
+    assert app.current_page == 1
+    app.password.set('offline-secret')
+    app._continue()
+    assert app.current_page == 1  # Existing game-close acknowledgement remains required.
+    app.steam_closed.set(True)
+    app._continue()
+    assert app.current_page == 2
+    assert app.primary_button.cget('text') == 'Update Steam info'
+    assert app.summary_source.get() == '~/Games/HaloCENativeVR'
+    assert 'Steam Notes' in app.summary_action.get()
+    assert 'custom artwork and notes are preserved' in app.summary_note.get()
+    app.mode.set('install')
+    app._show_page(0)
+    app._continue()
+    assert app.current_page == 0
+    assert not app.library_card.winfo_manager()
+    assert app.data_panel.winfo_manager() and app.data_consent.winfo_manager()
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('transport', ['network', 'usb'])
+def test_steam_info_worker_does_not_read_game_data_or_build_and_clears_credentials(app, monkeypatch, transport):
+    from halo_frame_installer import gui, install
+    calls = []
+
+    def fake_library(self, settings, progress, cancel):
+        calls.append((settings, settings.password))
+        assert settings.transport == transport
+        assert not settings.close_steam_for_shortcut
+        progress('steam', 'Updating library info.', 100)
+        progress('disconnected', 'Setup has disconnected from your Frame.', None)
+        return install.InstallResult('/home/steamos/Games/HaloCENativeVR', False,
+            {'status': 'added', 'artwork': {'status': 'added', 'icon': {'status': 'added'}},
+             'notes': {'status': 'added', 'title': 'About Halo', 'content': 'Campaign and controls.', 'message': 'Added.'}}, None)
+
+    monkeypatch.setattr(install.Installer, 'add_to_steam', fake_library)
+    monkeypatch.setattr(install, 'run', lambda *args, **kwargs: pytest.fail('Steam info rebuilt the game.'))
+    monkeypatch.setattr(gui.threading, 'Thread', _ImmediateThread)
+    for name in ('inspect_image', 'inspect_maps', 'extract_image', 'copy_maps'):
+        monkeypatch.setattr(gui, name, lambda *args, **kwargs: pytest.fail('Steam info accessed game data.'))
+    monkeypatch.setattr(app.music, 'load', lambda *args: pytest.fail('Steam info read game music.'))
+    app.mode.set('library')
+    app.transport.set(transport)
+    app.steam_closed.set(True)
+    app.password.set('offline-secret')
+    app._show_page(2)
+    app._continue()
+    _drain_events(app)
+    assert len(calls) == 1
+    settings, password = calls[0]
+    assert password == 'offline-secret'
+    assert not settings.password and not app.password.get()
+    assert not app.busy and not app.installing
+    assert float(app.progress['value']) == 100
+    assert app.phase.get() == 'Steam info updated'
+    assert 'native game and saves were kept' in app.status.get()
+    assert 'installed.' not in app.status.get()
+    assert app._test_dialogs[-1][0] == 'Steam info updated'
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('pending', ['icon', 'notes', 'artwork'])
+def test_steam_info_partial_results_stay_actionable_without_claiming_complete_update(app, pending):
+    from halo_frame_installer.install import InstallResult
+    app.mode.set('library')
+    app.operation = 'library'
+    app.password_to_redact = 'offline-secret'
+    steam = {'status': 'added', 'artwork': {'status': 'added', 'icon': {'status': 'added'}},
+             'notes': {'status': 'added', 'title': 'About Halo', 'content': 'Campaign and controls.'}}
+    if pending == 'icon':
+        steam['artwork']['icon'] = {'status': 'manual', 'reason': 'Icon not persisted. offline-secret'}
+    elif pending == 'notes':
+        steam['notes'].update(status='manual', message='Open Steam Notes. offline-secret')
+    else:
+        steam['artwork']['status'] = 'manual'
+        steam['artwork']['reason'] = 'Banner unavailable. offline-secret'
+    app.events.put(('complete', InstallResult('/home/steamos/Games/HaloCENativeVR', False, steam, None)))
+    app.events.put(('idle',))
+    _drain_events(app)
+    assert float(app.progress['value']) == 99
+    assert app.phase.get() == 'Ready to play · Steam info pending'
+    assert 'some Steam library info needs one more step' in app.status.get()
+    assert 'has been updated' not in app.status.get()
+    assert not _disabled(app.retry_button)
+    assert 'offline-secret' not in app.status.get()
+    assert 'offline-secret' not in '\n'.join(app.log_lines)
+    assert app._test_dialogs[-1][0] == 'Steam info needs attention'
+    assert bool(app.notes_button.winfo_manager()) is (pending == 'notes')
+
+
+@WINDOWS_GUI
+def test_manual_steam_description_is_copyable_and_never_overrides_about_game(app):
+    import tkinter as tk
+    from halo_frame_installer.gui import Button
+    from halo_frame_installer.install import InstallResult
+    app.operation = 'library'
+    app.password_to_redact = 'offline-secret'
+    app.events.put(('complete', InstallResult('/home/steamos/Games/HaloCENativeVR', False,
+        {'status': 'added', 'notes': {'status': 'manual', 'title': 'Halo CE VR — About & controls',
+         'content': 'Explore Halo.\nA: Jump. B: Melee. offline-secret', 'message': 'Steam Notes needs a manual step.'}}, None)))
+    app.events.put(('clear_password',))
+    app.events.put(('idle',))
+    _drain_events(app)
+    assert app.notes_button.winfo_manager() and not _disabled(app.notes_button)
+    assert 'description in Steam Notes' in app.status.get()
+    app._show_steam_note()
+    dialogs = [widget for widget in app.winfo_children() if isinstance(widget, tk.Toplevel)]
+    try:
+        assert len(dialogs) == 1
+        visible = '\n'.join(_display_text(dialogs[0]))
+        assert 'Add this description in Steam Notes' in visible
+        assert 'About this game' not in visible
+        def descendants(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from descendants(child)
+        fields = [widget for widget in descendants(dialogs[0]) if isinstance(widget, tk.Text)]
+        assert len(fields) == 1
+        assert fields[0].get('1.0', 'end-1c') == 'Explore Halo.\nA: Jump. B: Melee. [redacted]'
+        copy = next(widget for widget in descendants(dialogs[0])
+                    if isinstance(widget, Button) and widget.cget('text') == 'Copy description')
+        copy.invoke()
+        assert app.clipboard_get() == 'Explore Halo.\nA: Jump. B: Melee. [redacted]'
+        app.clipboard_clear()
+    finally:
+        for dialog in dialogs:
+            dialog.destroy()
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('icon_status', ['existing', 'custom', 'unchanged', 'preserved'])
+def test_preserved_steam_info_is_successful_without_manual_pending(app, icon_status):
+    from halo_frame_installer.install import InstallResult
+    app.operation = 'library'
+    app.events.put(('complete', InstallResult('/home/steamos/Games/HaloCENativeVR', False,
+        {'status': 'added', 'artwork': {'status': 'unchanged', 'icon': {'status': icon_status}},
+         'notes': {'status': 'custom', 'title': 'Halo CE VR — About & controls', 'content': 'Player notes.'}}, None)))
+    app.events.put(('idle',))
+    _drain_events(app)
+    assert float(app.progress['value']) == 100
+    assert app.phase.get() == 'Steam info updated'
+    assert 'existing custom game note was kept' in app.status.get()
+    assert not app.notes_button.winfo_manager()
+
+
+@WINDOWS_GUI
+def test_all_operation_tile_captions_fit_minimum_width(app):
+    app.geometry('900x620')
+    app.deiconify()
+    app._show_page(0)
+    app.update()
+    assert {choice.value for choice in app.mode_choices} == {'install', 'repair', 'library', 'uninstall'}
+    for choice in app.mode_choices:
+        for item in choice.find_all():
+            if choice.type(item) == 'text':
+                left, top, right, bottom = choice.bbox(item)
+                assert 0 <= left < right <= choice.winfo_width()
+                assert 0 <= top < bottom <= choice.winfo_height()

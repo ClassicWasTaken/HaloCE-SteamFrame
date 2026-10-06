@@ -136,7 +136,7 @@ class FakeConnection:
         raise AssertionError(argv)
 
 
-def test_add_to_steam_retry_reuses_files_and_no_build_or_asset_upload():
+def test_add_to_steam_retry_reuses_files_without_build_or_map_upload():
     fake = FakeConnection(Settings("frame", "private", close_steam_for_shortcut=True))
     result = Installer(lambda settings: fake, RESOURCES).add_to_steam(fake.settings)
     assert result.reused and result.steam_appid == 3732925724
@@ -146,6 +146,18 @@ def test_add_to_steam_retry_reuses_files_and_no_build_or_asset_upload():
     assert any(remote.endswith("/artwork/halo-ce-landscape.png") for _, remote in fake.uploads)
     assert not any("build" in command[2:] for command in fake.commands)
     assert not any("--close-steam" in command for command in fake.commands)
+    assert fake.commands[0][-1] == 'preflight-library'
+    for name in ('halo-ce-hero.jpg', 'halo-ce-logo.png', 'halo-ce-icon.png', 'steam_notes.py'):
+        assert any(remote.endswith('/' + name) for _, remote in fake.uploads)
+    assert not any(Path(local).name in ('build-native.sh', 'frame-controls.patch') for local, _ in fake.uploads)
+
+
+def test_library_update_requires_existing_game_and_cannot_start_build():
+    fake = FakeConnection(Settings('frame', 'private'), existing=False)
+    with pytest.raises(SSHError, match='before updating'):
+        Installer(lambda settings: fake, RESOURCES).add_to_steam(fake.settings)
+    assert fake.closed and not fake.uploads
+    assert len(fake.commands) == 1 and fake.commands[0][-1] == 'preflight-library'
 
 
 def test_setup_reports_success_only_after_ssh_disconnects():
@@ -251,6 +263,50 @@ def xbox_maps(directory, remote):
         target.write_bytes(header)
         files.append({"path": relative, "size": len(header), "sha256": remote.digest(target)})
     return {"files": files, "totalBytes": len(header) * len(files)}
+
+
+def test_library_preflight_does_not_require_compiler_or_build_space(remote, monkeypatch):
+    monkeypatch.setattr(remote.os, 'getuid', lambda: 0, raising=False)
+    monkeypatch.setattr(remote.pwd, 'getpwuid', lambda uid: types.SimpleNamespace(pw_name='steamos'))
+    monkeypatch.setattr(remote.pathlib.Path, 'home', lambda: remote.HOME)
+    monkeypatch.setattr(remote.platform, 'machine', lambda: 'aarch64')
+    monkeypatch.setattr(remote, 'os_release', lambda: {'ID': 'steamos'})
+    build_tools = Mock(side_effect=AssertionError('Library info must not require build tools'))
+    monkeypatch.setattr(remote.shutil, 'which', build_tools)
+    monkeypatch.setattr(remote.shutil, 'disk_usage', build_tools)
+    monkeypatch.setattr(remote, 'command', build_tools)
+    verified = {'gamePath': str(remote.GAME), 'mapsVerified': True, 'sourceCommit': SOURCE_COMMIT}
+    monkeypatch.setattr(remote, 'existing_install', lambda: verified)
+    result = remote.preflight_library()
+    assert result['existing'] == verified and 'uninstallSupported' not in result
+    assert result['cachePath'] == str(remote.CACHE)
+    build_tools.assert_not_called()
+
+
+def test_library_preflight_requires_verified_game(remote, monkeypatch):
+    monkeypatch.setattr(remote, 'preflight_uninstall', lambda: {'home': str(remote.HOME)})
+    monkeypatch.setattr(remote, 'existing_install', lambda: None)
+    with pytest.raises(ValueError, match='before updating'):
+        remote.preflight_library()
+
+
+@pytest.mark.parametrize('shortcut_status', ['added', 'manual'])
+def test_remote_notes_enrichment_is_independent_of_verified_shortcut_status(remote, monkeypatch, shortcut_status):
+    monkeypatch.setattr(remote, 'existing_install', lambda: {'mapsVerified': True})
+    monkeypatch.setattr(sys, 'path', list(sys.path))
+    register = Mock(return_value={'status': shortcut_status, 'appid': 3000000001})
+    notes = Mock(return_value={'status': 'manual', 'content': 'Description to copy'})
+    monkeypatch.setitem(sys.modules, 'steam_shortcut', types.SimpleNamespace(add_native_shortcut=register))
+    monkeypatch.setitem(sys.modules, 'steam_notes', types.SimpleNamespace(add_notes=notes))
+    result = remote.shortcut()
+    assert result['status'] == shortcut_status
+    register.assert_called_once_with(remote.HOME, remote.GAME, close_steam=False)
+    if shortcut_status == 'added':
+        notes.assert_called_once_with(remote.HOME, remote.GAME, 3000000001)
+        assert result['notes']['status'] == 'manual'
+    else:
+        notes.assert_not_called()
+        assert 'notes' not in result
 
 
 def test_remote_rejects_bogus_maps_and_traversal(remote, tmp_path):

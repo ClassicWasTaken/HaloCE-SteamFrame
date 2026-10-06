@@ -21,8 +21,16 @@ from pathlib import Path
 NAME = "Halo: Combat Evolved VR (Native)"
 LAUNCH_OPTIONS = "SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=0 %command%"
 ARTWORK = (("p", ".jpg", "halo-ce-cover.jpg", "84fee9349f8f00d8ade44c840330ac54ec4b01ef84086d72b8c791d16c8ad248"),
-           ("", ".png", "halo-ce-landscape.png", "179ff6b9bd1a6ba610e9c0c4b9b32c76e525719b253856d547f65eaa02d1f33d"))
+           ("", ".png", "halo-ce-landscape.png", "179ff6b9bd1a6ba610e9c0c4b9b32c76e525719b253856d547f65eaa02d1f33d"),
+           ("_hero", ".jpg", "halo-ce-hero.jpg", "3eb9ba1515bd7e25b11a31911edb8610ee33fe9df0505f1a805214e9a9dcff31"),
+           ("_logo", ".png", "halo-ce-logo.png", "7df3336e9988291552270764e80196b1892ab9d11b79d7d289e6243746d42dc8"))
+ICON_NAME = "halo-ce-icon.png"
+ICON_SHA256 = "184620356407e42a33877528c4f14b702df8b026415a99ed16976565fcfbce36"
+ICON_SOURCE_COMMIT = "88142798513ebd99fc7c6224023e8b44c05d0106"
 ARTWORK_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+# Verified against the installed Steam client's library.js asset enum.
+# Shortcut icons have their own path setter and are not sent through this API.
+ARTWORK_TYPES = {"p": 0, "_hero": 1, "_logo": 2, "": 3}
 
 
 @dataclass
@@ -420,11 +428,127 @@ def _artwork_file(path: Path, maximum: int = 8 * 1024 * 1024) -> bytes:
         return content
 
 
+def _shortcut_icon_field(data: bytes, appid: int, executable: str) -> tuple[OrderedDict, OrderedDict, str]:
+    """Locate an exact persisted shortcut; this also serves live read-only checks."""
+    root = loads(data)
+    shortcuts = root.get("shortcuts")
+    if shortcuts is None or shortcuts.kind != 0:
+        raise ValueError("Steam's icon shortcut record is unavailable.")
+    matches = []
+    for entry in shortcuts.value.values():
+        if entry.kind != 0:
+            raise ValueError("Steam's icon shortcut record is unsupported.")
+        fields = entry.value
+        ids = [value for key, value in fields.items() if key.casefold() == "appid"]
+        if len(ids) != 1 or ids[0].kind != 2 or ids[0].value != appid:
+            continue
+        paths = [value for key, value in fields.items() if key.casefold() == "exe"]
+        icons = [value for key, value in fields.items() if key.casefold() == "icon"]
+        if (len(paths) != 1 or paths[0].kind != 1
+                or paths[0].value not in (executable, '"' + executable + '"')
+                or len(icons) > 1 or (icons and (icons[0].kind != 1 or not isinstance(icons[0].value, str)))):
+            raise ValueError("Steam's icon shortcut identity could not be verified.")
+        matches.append((fields, icons[0].value if icons else ""))
+    if len(matches) != 1:
+        raise ValueError("Steam has not yet persisted one exact native Halo icon record. Click Add to Steam again to retry.")
+    return root, matches[0][0], matches[0][1]
+
+
+def _publish_shortcut_icon(game: Path, sources: Path | None = None) -> dict:
+    """Persist an owned sidecar, keeping any altered or concurrent user file."""
+    sources = sources or Path(__file__).resolve().parent / "artwork"
+    _private_steam_directory(sources)
+    content = _artwork_file(sources / ICON_NAME)
+    if hashlib.sha256(content).hexdigest() != ICON_SHA256:
+        raise ValueError("Bundled Halo shortcut icon failed its integrity check.")
+    for _, _, filename, expected in ARTWORK:
+        if hashlib.sha256(_artwork_file(sources / filename)).hexdigest() != expected:
+            raise ValueError("Bundled Halo artwork failed its integrity check.")
+    _private_steam_directory(game)
+    marker = None
+    for name, owner in ((".halo-frame-installer.json", "halo-frame-installer"),
+                        (".codex-halo-native-install.json", "codex-halo-native-frame-20261005")):
+        candidate = game / name
+        if not (candidate.exists() or candidate.is_symlink()):
+            continue
+        marker = json.loads(_artwork_file(candidate, 64 * 1024))
+        if not isinstance(marker, dict) or marker.get("owner") != owner:
+            raise ValueError("The native Halo icon folder has no recognized installer ownership marker.")
+        break
+    if marker is None:
+        raise ValueError("The native Halo icon folder has no recognized installer ownership marker.")
+    build = marker.get("build", {})
+    source = marker.get("sourceCommit")
+    if owner == "codex-halo-native-frame-20261005":
+        source = build.get("sourceCommit", source) if isinstance(build, dict) else None
+    files = marker.get("files", {})
+    expected = files.get("halo") if isinstance(files, dict) else None
+    if source != ICON_SOURCE_COMMIT or not isinstance(expected, str) or not re.fullmatch("[a-f0-9]{64}", expected):
+        raise ValueError("The Halo icon needs a verified native installation from the supported source revision.")
+    program = _artwork_file(game / "halo", 128 * 1024 * 1024)
+    if (len(program) < 64 or program[:6] != b"\x7fELF\x02\x01" or struct.unpack_from("<H", program, 18)[0] != 183
+            or hashlib.sha256(program).hexdigest() != expected):
+        raise ValueError("The Halo icon needs the verified native ARM64 executable; the game was kept.")
+    folder = game / ".installer-artwork"
+    if folder.exists() or folder.is_symlink():
+        _private_steam_directory(folder)
+    else:
+        folder.mkdir(mode=0o700)
+        _private_steam_directory(folder)
+    target = folder / ICON_NAME
+    if target.exists() or target.is_symlink():
+        existing = _artwork_file(target)
+        if hashlib.sha256(existing).hexdigest() != ICON_SHA256:
+            return {"status": "preserved", "reason": "The existing Halo icon file was customized and kept."}
+        return {"status": "unchanged", "path": str(target)}
+    fd, name = tempfile.mkstemp(prefix=".halo-icon-", dir=folder)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(0o600)
+        # Link publication refuses a destination created since our first read.
+        os.link(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    if hashlib.sha256(_artwork_file(target)).hexdigest() != ICON_SHA256:
+        raise ValueError("The newly published Halo icon could not be verified.")
+    return {"status": "added", "path": str(target)}
+
+
+def _closed_shortcut_icon(data: bytes, game: Path, appid: int) -> tuple[bytes, dict]:
+    """Change only an empty icon field in an already closed Steam transaction."""
+    try:
+        root, fields, current = _shortcut_icon_field(data, appid, str(game / "halo"))
+        managed = game / ".installer-artwork" / ICON_NAME
+        if current:
+            if current not in (str(managed), '"' + str(managed) + '"'):
+                return data, {"status": "preserved", "reason": "Your selected Steam shortcut icon was kept."}
+            if hashlib.sha256(_artwork_file(managed)).hexdigest() == ICON_SHA256:
+                return data, {"status": "unchanged", "path": str(managed)}
+            return data, {"status": "preserved", "reason": "Your customized Halo icon was kept."}
+        icon = _publish_shortcut_icon(game)
+        if "path" not in icon:
+            return data, icon
+        for key in list(fields):
+            if key.casefold() == "icon":
+                del fields[key]
+        fields["icon"] = Value(1, icon["path"])
+        result = dumps(root)
+        _shortcut_icon_field(result, appid, str(game / "halo"))
+        return result, {"status": "added", "path": icon["path"]}
+    except (OSError, ValueError, UnicodeError) as error:
+        return data, {"status": "manual", "reason": str(error),
+                      "instructions": "Click Add to Steam again to retry the Halo shortcut icon."}
+
+
 def install_artwork(config: Path, appid: int, sources: Path | None = None) -> dict:
-    """Fill missing portrait and wide artwork without replacing custom images.
+    """Fill missing library artwork without replacing custom images.
 
     Steam names non-Steam artwork with the existing shortcut's unsigned 32-bit
-    app ID. Both files are staged before publication, and hard-link publication
+    app ID. All files are staged before publication, and hard-link publication
     fails rather than replacing a file that appears concurrently. A failed
     transaction removes only unchanged new files this call created.
     """
@@ -441,12 +565,14 @@ def install_artwork(config: Path, appid: int, sources: Path | None = None) -> di
         if hashlib.sha256(content).hexdigest() != expected:
             raise ValueError("Bundled Halo artwork failed its integrity check. Re-download the installer and retry.")
         payloads.append((str(appid) + suffix, extension, content, expected))
+    if hashlib.sha256(_artwork_file(sources / ICON_NAME)).hexdigest() != ICON_SHA256:
+        raise ValueError("Bundled Halo shortcut icon failed its integrity check.")
     grid = config / "grid"
     if grid.is_symlink() or grid.resolve() != grid or (grid.exists() and not grid.is_dir()):
         raise ValueError("Steam artwork folder is not an ordinary directory.")
     if steam_running():
         raise ValueError("Steam is running; its artwork was left unchanged. Use Steam's custom artwork options or retry when Steam is already closed.")
-    # Validate both categories before writing either. Different-extension custom
+    # Validate all categories before writing any. Different-extension custom
     # art wins too; keep existing user images without creating competing files.
     pending = []
     preserved = []
@@ -539,13 +665,16 @@ def _write_native_shortcut(home: Path, game: Path) -> dict:
             raise ValueError("Steam shortcuts file is not a supported ordinary file.")
         before = path.read_bytes() if path.exists() else None
         after, appid = update_shortcut(before, str(game / "halo"), str(game))
+        after, icon = _closed_shortcut_icon(after, game, appid)
         # A second guard prevents overwriting Steam's live view if it opened during work.
         if steam_running():
             return {**manual, "reason": "Steam reopened during setup; its library files were left unchanged."}
         if (path.read_bytes() if path.exists() else None) != before:
             return {**manual, "reason": "Steam's shortcuts changed during setup; no changes were made."}
         if before == after:
-            return _added_result(steam, appid, unchanged=True, artwork=_artwork_result(config, appid))
+            art = _artwork_result(config, appid)
+            art["icon"] = icon
+            return _added_result(steam, appid, unchanged=True, artwork=art)
         backup = None
         if before is not None:
             backup = config / ("shortcuts.vdf.halo-frame-installer-" + str(time.time_ns()) + ".bak")
@@ -563,8 +692,9 @@ def _write_native_shortcut(home: Path, game: Path) -> dict:
         finally:
             if os.path.exists(temp):
                 os.unlink(temp)
-        return _added_result(steam, appid, backup=str(backup) if backup else None,
-                             artwork=_artwork_result(config, appid))
+        art = _artwork_result(config, appid)
+        art["icon"] = icon
+        return _added_result(steam, appid, backup=str(backup) if backup else None, artwork=art)
     except (OSError, ValueError, UnicodeError) as error:
         return {**manual, "reason": str(error)}
 

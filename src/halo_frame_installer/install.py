@@ -172,9 +172,10 @@ class Installer:
             progress("connect", "Connecting securely to your Steam Frame...", None)
             connection.connect()
             check_cancel()
-            progress("preflight", "Checking ARM64 SteamOS, SteamVR, Podman and free space...", None)
+            progress("preflight", "Checking the installed native game and Steam account..." if registration_only
+                     else "Checking ARM64 SteamOS, SteamVR, Podman and free space...", None)
             source = (self.resource_dir / "remote_install.py").read_text(encoding="utf-8")
-            preflight_args = ["python3", "-c", source, "preflight"]
+            preflight_args = ["python3", "-c", source, "preflight-library" if registration_only else "preflight"]
             if repair:
                 preflight_args.append("--repair")
             if repair and settings.adopt_existing_native:
@@ -183,15 +184,20 @@ class Installer:
                                                progress=remote_progress, cancel_event=cancel_event, timeout=90))
             if info.get("home") != "/home/steamos" or info.get("cachePath") != "/home/steamos/.cache/halo-frame-installer" or info.get("gamePath") != "/home/steamos/Games/HaloCENativeVR":
                 raise SSHError("The Frame reported an unexpected installation location.")
+            if registration_only and info.get("existing") is None:
+                raise SSHError("Install and verify native Halo VR before updating its Steam information.")
             if info.get("pcVersionDetected"):
                 progress("detect", "Found an older Halo PC installation. The native VR build requires original Xbox maps.", None)
             remote_resources = info["cachePath"] + "/resources"
-            for name in ("remote_install.py", "build-native.sh", "steam_shortcut.py", "steam_live.py", "frame-controls.patch"):
+            helpers = ("remote_install.py", "steam_shortcut.py", "steam_live.py", "steam_notes.py")
+            if not registration_only:
+                helpers += ("build-native.sh", "frame-controls.patch")
+            for name in helpers:
                 check_cancel()
                 connection.put(self.resource_dir / name, remote_resources + "/" + name, cancel_event=cancel_event)
             # Artwork ships inside the one-file installer; no metadata service or
             # account API key is needed, including an Add to Steam again retry.
-            for name in ("halo-ce-cover.jpg", "halo-ce-landscape.png"):
+            for name in ("halo-ce-cover.jpg", "halo-ce-landscape.png", "halo-ce-hero.jpg", "halo-ce-logo.png", "halo-ce-icon.png"):
                 check_cancel()
                 connection.put(self.resource_dir / "artwork" / name,
                                remote_resources + "/artwork/" + name, cancel_event=cancel_event)
@@ -249,8 +255,8 @@ class Installer:
                 check_cancel()
                 installed = step("finalize", run_id=True, timeout=600)
             check_cancel()
-            progress("steam", "Checking Halo's Steam entry while keeping Steam Home running...", None)
-            steam = step("shortcut", timeout=90)
+            progress("steam", "Updating Halo's Steam entry, artwork and game Notes while keeping Steam Home running...", None)
+            steam = step("shortcut", timeout=150)
             # Keep the result's public fingerprint before releasing the client.
             host_fingerprint = connection.host_fingerprint
             progress("disconnect", "Closing the setup SSH connection...", None)

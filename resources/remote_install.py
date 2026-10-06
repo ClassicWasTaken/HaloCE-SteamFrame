@@ -278,8 +278,9 @@ def preflight(repair=False, adopt=False):
     beneath(CACHE / "resources", CACHE).mkdir(exist_ok=True)
     beneath(CACHE / "resources/artwork", CACHE).mkdir(exist_ok=True)
     beneath(CACHE / "runs", CACHE).mkdir(exist_ok=True)
-    for name in ("remote_install.py", "build-native.sh", "steam_shortcut.py", "steam_live.py", "frame-controls.patch",
-                 "artwork/halo-ce-cover.jpg", "artwork/halo-ce-landscape.png"):
+    for name in ("remote_install.py", "build-native.sh", "steam_shortcut.py", "steam_live.py", "steam_notes.py", "frame-controls.patch",
+                 "artwork/halo-ce-cover.jpg", "artwork/halo-ce-landscape.png", "artwork/halo-ce-hero.jpg",
+                 "artwork/halo-ce-logo.png", "artwork/halo-ce-icon.png"):
         candidate = beneath(CACHE / "resources" / name, CACHE)
         if candidate.exists() and (not candidate.is_file() or candidate.stat().st_nlink != 1 or candidate.stat().st_uid != os.getuid()):
             raise ValueError("An installer resource path is not a private ordinary file.")
@@ -312,13 +313,25 @@ def preflight_uninstall():
         directory.mkdir(exist_ok=True)
         if not directory.is_dir() or directory.stat().st_uid != os.getuid():
             raise ValueError("An installer resource directory is not owned by this account.")
-    for relative in ("remote_install.py", "steam_shortcut.py", "steam_live.py", "artwork/halo-ce-cover.jpg", "artwork/halo-ce-landscape.png"):
+    for relative in ("remote_install.py", "steam_shortcut.py", "steam_live.py", "steam_notes.py", "artwork/halo-ce-cover.jpg", "artwork/halo-ce-landscape.png",
+                     "artwork/halo-ce-hero.jpg", "artwork/halo-ce-logo.png", "artwork/halo-ce-icon.png"):
         path = beneath(CACHE / "resources" / relative, CACHE)
         if path.exists():
             details = ordinary(path).stat()
             if details.st_uid != os.getuid() or details.st_nlink != 1:
                 raise ValueError("An uninstall helper resource is not a private ordinary file.")
     return {"home": str(HOME), "cachePath": str(CACHE), "gamePath": str(GAME), "uninstallSupported": True}
+
+
+def preflight_library():
+    """Library updates need the verified game, without compiler prerequisites."""
+    info = preflight_uninstall()
+    current = existing_install()
+    if current is None:
+        raise ValueError("Install and verify native Halo VR before updating its Steam information.")
+    info.pop("uninstallSupported", None)
+    info["existing"] = current
+    return info
 
 
 def prepare(value, use_existing_maps=False, repair=False, adopt=False):
@@ -1056,7 +1069,11 @@ def shortcut(close_steam=False):
         raise ValueError("Install and verify the native game before adding it to Steam.")
     sys.path.insert(0, str(CACHE / "resources"))
     from steam_shortcut import add_native_shortcut
-    return add_native_shortcut(HOME, GAME, close_steam=close_steam)
+    response = add_native_shortcut(HOME, GAME, close_steam=close_steam)
+    if response.get("status") == "added":
+        from steam_notes import add_notes
+        response["notes"] = add_notes(HOME, GAME, response["appid"])
+    return response
 
 
 def no_active_build():
@@ -1332,7 +1349,7 @@ def uninstall(value, close_steam=False, keep_saves=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("step", choices=("preflight", "preflight-uninstall", "prepare", "reuse-upload", "build", "finalize", "cancel", "shortcut", "uninstall"))
+    parser.add_argument("step", choices=("preflight", "preflight-uninstall", "preflight-library", "prepare", "reuse-upload", "build", "finalize", "cancel", "shortcut", "uninstall"))
     parser.add_argument("--run-id")
     parser.add_argument("--close-steam", action="store_true")
     parser.add_argument("--repair", action="store_true")
@@ -1344,6 +1361,7 @@ def main():
         parser.error("--run-id is required")
     functions = {"preflight": lambda: preflight(args.repair, args.adopt_existing),
                  "preflight-uninstall": preflight_uninstall,
+                 "preflight-library": preflight_library,
                  "prepare": lambda: prepare(args.run_id, args.use_existing_maps, args.repair, args.adopt_existing),
                  "reuse-upload": lambda: reuse_upload(args.run_id),
                  "build": lambda: build(args.run_id, args.repair, args.adopt_existing),

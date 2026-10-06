@@ -458,6 +458,40 @@ ART_WRITE = "(async () => {" + ART_CONTEXT + r"""
   return {ok:true, accountName:after.accountName, appid:after.appid};
 })()"""
 
+ICON_WRITE = "(async () => {" + ART_CONTEXT + r"""
+  if (typeof SteamClient.Apps.SetShortcutIcon !== 'function')
+    throw new Error('Steam shortcut icon API is unavailable');
+  const before = await current();
+  if (before.accountName !== S.accountName) throw new Error('Steam icon account changed');
+  const overview = typeof appStore !== 'undefined' &&
+    typeof appStore.GetAppOverviewByAppID === 'function' ? appStore.GetAppOverviewByAppID(S.appid) : null;
+  if (typeof overview?.icon_data !== 'string' || overview.icon_data.length)
+    throw new Error('Steam current icon is no longer confirmed empty');
+  let timer;
+  try {
+    await Promise.race([Promise.resolve(SteamClient.Apps.SetShortcutIcon(S.appid, S.iconPath)),
+      new Promise((_, reject) => {timer = setTimeout(() =>
+        reject(new Error('Steam shortcut icon API timed out')), 7000);})]);
+  } finally {clearTimeout(timer);}
+  const after = await current();
+  if (after.accountName !== S.accountName) throw new Error('Steam icon account changed');
+  return {ok:true, accountName:after.accountName, appid:after.appid};
+})()"""
+
+ICON_SESSION = "(async () => {" + ART_CONTEXT + r"""
+  const session = await current();
+  const overview = typeof appStore !== 'undefined' &&
+    typeof appStore.GetAppOverviewByAppID === 'function' ? appStore.GetAppOverviewByAppID(S.appid) : null;
+  const data = overview?.icon_data;
+  let iconRequested = false;
+  if (data === undefined && S.requestIcon === true && typeof SteamClient.Apps.RequestIconDataForApp === 'function') {
+    SteamClient.Apps.RequestIconDataForApp(S.appid);
+    iconRequested = true;
+  }
+  return {...session, iconRequested,
+    iconState:typeof data !== 'string' ? 'unknown' : data.length ? 'present' : 'empty'};
+})()"""
+
 
 def _artwork_config(home, account_name):
     """Resolve the live client's account, never the disk MostRecent heuristic."""
@@ -499,7 +533,8 @@ def _artwork_config(home, account_name):
 
 
 def _live_artwork(home, game, appid, sources=None):
-    from steam_shortcut import ARTWORK, ARTWORK_EXTENSIONS, _artwork_file, _private_steam_directory
+    from steam_shortcut import (ARTWORK, ARTWORK_EXTENSIONS, ARTWORK_TYPES, ICON_NAME,
+                                ICON_SHA256, _artwork_file, _private_steam_directory)
     spec = native_spec(home, game, NAME)
     spec["appid"] = appid
     sources = Path(sources) if sources is not None else Path(__file__).resolve().parent / "artwork"
@@ -510,7 +545,9 @@ def _live_artwork(home, game, appid, sources=None):
         if hashlib.sha256(content).hexdigest() != expected:
             raise LiveSteamError("Bundled Halo artwork failed its integrity check.")
         payloads.append({"stem": str(appid) + suffix, "extension": extension, "content": content,
-                         "expected": expected, "assetType": 0 if suffix == "p" else 3})
+                         "expected": expected, "assetType": ARTWORK_TYPES[suffix]})
+    if hashlib.sha256(_artwork_file(sources / ICON_NAME)).hexdigest() != ICON_SHA256:
+        raise LiveSteamError("Bundled Halo shortcut icon failed its integrity check.")
     installed, preserved, unchanged = [], [], []
     with Client() as client:
         def snapshot():
@@ -533,7 +570,7 @@ def _live_artwork(home, game, appid, sources=None):
                 return "unchanged", [present[0][0].name]
             return "preserved", [path.name for path, _ in present]
 
-        # Validate both existing categories before publishing either asset.
+        # Validate all existing categories before publishing any asset.
         for payload in payloads:
             inspect(payload)
         for payload in payloads:
@@ -578,6 +615,97 @@ def _live_artwork(home, game, appid, sources=None):
             "installed": installed, "preserved": preserved, "unchanged": unchanged}
 
 
+def _live_icon(home, game, appid, sources=None):
+    """Use the path API, reading persisted VDF only for identity and readback.
+
+    Unlike the artwork API, Steam's shortcut icon API does not expose an icon
+    path in AppDetails. Never assume such a field or write a live VDF ourselves.
+    A newly created shortcut that has not yet persisted can be retried safely.
+    """
+    from steam_shortcut import (ICON_NAME, ICON_SHA256, _artwork_file,
+                                _private_steam_directory, _publish_shortcut_icon,
+                                _shortcut_icon_field)
+    spec = native_spec(home, game, NAME)
+    spec["appid"] = appid
+    spec["requestIcon"] = True
+    source = Path(sources) if sources is not None else Path(__file__).resolve().parent / "artwork"
+    _private_steam_directory(source)
+    if hashlib.sha256(_artwork_file(source / ICON_NAME)).hexdigest() != ICON_SHA256:
+        raise LiveSteamError("Bundled Halo shortcut icon failed its integrity check.")
+    with Client() as client:
+        def snapshot():
+            session = client.evaluate(expression(ICON_SESSION, spec))
+            if (session.get("appid") != appid or session.get("exe") not in (spec["exe"], '"' + spec["exe"] + '"')):
+                raise LiveSteamError("Steam's live icon shortcut could not be verified.")
+            return session
+
+        session = snapshot()
+        account_name = session.get("accountName")
+        spec["requestIcon"] = False
+        config = _artwork_config(home, account_name).parent
+        persisted = config / "shortcuts.vdf"
+        _private_steam_directory(config)
+
+        def current_icon():
+            _, _, selected = _shortcut_icon_field(_artwork_file(persisted), appid, spec["exe"])
+            return selected
+
+        selected = current_icon()
+        target = Path(game) / ".installer-artwork" / ICON_NAME
+        if selected:
+            if selected not in (str(target), '"' + str(target) + '"'):
+                return {"status": "preserved", "reason": "Your selected Steam shortcut icon was kept."}
+            _private_steam_directory(target.parent)
+            if hashlib.sha256(_artwork_file(target)).hexdigest() == ICON_SHA256:
+                return {"status": "unchanged", "path": str(target)}
+            return {"status": "preserved", "reason": "Your customized Halo icon was kept."}
+        if session.get("iconState") == "unknown" and session.get("iconRequested") is True:
+            # Steam's own UI requests undefined data and waits for it to become
+            # non-null. Request once, then accept only an explicit empty string.
+            load_deadline = min(client.deadline, time.monotonic() + 2)
+            while session.get("iconState") == "unknown" and time.monotonic() < load_deadline:
+                time.sleep(0.1)
+                session = snapshot()
+                if session.get("accountName") != account_name or _artwork_config(home, account_name).parent != config:
+                    raise LiveSteamError("Steam's active icon account changed while its icon was loading.")
+        # The persisted record can lag a user's latest icon choice. A loaded
+        # resident icon wins, and an unloaded value cannot prove it is empty.
+        if session.get("iconState") == "present":
+            return {"status": "preserved", "reason": "The icon currently loaded by Steam was kept."}
+        if session.get("iconState") != "empty":
+            raise LiveSteamError("Steam's current shortcut icon has not loaded yet. Click Add to Steam again after opening Halo's library page.")
+        icon = _publish_shortcut_icon(Path(game), source)
+        if "path" not in icon:
+            return icon
+        fresh = snapshot()
+        if (fresh.get("accountName") != account_name or _artwork_config(home, account_name).parent != config):
+            raise LiveSteamError("Steam's active icon account changed during setup.")
+        if fresh.get("iconState") == "present":
+            return {"status": "preserved", "reason": "The icon currently loaded by Steam was kept."}
+        if fresh.get("iconState") != "empty":
+            raise LiveSteamError("Steam's current shortcut icon could not be verified as empty.")
+        # A user-selected path that appeared while preparing the sidecar wins.
+        if current_icon():
+            return {"status": "preserved", "reason": "Your selected Steam shortcut icon was kept."}
+        result = client.evaluate(expression(ICON_WRITE, {**spec, "accountName": account_name, "iconPath": icon["path"]}))
+        if result.get("ok") is not True or result.get("appid") != appid or result.get("accountName") != account_name:
+            raise LiveSteamError("Steam's shortcut icon update could not be verified.")
+        deadline = min(client.deadline, time.monotonic() + 5)
+        while True:
+            selected = current_icon()
+            if selected in (icon["path"], '"' + icon["path"] + '"'):
+                break
+            if selected or time.monotonic() >= deadline:
+                raise LiveSteamError("Steam has not yet persisted the Halo icon selection. Click Add to Steam again to retry.")
+            time.sleep(0.1)
+        if hashlib.sha256(_artwork_file(target)).hexdigest() != ICON_SHA256:
+            raise LiveSteamError("Steam's Halo icon source changed during setup.")
+        after = snapshot()
+        if after.get("accountName") != account_name or _artwork_config(home, account_name).parent != config:
+            raise LiveSteamError("Steam's active icon account changed during setup.")
+        return {"status": "added", "path": icon["path"]}
+
+
 def add_native(home, game, name=NAME, launch_options=LAUNCH_OPTIONS, artwork=None):
     value = _library(home, game, name, "add", launch_options)
     try:
@@ -585,6 +713,11 @@ def add_native(home, game, name=NAME, launch_options=LAUNCH_OPTIONS, artwork=Non
     except (ImportError, OSError, ValueError, RuntimeError, UnicodeError) as error:
         art_result = {"status": "manual", "reason": str(error),
                       "instructions": "Use Steam's custom artwork options, or retry adding Halo box art."}
+    try:
+        art_result["icon"] = _live_icon(home, game, value["appid"], artwork)
+    except (ImportError, OSError, ValueError, RuntimeError, UnicodeError) as error:
+        art_result["icon"] = {"status": "manual", "reason": str(error),
+                              "instructions": "Click Add to Steam again to retry the Halo shortcut icon."}
     return {"status": "added", "libraryAdded": True, "appid": value["appid"], "name": NAME,
             "unchanged": not value.get("created", False), "transport": "live-client",
             "artwork": art_result}

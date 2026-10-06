@@ -29,7 +29,8 @@ XBOX_REVISION_NOTE = "Original Xbox USA Rev 2 validated; other retail revisions 
 GAME_CLOSE_NOTE = "Save and close running games before changing Halo files. Keep Steam Home and SteamVR running."
 STEAM_ADD_NOTE = ("In Steam, choose Add a Game → Add a Non-Steam Game and select the native halo executable. "
                   "Use the displayed launch options, then click Add to Steam again to retry available library setup.")
-STEAM_ART_NOTE = "Use Steam's custom artwork controls to add Halo box art, or click Add to Steam again to retry."
+STEAM_ART_NOTE = "Use Steam's custom artwork controls to add Halo library art, or click Add to Steam again to retry."
+STEAM_NOTES_NOTE = "Use Steam Notes to add the supplied game description, or click Add to Steam again to retry."
 STEAM_REMOVE_NOTE = ("Use Steam's Remove Non-Steam Game option for Halo: Combat Evolved VR (Native). "
                      "Retry when library cleanup is available or Steam is already closed.")
 CONTROLS = (
@@ -307,16 +308,26 @@ class App(tk.Tk):
         mode_card = self._card(body, "SELECT OPERATION")
         choices = tk.Frame(mode_card, bg=SURFACE)
         choices.pack(fill="x")
-        choices.columnconfigure((0, 1, 2), weight=1, uniform="operations")
+        choices.columnconfigure((0, 1, 2, 3), weight=1, uniform="operations")
         self.mode_choices = []
         for index, title, subtitle, value in (
-            (0, "Install Halo VR", "New native game", "install"),
-            (1, "Repair Halo VR", "Refresh. Keep saves.", "repair"),
-            (2, "Uninstall Halo VR", "Remove native game", "uninstall")):
+            (0, "Install", "New native game", "install"),
+            (1, "Repair", "Keep saves", "repair"),
+            (2, "Steam info", "Update library", "library"),
+            (3, "Uninstall", "Remove game", "uninstall")):
             choice = Choice(choices, title, subtitle, self.mode, value, self._mode_changed)
             choice.grid(row=0, column=index, sticky="ew",
-                        padx=(0, 6) if index == 0 else (6, 0) if index == 2 else (6, 6))
+                        padx=(0, 6) if index == 0 else (6, 0) if index == 3 else (6, 6))
             self.mode_choices.append(choice)
+
+        library = self._card(body, "UPDATE STEAM INFO")
+        self.library_card = library.master
+        self._label(library,
+            "Add Halo cover, banner, logo, and icon artwork, plus a game description in Steam Notes.\n"
+            "Use the native game already installed at ~/Games/HaloCENativeVR.\n"
+            "No ISO or rebuild is needed. Your game, saves, and custom library content are kept.",
+            10, background=SURFACE, wraplength=620).pack(anchor="w")
+        self.library_card.pack_forget()
 
         data_panel = self._card(body)
         self.data_panel = data_panel.master
@@ -494,6 +505,8 @@ class App(tk.Tk):
         self.retry_button.pack(anchor="w", pady=(11, 0))
         self.retry_button.configure(state="disabled")
         self.retry_button.pack_forget()
+        self.notes_button = self._button(self.progress_card, "View game description", self._show_steam_note)
+        self.notes_button.pack_forget()
         self.install_note = self._label(body,
             "Keep this window open during setup. Allow 12 GB free on the Frame.\nThe first native build can take a while.",
             9, color=MUTED, wraplength=620)
@@ -537,44 +550,56 @@ class App(tk.Tk):
     def _mode_changed(self):
         repair = self.mode.get() == "repair"
         uninstall = self.mode.get() == "uninstall"
-        if uninstall:
+        library = self.mode.get() == "library"
+        if uninstall or library:
             self.data_panel.pack_forget()
             self.data_consent.pack_forget()
+        else:
+            self.data_panel.pack(fill="x", pady=(0, 10))
+            self.data_consent.pack(fill="x", pady=(0, 10))
+        if uninstall:
             self.uninstall_card.pack(fill="x", pady=(0, 10))
         else:
             self.uninstall_card.pack_forget()
-            self.data_panel.pack(fill="x", pady=(0, 10))
-            self.data_consent.pack(fill="x", pady=(0, 10))
+        if library:
+            self.library_card.pack(fill="x", pady=(0, 10))
+        else:
+            self.library_card.pack_forget()
         self.data_title.configure(text="Replacement game data (optional)" if repair else "Your original Xbox game data")
         self.data_note.configure(text="Use valid installed Xbox maps, or choose data to replace them." if repair
                                   else "Choose a disc image or an extracted maps folder.")
         self.connection_steam_note.configure(text="Steam Home and SteamVR stay running. Uninstall may need a manual library step." if uninstall
                                             else "Steam Home and SteamVR stay running. Setup will show any manual library steps.")
         self.install_note.configure(text="Keep this window open until the uninstall finishes and setup disconnects." if uninstall
+                                    else "Keep this window open until Steam info is updated and setup disconnects. No rebuild is needed." if library
                                     else "Keep this window open during setup. Allow 12 GB free on the Frame.\nThe first native build can take a while.")
         self._update_summary()
         self._update_navigation()
         if uninstall:
             self.retry_button.pack_forget()
+            self.notes_button.pack_forget()
         self._show_page(self.current_page)
 
     def _update_summary(self):
         source = self.source.get()
         uninstall = self.mode.get() == "uninstall"
-        self.summary_heading.set("UNINSTALL SUMMARY" if uninstall else "INSTALLATION SUMMARY")
-        self.summary_data_heading.set("NATIVE GAME FOLDER" if uninstall else "GAME DATA")
-        self.summary_source.set("~/Games/HaloCENativeVR" if uninstall else
+        library = self.mode.get() == "library"
+        self.summary_heading.set("UNINSTALL SUMMARY" if uninstall else "STEAM INFO SUMMARY" if library else "INSTALLATION SUMMARY")
+        self.summary_data_heading.set("NATIVE GAME FOLDER" if uninstall or library else "GAME DATA")
+        self.summary_source.set("~/Games/HaloCENativeVR" if uninstall or library else
                                 Path(source).name if source else "Use valid Xbox maps already installed on the Frame")
         if self.transport.get() == "usb":
             serial = self.usb_serial.get().strip()
             self.summary_frame.set("USB-C cable" + (f" · {serial}" if serial else " · Detect connected Frame"))
         else:
             self.summary_frame.set(self.host.get().strip() or "Enter your Frame address")
-        self.summary_action_heading.set("CAMPAIGN SAVES" if uninstall else "XBOX CONTROLS")
+        self.summary_action_heading.set("CAMPAIGN SAVES" if uninstall else "STEAM LIBRARY" if library else "XBOX CONTROLS")
         self.summary_action.set(("Keep saves in a backup on the Frame" if self.keep_saves.get()
                                  else "Remove saves contained in the native game folder") if uninstall else
+                                "Cover, banner, logo, icon, and description in Steam Notes" if library else
                                 "A  Jump   ·   B  Melee   ·   X  Reload / use   ·   Y  Change weapon")
         self.summary_note.set("The native game files and its Steam entry will be removed." if uninstall else
+                              "Only Steam library info changes. Existing custom artwork and notes are preserved." if library else
                               "Motion aiming and the full Xbox-style layout are included.")
 
     def _show_page(self, index):
@@ -586,11 +611,15 @@ class App(tk.Tk):
         self.canvas = self.pages[index].canvas
         self.step_count.set(f"SETUP / 0{index + 1} OF 03")
         uninstall = self.mode.get() == "uninstall"
-        titles = ("UNINSTALL HALO VR" if uninstall else "GAME DATA", "CONNECT FRAME", "UNINSTALL HALO VR" if uninstall else "INSTALL HALO VR")
+        library = self.mode.get() == "library"
+        titles = ("UNINSTALL HALO VR" if uninstall else "STEAM INFO" if library else "GAME DATA", "CONNECT FRAME",
+                  "UNINSTALL HALO VR" if uninstall else "UPDATE STEAM INFO" if library else "INSTALL HALO VR")
         subtitles = ("Choose your save preference before removing the native game." if uninstall else
-                     "Install, repair, or uninstall native Halo VR.",
+                     "Update library art and game notes for your installed native game." if library else
+                     "Install, repair, update Steam info, or uninstall native Halo VR.",
                      "Prepare SSH, then connect to your Steam Frame.",
                      "Review the native game and saves before removing them." if uninstall else
+                     "Refresh the library page without reinstalling the game." if library else
                      "Native VR. Xbox controls. Your Steam library.")
         self.page_title.configure(text=titles[index])
         self.page_subtitle.configure(text=subtitles[index])
@@ -614,7 +643,7 @@ class App(tk.Tk):
             return
         if self.current_page == 0:
             repair = self.mode.get() == "repair"
-            if self.mode.get() != "uninstall" and (not self.authorized.get() or (not repair and not self.source.get())):
+            if self.mode.get() not in ("uninstall", "library") and (not self.authorized.get() or (not repair and not self.source.get())):
                 messagebox.showinfo("Choose game data",
                     "Confirm that you are authorized to use the installed Xbox game data." if repair else
                     "Choose your original Xbox Halo CE image or maps, and confirm you are authorized to use them.", parent=self)
@@ -631,11 +660,14 @@ class App(tk.Tk):
                 messagebox.showinfo("Close games first", GAME_CLOSE_NOTE, parent=self)
                 return
             self.status.set("Setup removes the native game and its Steam entry, with your selected save preference." if self.mode.get() == "uninstall" else
+                            "Setup updates Halo's Steam library art and game notes without rebuilding." if self.mode.get() == "library" else
                             "Setup builds the native game, applies Xbox controls, and adds Halo to Steam.")
             self._show_page(2)
         else:
             if self.mode.get() == "uninstall":
                 self._uninstall()
+            elif self.mode.get() == "library":
+                self._retry_steam()
             else:
                 self._install(repair=self.mode.get() == "repair")
 
@@ -647,6 +679,7 @@ class App(tk.Tk):
             nav.configure(state="disabled" if self.busy or index > self.max_page else "normal")
         self.back_button.configure(state="disabled" if self.busy or self.current_page == 0 else "normal")
         label = ("Continue" if self.current_page < 2 else "Uninstall Halo VR" if self.mode.get() == "uninstall"
+                 else "Update Steam info" if self.mode.get() == "library"
                  else "Repair Halo VR" if self.mode.get() == "repair" else "Install Halo VR")
         self.next_button.configure(text=label, state="disabled" if self.busy else "normal")
         if self.busy:
@@ -680,6 +713,7 @@ class App(tk.Tk):
         # The review summary has already served its purpose before installation.
         self.install_summary.pack_forget()
         self.retry_button.pack_forget()
+        self.notes_button.pack_forget()
         self.pages[2].canvas.yview_moveto(0)
         self._show_activity()
 
@@ -761,6 +795,33 @@ class App(tk.Tk):
         self._label(body, "Hold the left grip near the foregrip for two-handed aiming.",
                     9, color=MUTED).pack(anchor="w", pady=(0, 8))
 
+    def _show_steam_note(self):
+        if self.busy or self.last_result is None:
+            return
+        notes = self.last_result.steam.get("notes", {})
+        content = self._redact(notes.get("content", ""))
+        if not content:
+            return
+        title = self._redact(notes.get("title", "Halo CE VR — About & controls"))
+        _, body = self._dialog("Game description", "Add this description in Steam Notes for Halo.")
+        card = self._card(body, "NOTE TITLE")
+        title_entry = ttk.Entry(card)
+        title_entry.insert(0, title)
+        title_entry.configure(state="readonly")
+        title_entry.pack(fill="x")
+        card = self._card(body, "NOTE CONTENT")
+        content_text = tk.Text(card, height=12, wrap="word", bg=INSET, fg=TEXT,
+                              font=("Segoe UI", 10), relief="flat", padx=10, pady=10)
+        content_text.insert("1.0", content)
+        content_text.configure(state="disabled")
+        content_text.pack(fill="both", expand=True)
+        def copy_content():
+            self.clipboard_clear()
+            self.clipboard_append(content)
+        Button(body, "Copy description", copy_content, primary=True).pack(anchor="w", pady=(0, 8))
+        self._label(body, self._redact(notes.get("message", "")) or STEAM_NOTES_NOTE,
+                    9, color=MUTED, wraplength=530).pack(anchor="w", pady=(0, 8))
+
     def _show_help(self):
         _, body = self._dialog("Help & sources", "Setup requirements and project references.")
         card = self._card(body, "BEFORE YOU START")
@@ -777,6 +838,7 @@ class App(tk.Tk):
             "• Save and close games. Steam Home and SteamVR stay running.\n"
             "• Install SteamVR and allow at least 12 GB free on your Frame.\n"
             "• Repair refreshes the program and controls while preserving saves.\n"
+            "• Steam info updates artwork and a Steam Notes description without an ISO or rebuild.\n"
             "• Online play uses the native port's own multiplayer protocol.",
             10, background=SURFACE, wraplength=530).pack(anchor="w")
         links = self._card(body, "Project references")
@@ -876,6 +938,13 @@ class App(tk.Tk):
             self.retry_button.pack(anchor="w", pady=(11, 0))
         else:
             self.retry_button.pack_forget()
+        notes_pending = (allow_steam_retry and self.last_result.steam.get("notes", {}).get("status") == "manual"
+                         and bool(self.last_result.steam.get("notes", {}).get("content")))
+        self.notes_button.configure(state="normal" if not value and notes_pending else "disabled")
+        if notes_pending:
+            self.notes_button.pack(anchor="w", pady=(8, 0))
+        else:
+            self.notes_button.pack_forget()
         self.cancel_button.configure(state="normal" if value else "disabled")
         if value:
             self.cancel.clear()
@@ -984,6 +1053,8 @@ class App(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _retry_steam(self):
+        if self.busy:
+            return
         if not self.steam_closed.get():
             messagebox.showinfo("Close games first", GAME_CLOSE_NOTE, parent=self)
             return
@@ -993,13 +1064,13 @@ class App(tk.Tk):
             messagebox.showerror("Connection details", str(exc), parent=self)
             return
         self.password_to_redact = settings.password
-        self.operation = "install"
+        self.operation = "library"
         self.installing = True
         self._show_page(2)
         self._set_busy(True)
         self._begin_setup_progress()
-        self.phase.set("Adding Halo to Steam")
-        self.status.set("Checking the installed game and Steam library…")
+        self.phase.set("Updating Halo's Steam info")
+        self.status.set("Checking the installed game, artwork, and game notes…")
         def worker():
             from .install import Installer
             try:
@@ -1112,29 +1183,60 @@ class App(tk.Tk):
                 elif kind == "complete":
                     result = event[1]
                     self.last_result = result
+                    library_update = getattr(self, "operation", None) == "library"
                     action = "repaired" if getattr(result, "repaired", False) else "installed"
-                    done = f"Native Halo VR is {action}. Open Steam and launch Halo: Combat Evolved VR (Native)."
+                    done = ("Halo's Steam library info has been updated. Your native game and saves were kept." if library_update else
+                            f"Native Halo VR is {action}. Open Steam and launch Halo: Combat Evolved VR (Native).")
                     if getattr(result, "backup_path", None):
                         self._append("Program-file backup: " + result.backup_path)
                     if result.requires_manual_steam_step:
-                        done = "Native Halo VR is installed; its Steam entry needs one more step.\n" + result.steam.get("reason", "") + "\n" + result.steam.get("instructions", STEAM_ADD_NOTE)
+                        done = ("Halo's Steam entry needs one more step. Your native game was kept.\n" if library_update else
+                                "Native Halo VR is installed; its Steam entry needs one more step.\n")
+                        done += result.steam.get("reason", "") + "\n" + result.steam.get("instructions", STEAM_ADD_NOTE)
                         self._append("Executable: " + result.game_path + "/halo")
                         self._append("Launch options: " + result.steam.get("launchOptions", "SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=0 %command%"))
                     artwork = result.steam.get("artwork", {})
                     artwork_pending = artwork.get("status") == "manual"
-                    self.progress_state.finish(pending=result.requires_manual_steam_step or artwork_pending)
+                    icon = artwork.get("icon", {})
+                    icon_pending = icon.get("status") == "manual"
+                    notes = result.steam.get("notes", {})
+                    if notes:
+                        # The copyable fallback remains safe after the worker clears
+                        # its password and the display-redaction token.
+                        notes = {key: self._redact(value) if isinstance(value, str) else value
+                                 for key, value in notes.items()}
+                        result.steam["notes"] = notes
+                    notes_pending = notes.get("status") == "manual"
+                    info_pending = artwork_pending or icon_pending or notes_pending
+                    if library_update and info_pending and not result.requires_manual_steam_step:
+                        done = "Native Halo VR was kept; some Steam library info needs one more step. Your game and saves are unchanged."
+                    self.progress_state.finish(pending=result.requires_manual_steam_step or info_pending)
                     self._display_progress()
                     if artwork_pending:
-                        done += "\n\nHalo box art needs one more step.\n" + artwork.get("reason", "")
+                        done += "\n\nHalo library art needs one more step.\n" + artwork.get("reason", "")
                         done += "\n" + artwork.get("instructions", STEAM_ART_NOTE)
+                    if icon_pending:
+                        done += "\n\nHalo's library icon needs one more step.\n" + icon.get("reason", "")
+                        done += "\n" + icon.get("instructions", "Click Add to Steam again to retry the library icon.")
+                    if notes_pending:
+                        done += "\n\nThe game description in Steam Notes needs one more step.\n"
+                        done += notes.get("message", STEAM_NOTES_NOTE)
+                        if notes.get("content"):
+                            done += "\nClick View game description to copy the note."
+                    elif notes.get("status") == "custom":
+                        done += "\n\nYour existing custom game note was kept."
+                    if info_pending:
                         self.retry_button.pack(anchor="w", pady=(11, 0))
                     done = self._redact(done)
                     self.phase.set("One more step in Steam" if result.requires_manual_steam_step
-                                   else "Ready to play · box art pending" if artwork_pending
+                                   else "Ready to play · Steam info pending" if info_pending
+                                   else "Steam info updated" if library_update
                                    else "You're ready to play")
                     self.status.set(done)
                     self._append(done)
-                    messagebox.showinfo("Setup complete", done + "\n\nXbox controls and motion aiming are enabled. The native port uses its own multiplayer protocol; legacy PC servers and PC saves are incompatible.", parent=self)
+                    extra = "" if library_update else "\n\nXbox controls and motion aiming are enabled. The native port uses its own multiplayer protocol; legacy PC servers and PC saves are incompatible."
+                    messagebox.showinfo("Steam info updated" if library_update and not info_pending and not result.requires_manual_steam_step
+                                        else "Steam info needs attention" if library_update else "Setup complete", done + extra, parent=self)
                 elif kind == "uninstall_complete":
                     result = event[1]
                     self.last_result = None

@@ -27,7 +27,7 @@ PHASES = {
     "compile": (73, 90, "Compiling Halo and VR support"),
     "build-check": (90, 92, "Checking the native game build"),
     "install": (92, 96, "Installing the native game and Xbox controls"),
-    "steam": (96, 99, "Adding Halo and its box art to Steam"),
+    "steam": (96, 99, "Updating Halo's Steam library information"),
     "disconnect": (99, 99, "Closing the setup connection"),
     "disconnected": (99, 99, "Disconnected from your Frame"),
     "complete": (99, 99, "Finishing setup"),

@@ -31,7 +31,8 @@ const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 const calls = [], store = new Map(), data = new Map();
 const id = 3000000001;
 for (const entry of input.entries || []) {
-  store.set(entry.appid, {appid:entry.appid, app_type:1073741824, display_name:entry.name});
+  store.set(entry.appid, {appid:entry.appid, app_type:1073741824, display_name:entry.name,
+    icon_data:input.iconData === undefined ? (input.iconUnloaded ? undefined : '') : input.iconData});
   data.set(entry.appid, {unAppID:entry.appid, strShortcutExe:entry.exe,
     strShortcutStartDir:entry.directory || input.spec.directory,
     strLaunchOptions:entry.options || '', strShortcutLaunchOptions:entry.options || '',
@@ -46,12 +47,12 @@ async function setter(method, appid, value, field) {
   if (method === 'SetShortcutName') store.get(appid).display_name = value;
   active = false;
 }
-globalThis.appStore = {m_mapApps:store};
+globalThis.appStore = {m_mapApps:store,GetAppOverviewByAppID:appid => store.get(appid)};
 globalThis.SteamClient = {Apps:{
   AddShortcut:async(name, exe, arguments_, cmdline) => {
     calls.push(['AddShortcut',name,exe,arguments_,cmdline]);
     const result = input.returnId || id;
-    store.set(result,{appid:result,app_type:1073741824,display_name:'halo'});
+    store.set(result,{appid:result,app_type:1073741824,display_name:'halo',icon_data:''});
     data.set(result,{unAppID:result,strShortcutExe:exe,strShortcutStartDir:input.spec.directory+'/',
       strLaunchOptions:arguments_,strShortcutLaunchOptions:arguments_,bShortcutIsVR:false,strCompatToolName:''});
     return result;
@@ -69,6 +70,11 @@ globalThis.SteamClient = {Apps:{
   SetAppLaunchOptions:(appid,value) => setter('SetAppLaunchOptions',appid,value,'strLaunchOptions'),
   SpecifyCompatTool:(appid,value) => setter('SpecifyCompatTool',appid,value,'strCompatToolName'),
   SetShortcutIsVR:(appid,value) => setter('SetShortcutIsVR',appid,value,'bShortcutIsVR'),
+  SetShortcutIcon:(appid,value) => setter('SetShortcutIcon',appid,value),
+  RequestIconDataForApp:appid => {
+    calls.push(['RequestIconDataForApp',appid]);
+    if (input.loadedIconData !== undefined) store.get(appid).icon_data = input.loadedIconData;
+  },
   SetCustomArtworkForApp:async(appid,base64Data,extension,assetType) => {
     calls.push(['SetCustomArtworkForApp',appid,base64Data,extension,assetType]);
     await new Promise(resolve => setTimeout(resolve,1));
@@ -165,7 +171,7 @@ def test_remove_renamed_native_entry_uses_exact_path(live):
 def test_remove_exact_identity_and_leave_foreign_same_name_entry(live):
     result = run_client(live, "remove", entries=[entry(live), entry(live, appid=3000000002, exe="/foreign")])
     assert result["result"] == {"ok": True, "status": "removed", "appid": 3000000001}
-    assert result["entries"] == [{"appid": 3000000002, "app_type": 1073741824, "display_name": live.NAME}]
+    assert result["entries"] == [{"appid": 3000000002, "app_type": 1073741824, "display_name": live.NAME, "icon_data": ""}]
     assert [call for call in result["calls"] if call[0] == "RemoveShortcut"] == [["RemoveShortcut", 3000000001]]
 
 
@@ -317,16 +323,33 @@ def artwork_client(live, tmp_path, monkeypatch):
     login = config / "loginusers.vdf"
     login.write_text('"users" { "76561197960265738" { "AccountName" "active-user" "MostRecent" "0" } '
                      '"76561197960265748" { "AccountName" "another-user" "MostRecent" "1" } }')
+    game = live.GAME
+    game.mkdir(parents=True)
+    program = bytearray(64)
+    program[:6] = b"\x7fELF\x02\x01"
+    program[18:20] = (183).to_bytes(2, "little")
+    (game / "halo").write_bytes(program)
+    (game / ".halo-frame-installer.json").write_text(json.dumps({
+        "owner": "halo-frame-installer", "sourceCommit": shortcut.ICON_SOURCE_COMMIT,
+        "files": {"halo": hashlib.sha256(program).hexdigest()}}))
+    record, _ = shortcut.update_shortcut(None, str(game / "halo"), str(game))
+    root = shortcut.loads(record)
+    root["shortcuts"].value["0"].value["appid"].value = 3000000001
+    persisted = grid.parent / "shortcuts.vdf"
+    persisted.write_bytes(shortcut.dumps(root))
 
     class ArtworkClient:
         deadline = time.monotonic() + 30
         account = "active-user"
         writes = []
+        icon_writes = []
         calls = 0
         fail_write = False
         switch_before_write = False
         corrupt_write = False
         switch_after_write = False
+        icon_state = "empty"
+        load_icon = False
 
         def __enter__(self):
             return self
@@ -338,12 +361,22 @@ def artwork_client(live, tmp_path, monkeypatch):
             self.calls += 1
             encoded = expression.removeprefix("(() => {const S = ").split(";\nreturn ", 1)[0]
             request = json.loads(encoded)
+            if "iconPath" in request:
+                self.icon_writes.append(request)
+                if self.fail_write:
+                    raise live.LiveSteamError("Steam shortcut icon API did not finish")
+                record = shortcut.loads(persisted.read_bytes())
+                record["shortcuts"].value["0"].value["icon"].value = "/custom/concurrent.png" if self.corrupt_write else request["iconPath"]
+                persisted.write_bytes(shortcut.dumps(record))  # Simulate Steam's own path setter.
+                if self.switch_after_write:
+                    self.account = "another-user"
+                return {"ok": True, "accountName": self.account, "appid": request["appid"]}
             if "base64Data" in request:
                 self.writes.append(request)
                 if self.fail_write:
                     raise live.LiveSteamError("Steam artwork API did not finish")
                 payload = b"unexpected client image" if self.corrupt_write else base64.b64decode(request["base64Data"])
-                suffix = "p" if request["assetType"] == 0 else ""
+                suffix = {0: "p", 1: "_hero", 2: "_logo", 3: ""}[request["assetType"]]
                 target = grid / (str(request["appid"]) + suffix + "." + request["extension"])
                 target.write_bytes(payload)  # Simulate only Steam's own API filesystem write.
                 if self.switch_after_write:
@@ -351,7 +384,12 @@ def artwork_client(live, tmp_path, monkeypatch):
                 return {"ok": True, "accountName": self.account, "appid": request["appid"]}
             if self.switch_before_write and self.calls >= 2:
                 self.account = "another-user"
-            return {"accountName": self.account, "appid": request["appid"], "exe": request["exe"]}
+            state = self.icon_state
+            requested = state == "unknown" and request.get("requestIcon") is True and self.load_icon
+            if requested:
+                self.icon_state = "empty"
+            return {"accountName": self.account, "appid": request["appid"], "exe": request["exe"],
+                    "iconState": state, "iconRequested": requested}
 
     client = ArtworkClient()
     monkeypatch.setattr(live, "Client", lambda: client)
@@ -362,8 +400,9 @@ def test_live_artwork_uses_api_types_and_active_account_not_most_recent(live, ar
     home, game, grid, foreign, login, client, shortcut = artwork_client
     result = live._live_artwork(home, game, 3000000001)
     assert result["status"] == "added"
-    assert result["installed"] == ["3000000001p.jpg", "3000000001.png"]
-    assert [(item["extension"], item["assetType"]) for item in client.writes] == [("jpg", 0), ("png", 3)]
+    assert result["installed"] == ["3000000001" + suffix + extension for suffix, extension, _, _ in shortcut.ARTWORK]
+    assert [(item["extension"], item["assetType"]) for item in client.writes] == [
+        (extension.lstrip("."), shortcut.ARTWORK_TYPES[suffix]) for suffix, extension, _, _ in shortcut.ARTWORK]
     for suffix, extension, filename, expected in shortcut.ARTWORK:
         assert hashlib.sha256((grid / ("3000000001" + suffix + extension)).read_bytes()).hexdigest() == expected
     assert list(foreign.iterdir()) == [foreign / "unrelated.png"]
@@ -374,9 +413,13 @@ def test_live_artwork_preserves_custom_extensions_and_reuses_managed_hash(live, 
     home, game, grid, foreign, login, client, shortcut = artwork_client
     (grid / "3000000001p.webp").write_bytes(b"custom portrait")
     (grid / "3000000001.png").write_bytes((RESOURCE.parent / "artwork/halo-ce-landscape.png").read_bytes())
+    for suffix, extension, filename, _ in shortcut.ARTWORK:
+        if suffix not in ("p", ""):
+            (grid / ("3000000001" + suffix + extension)).write_bytes((RESOURCE.parent / "artwork" / filename).read_bytes())
     before = {path.name: path.read_bytes() for path in grid.iterdir()}
     result = live._live_artwork(home, game, 3000000001)
-    assert result == {"status": "preserved", "installed": [], "preserved": ["3000000001p.webp"], "unchanged": ["3000000001.png"]}
+    unchanged = ["3000000001" + suffix + extension for suffix, extension, _, _ in shortcut.ARTWORK if suffix != "p"]
+    assert result == {"status": "preserved", "installed": [], "preserved": ["3000000001p.webp"], "unchanged": unchanged}
     assert not client.writes
     assert {path.name: path.read_bytes() for path in grid.iterdir()} == before
 
@@ -409,7 +452,7 @@ def test_live_artwork_source_integrity_is_checked_before_any_client_request(live
     home, game, grid, foreign, login, client, shortcut = artwork_client
     sources = tmp_path / "corrupt-art"
     sources.mkdir()
-    for name in ("halo-ce-cover.jpg", "halo-ce-landscape.png"):
+    for _, _, name, _ in shortcut.ARTWORK:
         (sources / name).write_bytes(b"bad source")
     with pytest.raises(live.LiveSteamError, match="integrity"):
         live._live_artwork(home, game, 3000000001, sources)
@@ -461,3 +504,158 @@ def test_actual_artwork_expression_rechecks_account_before_mutation(live):
     result = run_client(live, source=live.ART_WRITE, spec_values=values, entries=[entry(live)])
     assert "account changed" in result["error"]
     assert not any(call[0] == "SetCustomArtworkForApp" for call in result["calls"])
+
+
+def test_live_icon_persists_validated_game_sidecar_and_uses_path_api(live, artwork_client):
+    home, game, grid, foreign, login, client, shortcut = artwork_client
+    foreign_before = {path.name: path.read_bytes() for path in foreign.iterdir()}
+    result = live._live_icon(home, game, 3000000001)
+    target = game / ".installer-artwork" / shortcut.ICON_NAME
+    assert result == {"status": "added", "path": str(target)}
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == shortcut.ICON_SHA256
+    assert len(client.icon_writes) == 1 and not client.writes
+    assert client.icon_writes[0]["iconPath"] == str(target)
+    persisted = (grid.parent / "shortcuts.vdf").read_bytes()
+    _, _, selected = shortcut._shortcut_icon_field(persisted, 3000000001, str(game / "halo"))
+    assert selected == str(target)
+    assert {path.name: path.read_bytes() for path in foreign.iterdir()} == foreign_before
+    again = live._live_icon(home, game, 3000000001)
+    assert again["status"] == "unchanged" and len(client.icon_writes) == 1
+
+
+def test_live_icon_preserves_existing_selection_without_publishing_sidecar(live, artwork_client):
+    home, game, grid, foreign, login, client, shortcut = artwork_client
+    persisted = grid.parent / "shortcuts.vdf"
+    root = shortcut.loads(persisted.read_bytes())
+    root["shortcuts"].value["0"].value["icon"].value = "/my/custom/icon.png"
+    before = shortcut.dumps(root)
+    persisted.write_bytes(before)
+    result = live._live_icon(home, game, 3000000001)
+    assert result["status"] == "preserved"
+    assert persisted.read_bytes() == before and not client.icon_writes
+    assert not (game / ".installer-artwork").exists()
+
+
+def test_live_icon_account_change_before_api_never_changes_selection(live, artwork_client):
+    home, game, grid, foreign, login, client, shortcut = artwork_client
+    before = (grid.parent / "shortcuts.vdf").read_bytes()
+    client.switch_before_write = True
+    with pytest.raises(live.LiveSteamError, match="account changed"):
+        live._live_icon(home, game, 3000000001)
+    assert not client.icon_writes and (grid.parent / "shortcuts.vdf").read_bytes() == before
+
+
+def test_live_icon_corrupt_source_is_rejected_before_client_requests(live, artwork_client, tmp_path):
+    home, game, grid, foreign, login, client, shortcut = artwork_client
+    source = tmp_path / "corrupt-icon"
+    source.mkdir()
+    (source / shortcut.ICON_NAME).write_bytes(b"bad bundled icon")
+    with pytest.raises(live.LiveSteamError, match="integrity"):
+        live._live_icon(home, game, 3000000001, source)
+    assert not client.calls and not client.icon_writes and not (game / ".installer-artwork").exists()
+
+
+def test_live_icon_foreign_persisted_executable_is_never_changed(live, artwork_client):
+    home, game, grid, foreign, login, client, shortcut = artwork_client
+    persisted = grid.parent / "shortcuts.vdf"
+    root = shortcut.loads(persisted.read_bytes())
+    root["shortcuts"].value["0"].value["Exe"].value = '"/other/game"'
+    before = shortcut.dumps(root)
+    persisted.write_bytes(before)
+    with pytest.raises(ValueError, match="identity"):
+        live._live_icon(home, game, 3000000001)
+    assert persisted.read_bytes() == before and not client.icon_writes
+    assert not (game / ".installer-artwork").exists()
+
+
+def test_live_icon_unverified_client_selection_is_kept_and_reported_manual(live, artwork_client):
+    home, game, grid, foreign, login, client, shortcut = artwork_client
+    client.corrupt_write = True
+    with pytest.raises(live.LiveSteamError, match="persisted"):
+        live._live_icon(home, game, 3000000001)
+    _, _, selected = shortcut._shortcut_icon_field((grid.parent / "shortcuts.vdf").read_bytes(), 3000000001, str(game / "halo"))
+    assert selected == "/custom/concurrent.png"
+
+
+def test_unpersisted_icon_record_does_not_block_library_or_banner_completion(live, artwork_client, monkeypatch):
+    home, game, grid, foreign, login, client, shortcut = artwork_client
+    (grid.parent / "shortcuts.vdf").unlink()
+    monkeypatch.setattr(live, "_library", lambda *args: {"appid": 3000000001, "created": False})
+    result = live.add_native(home, game)
+    assert result["status"] == "added" and result["libraryAdded"] is True
+    assert result["artwork"]["status"] == "added"
+    assert result["artwork"]["icon"]["status"] == "manual"
+    assert not client.icon_writes
+
+
+def test_actual_icon_expression_uses_confirmed_path_setter_without_art_type_four(live):
+    values = {"appid": 3000000001, "accountName": "active-user", "iconPath": str(live.GAME / ".installer-artwork/halo-ce-icon.png")}
+    result = run_client(live, source=live.ICON_WRITE, spec_values=values, entries=[entry(live)])
+    assert result["result"] == {"ok": True, "accountName": "active-user", "appid": 3000000001}
+    assert [call for call in result["calls"] if call[0] == "SetShortcutIcon"] == [
+        ["SetShortcutIcon", 3000000001, values["iconPath"]]]
+    assert not any(call[0] == "SetCustomArtworkForApp" for call in result["calls"])
+
+
+def test_actual_icon_expression_requires_capability_and_checks_account(live):
+    values = {"appid": 3000000001, "accountName": "another-user", "iconPath": "/owned/icon.png"}
+    result = run_client(live, source=live.ICON_WRITE, spec_values=values, entries=[entry(live)])
+    assert "account changed" in result["error"]
+    assert not any(call[0] == "SetShortcutIcon" for call in result["calls"])
+    result = run_client(live, source=live.ICON_WRITE, spec_values=values, entries=[entry(live)], missing=["SetShortcutIcon"])
+    assert "unavailable" in result["error"]
+    assert not any(call[0] == "SetShortcutIcon" for call in result["calls"])
+
+
+@pytest.mark.parametrize("icon_data", [None, "resident-custom-icon"])
+def test_actual_icon_expression_keeps_unloaded_or_resident_custom_icon(live, icon_data):
+    values = {"appid": 3000000001, "accountName": "active-user", "iconPath": "/owned/icon.png"}
+    result = run_client(live, source=live.ICON_WRITE, spec_values=values, entries=[entry(live)], iconData=icon_data)
+    assert "confirmed empty" in result["error"]
+    assert not any(call[0] == "SetShortcutIcon" for call in result["calls"])
+
+
+def test_live_icon_resident_custom_icon_wins_over_stale_empty_vdf(live, artwork_client):
+    home, game, grid, foreign, login, client, shortcut = artwork_client
+    client.icon_state = "present"
+    before = (grid.parent / "shortcuts.vdf").read_bytes()
+    result = live._live_icon(home, game, 3000000001)
+    assert result["status"] == "preserved"
+    assert not client.icon_writes and (grid.parent / "shortcuts.vdf").read_bytes() == before
+    assert not (game / ".installer-artwork").exists()
+
+
+def test_live_icon_unknown_resident_state_defers_without_sidecar_or_setter(live, artwork_client):
+    home, game, grid, foreign, login, client, shortcut = artwork_client
+    client.icon_state = "unknown"
+    with pytest.raises(live.LiveSteamError, match="has not loaded"):
+        live._live_icon(home, game, 3000000001)
+    assert not client.icon_writes and not (game / ".installer-artwork").exists()
+
+
+def test_live_icon_requests_missing_data_once_and_waits_for_confirmed_empty(live, artwork_client):
+    home, game, grid, foreign, login, client, shortcut = artwork_client
+    client.icon_state = "unknown"
+    client.load_icon = True
+    result = live._live_icon(home, game, 3000000001)
+    assert result["status"] == "added" and len(client.icon_writes) == 1
+
+
+def test_actual_icon_session_requests_undefined_data_without_assuming_empty(live):
+    values = {"appid": 3000000001, "accountName": "active-user", "requestIcon": True}
+    result = run_client(live, source=live.ICON_SESSION, spec_values=values, entries=[entry(live)], iconUnloaded=True, loadedIconData="")
+    assert result["result"]["iconState"] == "unknown" and result["result"]["iconRequested"] is True
+    assert [call for call in result["calls"] if call[0] == "RequestIconDataForApp"] == [["RequestIconDataForApp", 3000000001]]
+    assert not any(call[0] == "SetShortcutIcon" for call in result["calls"])
+
+
+def test_corrupt_icon_prevents_all_live_artwork_calls(live, artwork_client, tmp_path):
+    home, game, grid, foreign, login, client, shortcut = artwork_client
+    source = tmp_path / "corrupt-icon-with-valid-art"
+    source.mkdir()
+    for _, _, filename, _ in shortcut.ARTWORK:
+        (source / filename).write_bytes((RESOURCE.parent / "artwork" / filename).read_bytes())
+    (source / shortcut.ICON_NAME).write_bytes(b"corrupt final icon")
+    with pytest.raises(live.LiveSteamError, match="icon.*integrity"):
+        live._live_artwork(home, game, 3000000001, source)
+    assert not client.calls and not client.writes and not list(grid.iterdir())

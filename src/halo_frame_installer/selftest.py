@@ -10,10 +10,11 @@ def smoke_test(resources: Path) -> dict:
     from .gui import App
     from .install import SOURCE_COMMIT
     from .ssh import Settings
-    names = ('remote_install.py', 'steam_shortcut.py', 'steam_live.py', 'build-native.sh',
+    names = ('remote_install.py', 'steam_shortcut.py', 'steam_live.py', 'steam_notes.py', 'build-native.sh',
              'frame-controls.patch', 'ui/app-icon.png', 'ui/app-icon.ico',
              'artwork/halo-ce-cover.jpg', 'artwork/halo-ce-landscape.png',
-             'artwork/halo-ce-thumbnail.png')
+             'artwork/halo-ce-thumbnail.png', 'artwork/halo-ce-hero.jpg',
+             'artwork/halo-ce-logo.png', 'artwork/halo-ce-icon.png')
     hashes = {}
     usb_bundled = getattr(sys, 'frozen', False)
     if usb_bundled:
@@ -50,7 +51,7 @@ def smoke_test(resources: Path) -> dict:
                      and hasattr(app, '_game_cover') and hasattr(app, 'music'))
             if str(app.progress['mode']) != 'determinate':
                 raise RuntimeError('Packaged progress bar is not determinate')
-            if {choice.value for choice in app.mode_choices} != {'install', 'repair', 'uninstall'}:
+            if {choice.value for choice in app.mode_choices} != {'install', 'repair', 'library', 'uninstall'}:
                 raise RuntimeError('Packaged operation choices are incomplete')
             if {choice.value for choice in app.transport_choices} != {'network', 'usb'}:
                 raise RuntimeError('Packaged connection choices are incomplete')
@@ -71,6 +72,17 @@ def smoke_test(resources: Path) -> dict:
                 raise RuntimeError('Packaged USB setup must keep Steam Home running')
             settings.password = ''
             app.password.set('')
+            app.mode.set('library')
+            app.source.set('')
+            app.authorized.set(False)
+            app._show_page(0)
+            app._continue()
+            if (app.current_page != 1 or app.data_panel.winfo_manager()
+                    or app.data_consent.winfo_manager() or not app.library_card.winfo_manager()
+                    or 'No ISO or rebuild' not in '\n'.join(
+                        str(widget.cget('text')) for widget in app.library_card.winfo_children()[0].winfo_children()
+                        if 'text' in widget.keys())):
+                raise RuntimeError('Packaged Steam info update requires game data or lost its no-rebuild guidance')
         finally:
             for callback in app.tk.call('after', 'info'):
                 app.after_cancel(callback)
@@ -84,5 +96,7 @@ def smoke_test(resources: Path) -> dict:
             'automaticMusicWithoutToggle': True,
             'keepsSteamSessionRunning': True,
             'usbTransferAvailable': True,
+            'steamInfoUpdateWithoutRebuild': True,
+            'steamDescriptionUsesNotes': True,
             'usbToolsBundled': usb_bundled,
             'passwordReprRedacted': True, 'networkConnections': 0}
