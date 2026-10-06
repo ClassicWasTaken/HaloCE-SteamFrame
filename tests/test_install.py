@@ -266,7 +266,8 @@ def xbox_maps(directory, remote):
 
 
 def test_library_preflight_does_not_require_compiler_or_build_space(remote, monkeypatch):
-    monkeypatch.setattr(remote.os, 'getuid', lambda: 0, raising=False)
+    owner_uid = remote.HOME.stat().st_uid
+    monkeypatch.setattr(remote.os, 'getuid', lambda: owner_uid, raising=False)
     monkeypatch.setattr(remote.pwd, 'getpwuid', lambda uid: types.SimpleNamespace(pw_name='steamos'))
     monkeypatch.setattr(remote.pathlib.Path, 'home', lambda: remote.HOME)
     monkeypatch.setattr(remote.platform, 'machine', lambda: 'aarch64')
