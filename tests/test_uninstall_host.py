@@ -148,3 +148,105 @@ def test_post_removal_bookkeeping_warning_is_visible_without_false_failure():
     assert result.uninstalled and fake.closed
     assert ('detail', warning, None) in events
     assert events[-1][0] == 'complete'
+
+
+def host_response(fake, **extra):
+    original = fake.run
+    def run(argv, **kwargs):
+        response = original(argv, **kwargs)
+        if argv[1] != '-c':
+            data = json.loads(response.split(' ', 1)[1])
+            data.update(extra)
+            response = 'HFI_RESULT ' + json.dumps(data)
+        return response
+    fake.run = run
+
+
+def test_successful_uninstall_retains_its_result_when_usb_cleanup_needs_attention():
+    class CleanupFailure(UninstallConnection):
+        def close(self):
+            self.closed = True
+            raise SSHError('Temporary USB forward cleanup failed private')
+    fake = CleanupFailure(Settings('', 'private', transport='usb'))
+    events = []
+    result = Installer(lambda settings: fake, RESOURCES).uninstall(fake.settings,
+        lambda *event: events.append(event))
+    assert result.uninstalled and result.saved_backup_path
+    assert result.connection_cleanup_pending and 'Unplug the USB cable' in result.cleanup_warning
+    assert 'private' not in result.cleanup_warning
+    assert not any(event[0] in ('disconnected', 'complete') for event in events)
+    assert events[-1][0] == 'cleanup-pending' and events[-1][2] == 99
+
+
+def test_uncertain_uninstall_retains_history_without_claiming_removed_or_already_absent():
+    fake = UninstallConnection(Settings('frame', 'private'))
+    previous_save = '/home/steamos/Games/HaloCENativeVR-saves-' + 'a' * 32
+    retained = '/home/steamos/Games/.HaloCENativeVR-uninstall-unsafe-manual-folder'
+    warning = 'An unsafe uninstall folder was preserved; inspect it before retrying.'
+    host_response(fake, uninstalled=False, alreadyAbsent=False, savedBackupPath=None,
+                  removalPending=True, warning=warning,
+                  retainedQuarantinePaths=[retained], recoveredSaveBackupPaths=[previous_save])
+    events = []
+    result = Installer(lambda settings: fake, RESOURCES).uninstall(fake.settings,
+        lambda *event: events.append(event))
+    assert result.removal_pending and not result.uninstalled and not result.already_absent
+    assert result.removal_warning == warning
+    assert result.retained_quarantine_paths == (retained,)
+    assert result.recovered_save_backup_paths == (previous_save,)
+    assert result.saved_backup_path is None
+    assert not any(event[0] == 'complete' for event in events)
+    assert events[-1][0] == 'removal-pending' and events[-1][2] == 99
+
+
+def test_manual_steam_failure_preserves_recovered_save_history_and_warning():
+    fake = UninstallConnection(Settings('frame', 'private'), manual=True)
+    backup = '/home/steamos/Games/HaloCENativeVR-saves-' + 'b' * 32
+    warning = 'Recovered saves from an interrupted uninstall.'
+    host_response(fake, warning=warning, recoveredSaveBackupPaths=[backup])
+    events = []
+    with pytest.raises(SSHError, match='game was kept') as error:
+        Installer(lambda settings: fake, RESOURCES).uninstall(fake.settings,
+            lambda *event: events.append(event))
+    assert warning in str(error.value) and backup in str(error.value)
+    assert ('detail', 'Recovered campaign save backup: ' + backup, None) in events
+    assert not any(event[0] == 'complete' for event in events)
+
+
+@pytest.mark.parametrize('extra', [
+    {'recoveredSaveBackupPaths': ['/home/other/Games/HaloCENativeVR-saves-' + 'a' * 32]},
+    {'recoveredSaveBackupPaths': ['/home/steamos/Games/HaloCENativeVR-saves-not-a-run']},
+    {'retainedQuarantinePaths': ['/home/steamos/Games/.HaloCENativeVR-uninstall-../other']},
+    {'retainedQuarantinePaths': ['/home/steamos/Games/.HaloCENativeVR-uninstall-bad\\other']},
+    {'retainedQuarantinePaths': ['/home/steamos/Games/.HaloCENativeVR-uninstall-bad\nother']},
+    {'retainedQuarantinePaths': ['/home/steamos/Games/.HaloCENativeVR-uninstall-' + 'a' * 256]},
+    {'recoveredSaveBackupPaths': ['/home/steamos/Games/HaloCENativeVR-saves-' + 'a' * 32] * 2},
+    {'retainedQuarantinePaths': ['folder'] * 65},
+    {'warning': 'x' * 4097},
+    {'removalPending': 'true'},
+    {'removalPending': True, 'uninstalled': True},
+    {'retainedQuarantinePaths': ['/home/steamos/Games/.HaloCENativeVR-uninstall-' + 'a' * 32]},
+])
+def test_invalid_uninstall_recovery_history_never_reports_success(extra):
+    fake = UninstallConnection(Settings('frame', 'private'))
+    host_response(fake, **extra)
+    stages = []
+    with pytest.raises(SSHError, match='invalid uninstall'):
+        Installer(lambda settings: fake, RESOURCES).uninstall(fake.settings,
+            lambda stage, message, percent=None: stages.append(stage))
+    assert 'complete' not in stages and fake.closed
+
+
+def test_pending_overflow_can_be_reported_without_a_retained_path_list():
+    fake = UninstallConnection(Settings('frame', 'private'))
+    host_response(fake, uninstalled=False, alreadyAbsent=False, savedBackupPath=None,
+                  removalPending=True, warning='Too many interrupted uninstall folders; retry cleanup.')
+    result = Installer(lambda settings: fake, RESOURCES).uninstall(fake.settings)
+    assert result.removal_pending and result.retained_quarantine_paths == ()
+
+
+def test_uninstall_failure_is_not_masked_by_disconnect_failure():
+    fake = UninstallConnection(Settings('frame', 'private'), manual=True)
+    fake.close = lambda: (_ for _ in ()).throw(EOFError('private'))
+    with pytest.raises(SSHError, match='game was kept') as error:
+        Installer(lambda settings: fake, RESOURCES).uninstall(fake.settings)
+    assert 'private' not in str(error.value)

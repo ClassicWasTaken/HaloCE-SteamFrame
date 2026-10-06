@@ -91,6 +91,26 @@ def game_bytes(remote):
             if path.is_file() and not path.is_symlink()}
 
 
+def record_quarantine(remote, identifier, quarantine, saved=None, *, legacy=False):
+    """Model the journal made by an actual interrupted uninstall, not a label."""
+    directory = remote.CACHE / "runs" / identifier
+    metadata = remote.owned(directory)
+    metadata.update({"operation": "uninstall", "state": "removing", "quarantinePath": str(quarantine),
+                     "savedBackupPath": str(saved) if saved else None})
+    if not legacy:
+        metadata["quarantineRoot"] = remote.uninstall_root_identity(quarantine)
+    if saved:
+        backup = {"owner": remote.OWNER + "-save-backup", "gamePath": str(remote.GAME)}
+        if not legacy:
+            backup["files"] = {str(path.relative_to(saved)): {"size": path.stat().st_size,
+                                                             "sha256": remote.digest(path)}
+                               for path in saved.rglob("*") if path.is_file() and path.name != remote.MARKER}
+            metadata["savedBackupRoot"] = remote.uninstall_root_identity(saved)
+        (saved / remote.MARKER).write_text(json.dumps(backup))
+    remote.write_uninstall_record(directory, metadata)
+    return directory / remote.MARKER
+
+
 def test_uninstall_keeps_saves_removes_all_exact_native_entries_and_managed_art(installation, capsys):
     remote, steam, configs, appids, foreign = installation
     original_config = (remote.GAME / "config.toml").read_bytes()
@@ -149,7 +169,7 @@ def test_uninstall_removes_a_native_entry_the_user_renamed(installation):
     assert len(backups) == 1 and b"My favorite Halo" in backups[0].read_bytes()
 
 
-def test_uninstall_skips_native_entries_with_malformed_ids_and_odd_quoting(installation):
+def test_uninstall_refuses_exact_native_malformed_ids_without_changing_files_or_art(installation):
     remote, steam, configs, _, _ = installation
     config = configs[0]
     executable = str(remote.GAME / "halo")
@@ -161,10 +181,16 @@ def test_uninstall_skips_native_entries_with_malformed_ids_and_odd_quoting(insta
         ("appid", steam.Value(2, 0xF2233445)), ("AppName", steam.Value(1, "Odd quotes")),
         ("Exe", steam.Value(1, executable + '"'))]))
     (config / "shortcuts.vdf").write_bytes(steam.dumps(root))
+    before = game_bytes(remote)
+    shortcut_bytes = [(path / "shortcuts.vdf").read_bytes() for path in configs]
+    artwork = {str(path): path.read_bytes() for directory in configs for path in (directory / "grid").iterdir()}
     result = remote.uninstall(RUN_ID, keep_saves=True)
-    assert result["uninstalled"] and result["steam"]["status"] == "removed"
+    assert not result["uninstalled"] and result["steam"]["status"] == "manual"
+    assert game_bytes(remote) == before
+    assert [(path / "shortcuts.vdf").read_bytes() for path in configs] == shortcut_bytes
+    assert {str(path): path.read_bytes() for directory in configs for path in (directory / "grid").iterdir()} == artwork
     remaining = steam.loads((config / "shortcuts.vdf").read_bytes())["shortcuts"].value
-    assert set(remaining) == {"0", "2", "3", "4"}
+    assert set(remaining) == {"0", "1", "2", "3", "4"}
 
 
 def test_uninstall_without_keep_saves_deletes_contained_saves_only(installation):
@@ -318,9 +344,16 @@ def test_partial_file_removal_reports_quarantine_and_save_backup_honestly(instal
     assert (saved / "save/profile.sav").read_bytes() == b"campaign progress"
     assert str(saved) in str(error.value)
     assert "game was kept" not in str(error.value).lower()
+    before = {str(path.relative_to(saved)): path.read_bytes() for path in saved.rglob("*") if path.is_file()}
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    result = remote.uninstall(RUN_ID, keep_saves=True)
+    assert result["uninstalled"] and not result["alreadyAbsent"] and not quarantine.exists()
+    assert result["savedBackupPath"] == str(saved)
+    assert {str(path.relative_to(saved)): path.read_bytes() for path in saved.rglob("*") if path.is_file()} == before
 
 
-def test_interrupted_uninstall_leftovers_are_finished_by_the_next_run(installation):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_interrupted_uninstall_leftovers_are_finished_by_the_next_run(installation, legacy):
     remote, _, _, _, _ = installation
     previous = "d" * 32
     quarantine = remote.GAME.parent / (".HaloCENativeVR-uninstall-" + previous)
@@ -330,11 +363,14 @@ def test_interrupted_uninstall_leftovers_are_finished_by_the_next_run(installati
     (saved / remote.MARKER).write_text(json.dumps({"owner": remote.OWNER + "-save-backup"}))
     (saved / "save").mkdir()
     (saved / "save/profile.sav").write_bytes(b"earlier campaign")
+    record_quarantine(remote, previous, quarantine, saved, legacy=legacy)
     result = remote.uninstall(RUN_ID, keep_saves=True)
     assert result["uninstalled"] is True and result["alreadyAbsent"] is False
     assert not quarantine.exists() and not remote.GAME.exists()
     assert (saved / "save/profile.sav").read_bytes() == b"earlier campaign"
     assert str(quarantine) in result["warning"] and str(saved) in result["warning"]
+    assert result["recoveredSaveBackupPaths"] == [str(saved)]
+    assert result["savedBackupPath"] is None and result["removalPending"] is False
 
 
 def test_reinstall_after_interrupted_uninstall_still_clears_the_old_quarantine(installation):
@@ -345,6 +381,8 @@ def test_reinstall_after_interrupted_uninstall_still_clears_the_old_quarantine(i
     os.rename(remote.GAME, quarantine)
     saved.mkdir()
     (saved / remote.MARKER).write_text(json.dumps({"owner": remote.OWNER + "-save-backup"}))
+    (saved / "config.toml").write_bytes(b"earlier settings")
+    record_quarantine(remote, previous, quarantine, saved)
     remote.owned(remote.GAME)
     (remote.GAME / "halo").write_bytes(b"rebuilt native executable")
     result = remote.uninstall(RUN_ID, keep_saves=True)
@@ -371,7 +409,9 @@ def test_quarantine_pattern_folders_without_a_valid_run_or_marker_are_kept(insta
     (marker_dir / remote.MARKER).mkdir()
     (marker_dir / "note.txt").write_bytes(b"kept")
     result = remote.uninstall(RUN_ID)
-    assert result["uninstalled"] is True and "warning" not in result
+    assert not result["uninstalled"] and result["removalPending"]
+    assert "manually" in result["warning"]
+    assert set(result["retainedQuarantinePaths"]) == {str(decoy), str(unmarked), str(forged), str(marker_dir)}
     assert (decoy / "notes.txt").read_bytes() == b"user data"
     assert (unmarked / "stray.txt").read_bytes() == b"not ours"
     assert (forged / "precious.bin").read_bytes() == b"user data"
@@ -383,27 +423,31 @@ def test_unfinishable_leftover_is_named_and_skipped_instead_of_blocking(installa
     quarantine = remote.GAME.parent / (".HaloCENativeVR-uninstall-" + "2" * 32)
     quarantine.mkdir()
     (quarantine / remote.MARKER).write_text(json.dumps({"owner": remote.OWNER}))
+    record_quarantine(remote, "2" * 32, quarantine)
     outside = remote.HOME / "foreign.map"
     outside.write_bytes(b"outside file")
     os.link(outside, quarantine / "linked.map")
     result = remote.uninstall(RUN_ID, keep_saves=True)
-    assert result["uninstalled"] is True
+    assert not result["uninstalled"] and result["removalPending"]
     assert (quarantine / "linked.map").is_file() and outside.read_bytes() == b"outside file"
     assert str(quarantine) in result["warning"] and "manually" in result["warning"]
 
 
 def test_many_leftovers_are_all_removed_with_a_bounded_warning(installation):
     remote, _, _, _, _ = installation
-    os.rename(remote.GAME, remote.GAME.parent / (".HaloCENativeVR-uninstall-" + "3" * 32))
+    quarantine = remote.GAME.parent / (".HaloCENativeVR-uninstall-" + "3" * 32)
+    os.rename(remote.GAME, quarantine)
+    record_quarantine(remote, "3" * 32, quarantine)
     for index in range(40):
         folder = remote.GAME.parent / (".HaloCENativeVR-uninstall-" + f"{index:032x}")
         folder.mkdir()
         (folder / remote.MARKER).write_text(json.dumps({"owner": remote.OWNER}))
         (folder / "halo").write_bytes(b"earlier binary")
+        record_quarantine(remote, f"{index:032x}", folder)
     result = remote.uninstall(RUN_ID, keep_saves=True)
     assert result["uninstalled"] is True and result["alreadyAbsent"] is False
     assert not list((remote.GAME.parent).glob(".HaloCENativeVR-uninstall-*"))
-    assert len(result["warning"]) <= 4096 and "earlier notes omitted" in result["warning"]
+    assert len(result["warning"]) <= remote.MAX_WARNING_CHARS and "additional notes omitted" in result["warning"]
 
 
 def test_saves_note_requires_an_owned_backup_marker(installation):
@@ -414,9 +458,275 @@ def test_saves_note_requires_an_owned_backup_marker(installation):
     os.rename(remote.GAME, quarantine)
     saved.mkdir()
     (saved / remote.MARKER).write_text(json.dumps({"owner": "someone-else"}))
+    record_quarantine(remote, previous, quarantine)
+    journal = remote.CACHE / "runs" / previous / remote.MARKER
+    metadata = json.loads(journal.read_text())
+    metadata["savedBackupPath"] = str(saved)
+    journal.write_text(json.dumps(metadata))
     result = remote.uninstall(RUN_ID, keep_saves=True)
-    assert result["uninstalled"] is True and not quarantine.exists()
-    assert str(quarantine) in result["warning"] and str(saved) not in result["warning"]
+    assert not result["uninstalled"] and quarantine.exists() and result["removalPending"]
+    assert str(quarantine) in result["warning"] and result["recoveredSaveBackupPaths"] == []
+
+
+@pytest.mark.parametrize("same_run", [False, True])
+@pytest.mark.parametrize("keep_saves", [False, True])
+def test_retry_finishes_markerless_quarantine_after_root_removal_failure(
+        installation, monkeypatch, same_run, keep_saves):
+    remote, _, _, _, _ = installation
+    quarantine = remote.GAME.parent / (".HaloCENativeVR-uninstall-" + RUN_ID)
+    saved = remote.GAME.parent / ("HaloCENativeVR-saves-" + RUN_ID)
+    real_rmdir = Path.rmdir
+
+    def fail_root(path, *args, **kwargs):
+        if path == quarantine:
+            raise OSError("root directory removal interrupted")
+        return real_rmdir(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "rmdir", fail_root)
+        with pytest.raises(RuntimeError, match="Remaining native files"):
+            remote.uninstall(RUN_ID, keep_saves=keep_saves)
+    assert quarantine.is_dir() and not list(quarantine.iterdir())
+    journal = json.loads((remote.CACHE / "runs" / RUN_ID / remote.MARKER).read_text())
+    assert journal["quarantineRoot"] == remote.uninstall_root_identity(quarantine)
+    before = {str(path.relative_to(saved)): path.read_bytes() for path in saved.rglob("*") if path.is_file()}
+    result = remote.uninstall(RUN_ID if same_run else "d" * 32, keep_saves=keep_saves)
+    assert result["uninstalled"] and not result["alreadyAbsent"] and not result["removalPending"]
+    assert not quarantine.exists()
+    assert {str(path.relative_to(saved)): path.read_bytes() for path in saved.rglob("*") if path.is_file()} == before
+    assert result["recoveredSaveBackupPaths"] == ([str(saved)] if keep_saves else [])
+    assert result["savedBackupPath"] == (str(saved) if keep_saves and same_run else None)
+
+
+def test_quarantine_journal_precedes_the_rename_and_survives_that_crash_window(installation, monkeypatch):
+    remote, _, _, _, _ = installation
+    real_rename = remote.rename_noreplace
+    seen = []
+
+    def check(source, target):
+        if source == remote.GAME:
+            metadata = remote.private_json(remote.CACHE / "runs" / RUN_ID / remote.MARKER,
+                                           remote.CACHE / "runs" / RUN_ID)
+            assert metadata["state"] == "quarantining"
+            assert metadata["quarantinePath"] == str(target)
+            assert metadata["quarantineRoot"] == remote.uninstall_root_identity(source)
+            seen.append(metadata)
+        real_rename(source, target)
+
+    monkeypatch.setattr(remote, "rename_noreplace", check)
+    assert remote.uninstall(RUN_ID, keep_saves=True)["uninstalled"]
+    assert len(seen) == 1
+    # A process killed after rename but before the next journal update leaves
+    # this exact state. It remains sufficient proof even without a game marker.
+    quarantine = remote.GAME.parent / (".HaloCENativeVR-uninstall-" + "d" * 32)
+    quarantine.mkdir()
+    (quarantine / "remaining.bin").write_bytes(b"native remainder")
+    record = record_quarantine(remote, "d" * 32, quarantine)
+    metadata = json.loads(record.read_text())
+    metadata["state"] = "quarantining"
+    record.write_text(json.dumps(metadata))
+    assert remote.uninstall("e" * 32)["uninstalled"] and not quarantine.exists()
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "foreign-owner", "foreign-operation", "wrong-path",
+                                  "complete", "oversize", "hardlink", "invalid-root", "foreign-marker"])
+def test_unverified_quarantine_journals_are_reported_and_never_adopted(installation, damage):
+    remote, _, _, _, _ = installation
+    previous = "d" * 32
+    quarantine = remote.GAME.parent / (".HaloCENativeVR-uninstall-" + previous)
+    os.rename(remote.GAME, quarantine)
+    record = record_quarantine(remote, previous, quarantine)
+    metadata = json.loads(record.read_text())
+    if damage == "missing":
+        record.unlink()
+    elif damage == "corrupt":
+        record.write_text("{broken")
+    elif damage == "oversize":
+        record.write_bytes(b"x" * (remote.MAX_MANIFEST_BYTES + 1))
+    elif damage == "hardlink":
+        os.link(record, remote.HOME / "copied-journal.json")
+    elif damage == "foreign-marker":
+        (quarantine / remote.MARKER).write_text('{"owner":"another-application"}')
+    else:
+        key, value = {"foreign-owner": ("owner", "other"), "foreign-operation": ("operation", "install"),
+                      "wrong-path": ("quarantinePath", str(remote.HOME / "unrelated")),
+                      "complete": ("state", "complete"), "invalid-root": ("quarantineRoot", {"device": True})}[damage]
+        metadata[key] = value
+        record.write_text(json.dumps(metadata))
+    before = {str(path.relative_to(quarantine)): path.read_bytes() for path in quarantine.rglob("*") if path.is_file()}
+    result = remote.uninstall(RUN_ID)
+    assert not result["uninstalled"] and not result["alreadyAbsent"] and result["removalPending"]
+    assert result["retainedQuarantinePaths"] == [str(quarantine)] and str(quarantine) in result["warning"]
+    assert {str(path.relative_to(quarantine)): path.read_bytes() for path in quarantine.rglob("*") if path.is_file()} == before
+
+
+def test_copied_known_owner_marker_does_not_authorize_unrelated_folder_deletion(installation):
+    remote, _, _, _, _ = installation
+    quarantine = remote.GAME.parent / (".HaloCENativeVR-uninstall-" + "d" * 32)
+    quarantine.mkdir()
+    (quarantine / remote.MARKER).write_bytes((remote.GAME / remote.MARKER).read_bytes())
+    (quarantine / "precious.bin").write_bytes(b"user data")
+    result = remote.uninstall(RUN_ID)
+    assert result["removalPending"] and not result["uninstalled"]
+    assert (quarantine / "precious.bin").read_bytes() == b"user data"
+    assert str(quarantine) in result["warning"]
+
+
+def test_replaced_quarantine_root_is_kept_even_if_the_old_marker_was_copied(installation):
+    remote, _, _, _, _ = installation
+    previous = "d" * 32
+    quarantine = remote.GAME.parent / (".HaloCENativeVR-uninstall-" + previous)
+    os.rename(remote.GAME, quarantine)
+    record_quarantine(remote, previous, quarantine)
+    intact = remote.GAME.parent / "original-quarantined-game"
+    os.rename(quarantine, intact)
+    quarantine.mkdir()
+    (quarantine / remote.MARKER).write_bytes((intact / remote.MARKER).read_bytes())
+    (quarantine / "precious.bin").write_bytes(b"replacement data")
+    result = remote.uninstall(RUN_ID)
+    assert result["removalPending"] and "identity" in result["warning"]
+    assert (quarantine / "precious.bin").read_bytes() == b"replacement data"
+    assert (intact / "halo").read_bytes() == b"damaged native executable"
+
+
+def test_markerless_legacy_quarantine_is_named_and_kept_for_manual_review(installation):
+    remote, _, _, _, _ = installation
+    previous = "d" * 32
+    quarantine = remote.GAME.parent / (".HaloCENativeVR-uninstall-" + previous)
+    os.rename(remote.GAME, quarantine)
+    record_quarantine(remote, previous, quarantine, legacy=True)
+    (quarantine / remote.MARKER).unlink()
+    result = remote.uninstall(RUN_ID)
+    assert result["removalPending"] and "older uninstall" in result["warning"]
+    assert (quarantine / "save/profile.sav").read_bytes() == b"campaign progress"
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt-marker", "oversize-marker", "foreign-marker",
+                                  "hardlink", "changed-content", "empty", "symlink-root", "symlink-child"])
+def test_unverifiable_save_backup_preserves_quarantine_and_all_backup_data(installation, damage):
+    remote, _, _, _, _ = installation
+    previous = "d" * 32
+    quarantine = remote.GAME.parent / (".HaloCENativeVR-uninstall-" + previous)
+    saved = remote.GAME.parent / ("HaloCENativeVR-saves-" + previous)
+    os.rename(remote.GAME, quarantine)
+    saved.mkdir()
+    (saved / "campaign.sav").write_bytes(b"previous campaign")
+    record_quarantine(remote, previous, quarantine, saved)
+    marker = saved / remote.MARKER
+    protected = None
+    if damage == "missing":
+        (saved / "campaign.sav").unlink()
+        marker.unlink()
+        saved.rmdir()
+    elif damage == "corrupt-marker":
+        marker.write_text("not-json")
+    elif damage == "oversize-marker":
+        marker.write_bytes(b"x" * (remote.MAX_MANIFEST_BYTES + 1))
+    elif damage == "foreign-marker":
+        marker.write_text('{"owner":"another-application"}')
+    elif damage == "hardlink":
+        protected = remote.HOME / "protected-campaign.sav"
+        os.link(saved / "campaign.sav", protected)
+    elif damage == "changed-content":
+        (saved / "campaign.sav").write_bytes(b"modified campaign")
+    elif damage == "empty":
+        (saved / "campaign.sav").unlink()
+    else:
+        protected = remote.HOME / "protected-saves"
+        protected.mkdir()
+        (protected / "keep.sav").write_bytes(b"external campaign")
+        if damage == "symlink-root":
+            os.rename(saved, remote.GAME.parent / "actual-backup")
+            link = saved
+        else:
+            link = saved / "linked"
+        try:
+            link.symlink_to(protected, target_is_directory=True)
+        except OSError:
+            pytest.skip("Windows symlink creation requires additional privileges.")
+    before = {str(path): path.read_bytes() for path in saved.rglob("*") if path.is_file() and not path.is_symlink()}
+    result = remote.uninstall(RUN_ID, keep_saves=True)
+    assert not result["uninstalled"] and result["removalPending"] and quarantine.exists()
+    assert result["recoveredSaveBackupPaths"] == []
+    assert (quarantine / "save/profile.sav").read_bytes() == b"campaign progress"
+    assert {str(path): path.read_bytes() for path in saved.rglob("*") if path.is_file() and not path.is_symlink()} == before
+    if protected:
+        assert (protected.read_bytes() if protected.is_file() else (protected / "keep.sav").read_bytes()) in (
+            b"previous campaign", b"external campaign")
+
+
+def test_same_device_bind_mount_in_a_quarantine_is_kept(installation, monkeypatch):
+    remote, _, _, _, _ = installation
+    previous = "d" * 32
+    quarantine = remote.GAME.parent / (".HaloCENativeVR-uninstall-" + previous)
+    os.rename(remote.GAME, quarantine)
+    record_quarantine(remote, previous, quarantine)
+    monkeypatch.setattr(remote, "uninstall_mounts", lambda: [quarantine / "maps"])
+    result = remote.uninstall(RUN_ID)
+    assert result["removalPending"] and "mount" in result["warning"]
+    assert (quarantine / "maps/a10.map").read_bytes() == b"damaged or incomplete Xbox maps"
+
+
+def test_recovery_and_verified_saves_are_reported_when_steam_removal_is_pending(installation, monkeypatch):
+    remote, steam, _, _, _ = installation
+    previous = "d" * 32
+    quarantine = remote.GAME.parent / (".HaloCENativeVR-uninstall-" + previous)
+    saved = remote.GAME.parent / ("HaloCENativeVR-saves-" + previous)
+    os.rename(remote.GAME, quarantine)
+    saved.mkdir()
+    (saved / "campaign.sav").write_bytes(b"earlier campaign")
+    record_quarantine(remote, previous, quarantine, saved)
+    monkeypatch.setattr(steam, "steam_running", lambda: True)
+    result = remote.uninstall(RUN_ID)
+    assert not result["uninstalled"] and result["steam"]["status"] == "manual"
+    assert not quarantine.exists() and str(quarantine) in result["warning"]
+    assert result["savedBackupPath"] is None and result["recoveredSaveBackupPaths"] == [str(saved)]
+    assert (saved / "campaign.sav").read_bytes() == b"earlier campaign"
+
+
+def test_recovery_has_bounded_work_and_can_continue_on_another_run(installation, monkeypatch):
+    remote, _, _, _, _ = installation
+    previous = "d" * 32
+    quarantine = remote.GAME.parent / (".HaloCENativeVR-uninstall-" + previous)
+    os.rename(remote.GAME, quarantine)
+    record_quarantine(remote, previous, quarantine)
+    monkeypatch.setattr(remote, "MAX_UNINSTALL_RECOVERIES", 4)
+    for index in range(5):
+        identifier = f"{index:032x}"
+        path = remote.GAME.parent / (".HaloCENativeVR-uninstall-" + identifier)
+        path.mkdir()
+        (path / "remaining.bin").write_bytes(b"verified remainder")
+        record_quarantine(remote, identifier, path)
+    result = remote.uninstall(RUN_ID)
+    assert not result["uninstalled"] and result["removalPending"] and not result["alreadyAbsent"]
+    assert len(list(remote.GAME.parent.glob(".HaloCENativeVR-uninstall-*"))) == 2
+    assert "one operation" in result["warning"] and len(result["warning"]) <= remote.MAX_WARNING_CHARS
+    assert remote.uninstall("e" * 32)["uninstalled"]
+    assert not list(remote.GAME.parent.glob(".HaloCENativeVR-uninstall-*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows forbids these Unix filename characters.")
+@pytest.mark.parametrize("suffix", ["bad\nname", "bad\\name", "bad\x7fname"])
+def test_unreportable_quarantine_filenames_stay_pending_without_unsafe_path_fields(installation, suffix):
+    remote, _, _, _, _ = installation
+    quarantine = remote.GAME.parent / (".HaloCENativeVR-uninstall-" + suffix)
+    quarantine.mkdir()
+    (quarantine / "precious.bin").write_bytes(b"user data")
+    result = remote.uninstall(RUN_ID)
+    assert result["removalPending"] and not result["uninstalled"]
+    assert result["retainedQuarantinePaths"] == []
+    assert (quarantine / "precious.bin").read_bytes() == b"user data"
+    assert ascii(quarantine.name) in result["warning"]
+
+
+def test_absent_games_parent_needs_no_creation_or_cleanup(installation):
+    remote, _, _, _, _ = installation
+    protected = remote.HOME / "original-games"
+    os.rename(remote.GAME.parent, protected)
+    result = remote.uninstall(RUN_ID)
+    assert result["uninstalled"] and result["alreadyAbsent"] and not result["removalPending"]
+    assert not remote.GAME.parent.exists()
+    assert (protected / "HaloCEVR/halo.exe").read_bytes() == b"old PC version; this operation must not delete it"
 
 
 def test_failure_before_first_delete_restores_the_intact_game_folder(installation, monkeypatch):
@@ -506,14 +816,14 @@ def test_save_backup_prerequisite_failure_keeps_game_and_steam_untouched(install
 
 def test_completed_removal_is_not_reported_as_failed_if_operation_bookkeeping_fails(installation, monkeypatch):
     remote, _, _, _, _ = installation
-    real_write = Path.write_text
+    real_write = remote.write_uninstall_record
 
-    def write(path, content, *args, **kwargs):
-        if path.parent.name == RUN_ID and '"state": "complete"' in content:
+    def write(directory, metadata, *args, **kwargs):
+        if directory.name == RUN_ID and metadata.get("state") == "complete":
             raise OSError("operation record update failed")
-        return real_write(path, content, *args, **kwargs)
+        return real_write(directory, metadata, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "write_text", write)
+    monkeypatch.setattr(remote, "write_uninstall_record", write)
     result = remote.uninstall(RUN_ID)
     assert result["uninstalled"] is True and not remote.GAME.exists()
     assert "operation record" in result["warning"]

@@ -844,7 +844,7 @@ class App(tk.Tk):
         Button(links, "Native VR source", lambda:webbrowser.open(SOURCE_URL),
                subtle=True, background=SURFACE).pack(anchor="w")
         Button(links, "Installer project & documentation",
-               lambda:webbrowser.open("https://github.com/ClassicWasTaken/HaloCE-SteamFrame"),
+               lambda:webbrowser.open("https://github.com/ClassicWasTaken/HaloSteamFrameMod"),
                subtle=True, background=SURFACE).pack(anchor="w")
 
     def _redact(self, text):
@@ -1212,6 +1212,8 @@ class App(tk.Tk):
                 elif kind == "complete":
                     result = event[1]
                     self.last_result = result
+                    cleanup_warning = self._redact(getattr(result, "cleanup_warning", None) or "")
+                    cleanup_pending = bool(cleanup_warning)
                     library_update = getattr(self, "operation", None) == "library"
                     action = "repaired" if getattr(result, "repaired", False) else "installed"
                     done = ("Halo's Steam library info has been updated. Your native game and saves were kept." if library_update else
@@ -1239,7 +1241,7 @@ class App(tk.Tk):
                     info_pending = artwork_pending or icon_pending or notes_pending
                     if library_update and info_pending and not result.requires_manual_steam_step:
                         done = "Native Halo VR was kept; some Steam library info needs one more step. Your game and saves are unchanged."
-                    self.progress_state.finish(pending=result.requires_manual_steam_step or info_pending)
+                    self.progress_state.finish(pending=result.requires_manual_steam_step or info_pending or cleanup_pending)
                     self._display_progress()
                     if artwork_pending:
                         done += "\n\nHalo library art needs one more step.\n" + artwork.get("reason", "")
@@ -1254,34 +1256,51 @@ class App(tk.Tk):
                             done += "\nClick View game description to copy the note."
                     elif notes.get("status") == "custom":
                         done += "\n\nYour existing custom game note was kept."
+                    if cleanup_pending:
+                        done += "\n\nThe game operation finished; connection cleanup needs attention.\n" + cleanup_warning
                     if info_pending:
                         self.retry_button.pack(anchor="w", pady=(11, 0))
                     done = self._redact(done)
                     self.phase.set("One more step in Steam" if result.requires_manual_steam_step
                                    else "Ready to play · Steam info pending" if info_pending
+                                   else "Connection cleanup needs attention" if cleanup_pending
                                    else "Steam info updated" if library_update
                                    else "You're ready to play")
                     self.status.set(done)
                     self._append(done)
                     extra = "" if library_update else "\n\nXbox controls and motion aiming are enabled. The native port uses its own multiplayer protocol; legacy PC servers and PC saves are incompatible."
-                    messagebox.showinfo("Steam info updated" if library_update and not info_pending and not result.requires_manual_steam_step
+                    messagebox.showinfo("Connection cleanup needs attention" if cleanup_pending
+                                        else "Steam info updated" if library_update and not info_pending and not result.requires_manual_steam_step
                                         else "Steam info needs attention" if library_update else "Setup complete", done + extra, parent=self)
                 elif kind == "uninstall_complete":
                     result = event[1]
                     self.last_result = None
                     self.last_uninstall_result = result
-                    pending = bool(getattr(result, "requires_manual_steam_step", False))
+                    steam_pending = bool(getattr(result, "requires_manual_steam_step", False))
+                    removal_pending = bool(getattr(result, "removal_pending", False))
+                    cleanup_warning = self._redact(getattr(result, "cleanup_warning", None) or "")
+                    pending = steam_pending or removal_pending or bool(cleanup_warning)
                     self.progress_state.finish(pending=pending)
                     self._display_progress()
-                    if pending:
+                    if steam_pending:
                         done = "Uninstall needs one more step in Steam.\n" + result.steam.get("reason", "")
                         done += "\n" + result.steam.get("instructions", STEAM_REMOVE_NOTE)
+                    elif removal_pending:
+                        done = "Some files from an earlier uninstall were kept for manual review. Removal is not complete."
                     elif result.already_absent:
                         done = "Native Halo VR was already absent. Uninstall checks are complete."
                     else:
                         done = "Native Halo VR has been uninstalled from your Frame."
                     if result.saved_backup_path:
                         done += "\n\nCampaign save backup: " + result.saved_backup_path
+                    if getattr(result, "removal_warning", None):
+                        done += "\n\n" + result.removal_warning
+                    for backup in getattr(result, "recovered_save_backup_paths", ()):
+                        done += "\nEarlier campaign save backup: " + backup
+                    for retained in getattr(result, "retained_quarantine_paths", ()):
+                        done += "\nPreserved uninstall folder: " + retained
+                    if cleanup_warning:
+                        done += "\n\nConnection cleanup needs attention.\n" + cleanup_warning
                     done = self._redact(done)
                     self.phase.set("Uninstall needs attention" if pending else "Halo VR uninstalled")
                     self.status.set(done)

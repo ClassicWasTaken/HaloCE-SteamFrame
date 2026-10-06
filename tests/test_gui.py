@@ -1345,3 +1345,72 @@ def test_cancel_during_install_revalidation_stops_before_extraction_and_clears_c
     assert 'offline-secret' not in '\n'.join(app.log_lines)
     assert float(app.progress['value']) == 0
     assert not _disabled(app.primary_button)
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('operation', ['install', 'library'])
+def test_completed_game_operation_reports_pending_connection_cleanup(app, operation):
+    from halo_frame_installer.install import InstallResult
+    app.operation = operation
+    app.password_to_redact = 'offline-secret'
+    result = InstallResult('/home/steamos/Games/HaloCENativeVR', False,
+        {'status': 'added', 'notes': {'status': 'added'}}, None,
+        cleanup_warning='Unplug the USB cable; cleanup is pending. offline-secret')
+    app.events.put(('complete', result))
+    app.events.put(('clear_password',))
+    app.events.put(('idle',))
+    _drain_events(app)
+    assert float(app.progress['value']) == 99
+    assert app.phase.get() == 'Connection cleanup needs attention'
+    assert 'game operation finished' in app.status.get()
+    assert 'Unplug the USB cable' in app.status.get()
+    assert not app.retry_button.winfo_manager()
+    assert 'offline-secret' not in app.status.get()
+    assert 'offline-secret' not in '\n'.join(app.log_lines)
+    assert app._test_dialogs[-1][0] == 'Connection cleanup needs attention'
+    assert not app.busy and not app.installing
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('pending', [False, True])
+def test_uninstall_recovery_reports_retained_files_and_earlier_save_backups(app, pending):
+    from halo_frame_installer.install import UninstallResult
+    backup = '/home/steamos/Games/HaloCENativeVR-saves-' + 'a'*32
+    retained = '/home/steamos/Games/.HaloCENativeVR-uninstall-unverified'
+    app.password_to_redact = 'offline-secret'
+    result = UninstallResult('/home/steamos/Games/HaloCENativeVR', not pending, False, None,
+        {'status': 'removed'}, None, removal_pending=pending,
+        removal_warning='Earlier uninstall files ' + ('were retained' if pending else 'were removed') + '. offline-secret',
+        recovered_save_backup_paths=(backup,), retained_quarantine_paths=(retained,) if pending else ())
+    app.events.put(('uninstall_complete', result))
+    app.events.put(('clear_password',))
+    app.events.put(('idle',))
+    _drain_events(app)
+    assert float(app.progress['value']) == (99 if pending else 100)
+    assert 'Earlier campaign save backup: ' + backup in app.status.get()
+    assert 'already absent' not in app.status.get()
+    assert 'offline-secret' not in app.status.get()
+    assert 'offline-secret' not in '\n'.join(app.log_lines)
+    if pending:
+        assert 'Preserved uninstall folder: ' + retained in app.status.get()
+        assert 'Removal is not complete' in app.status.get()
+        assert 'has been uninstalled' not in app.status.get()
+        assert app._test_dialogs[-1][0] == 'Uninstall needs attention'
+    else:
+        assert 'has been uninstalled' in app.status.get()
+        assert app._test_dialogs[-1][0] == 'Uninstall complete'
+
+
+@WINDOWS_GUI
+def test_uninstalled_game_reports_pending_connection_cleanup(app):
+    from halo_frame_installer.install import UninstallResult
+    result = UninstallResult('/home/steamos/Games/HaloCENativeVR', True, False, None,
+        {'status': 'removed'}, None, cleanup_warning='Unplug the USB cable before retrying setup.')
+    app.events.put(('uninstall_complete', result))
+    app.events.put(('idle',))
+    _drain_events(app)
+    assert float(app.progress['value']) == 99
+    assert 'has been uninstalled' in app.status.get()
+    assert 'Connection cleanup needs attention' in app.status.get()
+    assert 'Unplug the USB cable' in app.status.get()
+    assert app._test_dialogs[-1][0] == 'Uninstall needs attention'

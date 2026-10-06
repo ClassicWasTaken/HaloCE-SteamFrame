@@ -327,12 +327,13 @@ def remove_shortcut(data: bytes, executable: str) -> tuple[bytes, list[int]]:
         # lets users rename library entries, and the live client path treats
         # an entry pointing at the native executable as owned as well. Match
         # the path exactly, bare or quoted once, like the live client does.
-        # A malformed app ID leaves the entry in place instead of aborting
-        # the removal of the valid ones.
+        # A malformed exact-native record blocks the transaction: treating it
+        # as absent would let uninstall delete the game while leaving its
+        # shortcut behind. Validate every account before publishing changes.
         if path is not None and path.kind == 1 and path.value in (executable, f'"{executable}"'):
             appid = fields.get("appid")
             if appid is None or appid.kind != 2 or not 2 ** 31 <= appid.value < 2 ** 32:
-                continue
+                raise ValueError("The native Halo shortcut has an invalid app ID; no changes were made.")
             matches.append(index)
             appids.append(appid.value)
     for index in matches:

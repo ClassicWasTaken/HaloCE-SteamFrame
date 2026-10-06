@@ -21,6 +21,10 @@ class SSHError(RuntimeError):
     pass
 
 
+class RemoteTimeoutError(SSHError):
+    """A started remote operation exceeded its bounded host wait."""
+
+
 class CancelledError(RuntimeError):
     pass
 
@@ -116,7 +120,7 @@ class SSHConnection:
     def host_fingerprint(self) -> str | None:
         return self.policy.accepted_fingerprint
 
-    def connect(self) -> None:
+    def connect(self, *, timeout: float = 15) -> None:
         from .usb import USBError, USBForward
         try:
             host, port = self.settings.host, self.settings.port
@@ -127,7 +131,11 @@ class SSHConnection:
             self.client.connect(host, port=port,
                                 username="steamos", password=self.settings.password,
                                 allow_agent=False, look_for_keys=False,
-                                timeout=15, auth_timeout=20, banner_timeout=20)
+                                timeout=timeout, auth_timeout=min(20, timeout + 5),
+                                banner_timeout=min(20, timeout + 5))
+            transport = self.client.get_transport()
+            if transport is not None:
+                transport.set_keepalive(15)
         except (paramiko.AuthenticationException, paramiko.PasswordRequiredException) as exc:
             self._close_after_failure()
             raise SSHError("SSH authentication failed. Check the Frame's steamos password.") from None
@@ -137,16 +145,17 @@ class SSHConnection:
         except SSHError:
             self._close_after_failure()
             raise
-        except (paramiko.SSHException, OSError, socket.timeout) as exc:
+        except (paramiko.SSHException, OSError, EOFError) as exc:
             self._close_after_failure()
             # Avoid displaying a library error that might include submitted credentials.
             message = ("Could not connect to the Frame over USB SSH. Check Developer Mode, the USB cable and the Frame's SSH service."
                        if self.settings.transport == "usb" else
                        "Could not connect to the Frame over SSH. Check its address, Wi-Fi / Ethernet connection, and SSH service.")
             raise SSHError(message) from None
+
+    def is_active(self) -> bool:
         transport = self.client.get_transport()
-        if transport is not None:
-            transport.set_keepalive(15)
+        return bool(not self._closed and transport is not None and transport.is_active())
 
     def _close_after_failure(self) -> None:
         try:
@@ -168,23 +177,43 @@ class SSHConnection:
                 pass
         self._sftp_clients.clear()
         self._command_channels.clear()
-        transport = self.client.get_transport()
+        failures = []
+        try:
+            transport = self.client.get_transport()
+        except Exception:
+            transport = None
+            failures.append("The SSH transport could not be checked during disconnection.")
         try:
             if transport is not None:
                 try:
                     transport.close()
+                except Exception:
+                    failures.append("The SSH transport could not finish closing.")
                 finally:
                     # Transport.close() may return early after a failed or
                     # already inactive session. Release its socket as well.
                     sock = getattr(transport, "sock", None)
                     if sock is not None:
-                        sock.close()
+                        try:
+                            sock.close()
+                        except Exception:
+                            failures.append("The setup connection's socket could not finish closing.")
         finally:
             try:
                 self.client.close()
+            except Exception:
+                failures.append("The SSH client could not finish closing.")
             finally:
                 self._closed = True
-                self._close_usb_forward()
+                try:
+                    self._close_usb_forward()
+                except SSHError as exc:
+                    failures.append(str(exc))
+        if failures:
+            message = "\n".join(failures)
+            if self.settings.password:
+                message = message.replace(self.settings.password, "[redacted]")
+            raise SSHError(message) from None
 
     def _close_usb_forward(self) -> None:
         if self._usb_forward is not None:
@@ -200,42 +229,42 @@ class SSHConnection:
             on_cancel: Callable[[], None] | None = None,
             timeout_message: str | None = None) -> str:
         """Run an argument vector; no secrets are put into a remote command."""
+        def notify_cancelled():
+            if on_cancel is not None:
+                try:
+                    on_cancel()
+                except Exception:
+                    pass  # The primary cancellation/timeout must always survive.
+
+        if cancel_event is not None and cancel_event.is_set():
+            notify_cancelled()
+            raise CancelledError("Installation cancelled. Existing games and saves were kept.")
         command = shlex.join([str(arg) for arg in argv])
+        started = time.monotonic()
         try:
-            _, stdout, _ = self.client.exec_command(command, timeout=30)
-        except (paramiko.SSHException, OSError, socket.timeout) as exc:
-            raise SSHError("The remote command could not be started. Check the Frame's connection and retry.") from exc
+            _, stdout, _ = self.client.exec_command(command, timeout=min(30, timeout))
+        except (paramiko.SSHException, OSError, EOFError):
+            if cancel_event is not None and cancel_event.is_set():
+                notify_cancelled()
+                raise CancelledError("Installation cancelled. Existing games and saves were kept.") from None
+            raise SSHError("The remote command could not be started. Check the Frame's connection and retry.") from None
         channel = stdout.channel
         self._command_channels.add(channel)
-        channel.set_combine_stderr(True)
         # Build output is delivered live to the activity callback. Keep only a
         # bounded response tail for the final result/error, rather than storing
         # the entire compilation a second time in memory.
         chunks: deque[bytes] = deque()
         retained_bytes = 0
         pending = bytearray()
-        started = time.monotonic()
-
-        def notify_cancelled():
-            # Best effort: a failed notification must not mask the cancellation
-            # or timeout error raised right after it. The host retries the
-            # remote cancel when it handles a cancellation; on a session this
-            # dead no retry could get through either.
-            if on_cancel is None:
-                return
-            try:
-                on_cancel()
-            except (SSHError, OSError, paramiko.SSHException):
-                pass
-
         try:
+            channel.set_combine_stderr(True)
             while True:
                 if cancel_event is not None and cancel_event.is_set():
                     notify_cancelled()
                     raise CancelledError("Installation cancelled. Existing games and saves were kept.")
                 if time.monotonic() - started > timeout:
                     notify_cancelled()
-                    raise SSHError(timeout_message or "The remote step timed out. You can reconnect and retry; existing games and saves were kept.")
+                    raise RemoteTimeoutError(timeout_message or "The remote step timed out. You can reconnect and retry; existing games and saves were kept.")
                 while channel.recv_ready():
                     data = channel.recv(65536)
                     if not data:
@@ -274,10 +303,19 @@ class SSHConnection:
                 safe = safe.replace(self.settings.password, "[redacted]")
                 raise SSHError(safe[-12000:].strip() or f"Remote step failed (exit {status}).")
             return result
+        except (paramiko.SSHException, OSError, EOFError):
+            if cancel_event is not None and cancel_event.is_set():
+                notify_cancelled()
+                raise CancelledError("Installation cancelled. Existing games and saves were kept.") from None
+            raise SSHError("The remote connection stopped before this step could be verified. Check the Frame's connection and retry.") from None
         finally:
             try:
                 channel.close()
-            finally:
+            except Exception:
+                # Final connection teardown will retry this resource and close
+                # its transport. A channel-close error cannot erase the result.
+                pass
+            else:
                 self._command_channels.discard(channel)
 
     def put(self, local: Path, remote: str, *, callback=None,
@@ -287,20 +325,23 @@ class SSHConnection:
                 raise CancelledError("Installation cancelled. Existing games and saves were kept.")
             if callback:
                 callback(done, total)
+        if cancel_event is not None and cancel_event.is_set():
+            raise CancelledError("Installation cancelled. Existing games and saves were kept.")
+        sftp = None
         try:
             sftp = self.client.open_sftp()
+            self._sftp_clients.add(sftp)
+            sftp.get_channel().settimeout(20)
+            sftp.put(str(local), remote, callback=update, confirm=True)
         except (OSError, EOFError, paramiko.SSHException):
             if cancel_event is not None and cancel_event.is_set():
                 raise CancelledError("Installation cancelled. Existing games and saves were kept.") from None
             raise SSHError("The encrypted file transfer stopped. Check the Frame's connection and retry.") from None
-        with sftp:
-            self._sftp_clients.add(sftp)
-            sftp.get_channel().settimeout(20)
-            try:
-                sftp.put(str(local), remote, callback=update, confirm=True)
-            except (OSError, EOFError, paramiko.SSHException):
-                if cancel_event is not None and cancel_event.is_set():
-                    raise CancelledError("Installation cancelled. Existing games and saves were kept.") from None
-                raise SSHError("The encrypted file transfer stopped. Check the Frame's connection and retry.") from None
-            finally:
-                self._sftp_clients.discard(sftp)
+        finally:
+            if sftp is not None:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass  # Connection teardown still owns and retries it.
+                else:
+                    self._sftp_clients.discard(sftp)

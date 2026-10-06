@@ -34,6 +34,7 @@ MAX_MAP_BYTES = 0x11600000
 MAX_TOTAL_BYTES = 4 * 1024 ** 3
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_WARNING_CHARS = 4000
+MAX_UNINSTALL_RECOVERIES = 64
 MAX_RETRY_RUNS = 32
 MAX_RETRY_ENTRIES = 256
 HOME = pathlib.Path("/home/steamos")
@@ -1112,6 +1113,40 @@ def uninstall_signature(details):
     return details.st_dev, details.st_ino, details.st_mode, details.st_uid, details.st_size, details.st_mtime_ns
 
 
+def uninstall_root_identity(directory):
+    """The directory's identity survives its rename and partial file removal."""
+    details = beneath(directory, HOME).lstat()
+    if not stat.S_ISDIR(details.st_mode) or details.st_uid != os.getuid():
+        raise ValueError("The uninstall folder is not an ordinary owned directory.")
+    return {"device": details.st_dev, "inode": details.st_ino, "uid": details.st_uid}
+
+
+def write_uninstall_record(directory, metadata, owner=OWNER):
+    """Publish a complete bounded journal before renaming the game directory."""
+    if metadata.get("owner") != owner:
+        raise ValueError("The uninstall record has an invalid owner.")
+    uninstall_root_identity(directory)
+    target = beneath(directory / MARKER, directory)
+    if target.exists():
+        current = private_json(target, directory)
+        if current.get("owner") != owner:
+            raise ValueError("The uninstall operation record belongs to another application.")
+    encoded = (json.dumps(metadata) + "\n").encode("utf-8")
+    if len(encoded) > MAX_MANIFEST_BYTES:
+        raise ValueError("The uninstall operation record exceeds supported bounds.")
+    temporary = directory / (".uninstall-record-" + os.urandom(8).hex() + ".tmp")
+    try:
+        with temporary.open("xb") as stream:
+            temporary.chmod(0o600)
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def uninstall_mounts():
     if not sys.platform.startswith("linux"):
         return []
@@ -1213,23 +1248,38 @@ def copy_uninstall_save(relative, target, signature):
         if details.st_nlink != 1 or uninstall_signature(details) != signature:
             raise ValueError("A save file changed while preparing its backup. Game files were kept.")
         target.parent.mkdir(parents=True, exist_ok=True)
+        checksum = hashlib.sha256()
+        copied = 0
         with target.open("xb") as output:
-            shutil.copyfileobj(stream, output, 1024 * 1024)
+            while True:
+                block = stream.read(min(1024 * 1024, details.st_size - copied + 1))
+                if not block:
+                    break
+                copied += len(block)
+                if copied > details.st_size:
+                    raise ValueError("A save file grew while preparing its backup. Game files were kept.")
+                output.write(block)
+                checksum.update(block)
             output.flush()
             os.fsync(output.fileno())
         if target.stat().st_size != details.st_size or uninstall_signature(os.fstat(stream.fileno())) != signature:
             raise ValueError("A save backup could not be verified. Game files were kept.")
         target.chmod(details.st_mode & 0o777)
         os.utime(target, ns=(details.st_atime_ns, details.st_mtime_ns))
+        expected = checksum.hexdigest()
+        if digest(target) != expected:
+            raise ValueError("A save backup failed content verification. Game files were kept.")
+        return {"size": details.st_size, "sha256": expected}
 
 
 def remove_uninstall_tree(directory, inventory, completed, total):
     """Unlink only validated paths, counting actual removal work for the UI."""
     files = [relative for relative, (kind, _) in inventory.items() if kind == "file"]
-    files.sort(key=lambda relative: (relative in (MARKER, ".codex-halo-native-install.json"), relative))
+    markers = [relative for relative in files if relative in (MARKER, ".codex-halo-native-install.json")]
+    files = sorted(relative for relative in files if relative not in markers)
     directories = sorted((relative for relative, (kind, _) in inventory.items() if kind == "directory"),
                          key=lambda relative: len(pathlib.Path(relative).parts), reverse=True)
-    for relative in files + directories:
+    for relative in files + directories + markers:
         path = beneath(directory / relative, directory)
         details = path.lstat()
         kind, signature = inventory[relative]
@@ -1249,54 +1299,178 @@ def remove_uninstall_tree(directory, inventory, completed, total):
     completed[0] += 1
 
 
+def same_uninstall_root(expected, directory):
+    if (not isinstance(expected, dict) or set(expected) != {"device", "inode", "uid"}
+            or any(type(value) is not int or value < 0 for value in expected.values())
+            or expected != uninstall_root_identity(directory)):
+        raise ValueError("The quarantine directory does not match its recorded uninstall identity.")
+
+
+def uninstall_quarantine_record(path, identifier):
+    """A name or copied owner marker is never enough to authorize deletion."""
+    run_id(identifier)
+    directory = beneath(CACHE / "runs" / identifier, CACHE)
+    uninstall_root_identity(directory)
+    metadata = private_json(directory / MARKER, directory)
+    if (metadata.get("owner") != OWNER or metadata.get("operation") != "uninstall"
+            or metadata.get("state") not in ("quarantining", "removing")
+            or metadata.get("quarantinePath") != str(path)):
+        raise ValueError("No matching private interrupted-uninstall record was found.")
+    root = metadata.get("quarantineRoot")
+    if root is not None:
+        same_uninstall_root(root, path)
+    recognized = False
+    for name, owner in ((MARKER, OWNER), (".codex-halo-native-install.json", "codex-halo-native-frame-20261005")):
+        marker = path / name
+        if marker.exists() or marker.is_symlink():
+            if private_json(marker, path).get("owner") != owner:
+                raise ValueError("A quarantine marker belongs to another application.")
+            recognized = True
+    # Older versions wrote the exact path and operation only after the rename.
+    # Their private journal plus the surviving native marker can corroborate
+    # ownership. A markerless legacy tree cannot be adopted automatically.
+    if root is None and not recognized:
+        raise ValueError("This older uninstall has no remaining identity proof; its folder was kept.")
+    return directory, metadata
+
+
+def verified_uninstall_backup(identifier, metadata):
+    """Check a recorded backup without following links or changing any saves."""
+    location = metadata.get("savedBackupPath")
+    if location is None:
+        return None
+    saved = GAME.parent / ("HaloCENativeVR-saves-" + run_id(identifier))
+    if not isinstance(location, str) or location != str(saved):
+        raise ValueError("The uninstall save backup path does not match its operation.")
+    if metadata.get("savedBackupRoot") is not None:
+        same_uninstall_root(metadata["savedBackupRoot"], saved)
+    inventory = uninstall_inventory(saved)
+    value = private_json(saved / MARKER, saved)
+    if value.get("owner") != OWNER + "-save-backup" or value.get("gamePath") != str(GAME):
+        raise ValueError("The recorded save backup has no valid native-game ownership record.")
+    actual = {relative for relative, (kind, _) in inventory.items() if kind == "file" and relative != MARKER}
+    if not actual:
+        raise ValueError("The recorded save backup contains no save or configuration files.")
+    files = value.get("files")
+    if files is not None:
+        if not isinstance(files, dict) or set(files) != actual:
+            raise ValueError("The recorded save backup files do not match its manifest.")
+        for relative, expected in files.items():
+            if (not isinstance(expected, dict) or type(expected.get("size")) is not int
+                    or expected["size"] < 0 or not isinstance(expected.get("sha256"), str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", expected["sha256"])):
+                raise ValueError("The recorded save backup manifest is invalid.")
+            target = ordinary(beneath(saved / relative, saved))
+            descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                                 | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(descriptor, "rb") as stream:
+                signature = inventory[relative][1]
+                details = os.fstat(stream.fileno())
+                if details.st_nlink != 1 or uninstall_signature(details) != signature:
+                    raise ValueError("A save backup changed during verification.")
+                checksum = hashlib.sha256()
+                read = 0
+                while True:
+                    block = stream.read(min(1024 * 1024, details.st_size - read + 1))
+                    if not block:
+                        break
+                    read += len(block)
+                    if read > details.st_size:
+                        raise ValueError("A save backup grew during verification.")
+                    checksum.update(block)
+                if uninstall_signature(os.fstat(stream.fileno())) != signature:
+                    raise ValueError("A save backup changed during verification.")
+            if details.st_size != expected["size"] or checksum.hexdigest() != expected["sha256"]:
+                raise ValueError("A recorded save backup file failed content verification.")
+    elif metadata.get("savedBackupRoot") is not None:
+        raise ValueError("The recorded save backup is missing its file verification manifest.")
+    if uninstall_inventory(saved) != inventory:
+        raise ValueError("The recorded save backup changed during verification.")
+    return str(saved)
+
+
 def recover_interrupted_uninstall():
-    """Finish removing quarantine folders an interrupted uninstall left behind."""
-    notes = []
-    for path in sorted(GAME.parent.glob(".HaloCENativeVR-uninstall-*")):
-        identifier = path.name[len(".HaloCENativeVR-uninstall-"):]
-        if path.is_symlink() or not re.fullmatch(r"[a-f0-9]{32}", identifier):
-            continue
-        # The quarantined game always carries a recognizable ownership marker;
-        # verify it like uninstall_identity does, so a folder that merely
-        # shares the name is never treated as ours.
-        owned_quarantine = False
-        for name in (MARKER, ".codex-halo-native-install.json"):
-            try:
-                if private_json(path / name, path).get("owner") in (OWNER, "codex-halo-native-frame-20261005"):
-                    owned_quarantine = True
-                    break
-            except (OSError, ValueError):
+    """Finish only journaled quarantines; report every bounded unresolved entry."""
+    recovery = {"notes": [], "removed": 0, "retained": [], "saved": [], "limited": False, "unlisted": 0}
+    prefix = ".HaloCENativeVR-uninstall-"
+    candidates = []
+    # Avoid sorting/materializing an unbounded glob of user-controlled entries.
+    beneath(GAME.parent, HOME)
+    if not GAME.parent.exists():
+        return recovery
+    with os.scandir(GAME.parent) as entries:
+        for entry in entries:
+            if not entry.name.startswith(prefix):
                 continue
-        if not owned_quarantine:
-            continue
-        progress("uninstall", "Finishing an earlier interrupted uninstall...", None)
-        game_closed((path / "halo",))
+            if len(candidates) >= MAX_UNINSTALL_RECOVERIES:
+                recovery["limited"] = True
+                break
+            candidates.append(GAME.parent / entry.name)
+    for path in sorted(candidates):
+        identifier = path.name[len(prefix):]
+        saved = None
         try:
-            remove_uninstall_tree(path, uninstall_inventory(path), [0], 0)
+            directory, metadata = uninstall_quarantine_record(path, identifier)
+            inventory = uninstall_inventory(path)
+            root = uninstall_root_identity(path)
+            saved = verified_uninstall_backup(identifier, metadata)
+            if saved is not None:
+                recovery["saved"].append(saved)
+            game_closed((path / "halo",))
+            progress("uninstall", "Finishing an earlier interrupted uninstall...", None)
+            if uninstall_inventory(path) != inventory or uninstall_root_identity(path) != root:
+                raise ValueError("The interrupted-uninstall folder changed during verification.")
+            remove_uninstall_tree(path, inventory, [0], 0)
         except (OSError, ValueError, RuntimeError) as error:
-            # A leftover that can no longer be validated must not block every
-            # future uninstall; finish the rest and name it for manual cleanup.
-            notes.append("An interrupted uninstall left a folder that could not be safely "
-                         "removed and was kept: " + str(path) + " (" + str(error) + "). "
-                         "Remove it manually if you no longer need it.")
+            reportable = (len(path.name) <= 255 and "\\" not in path.name
+                          and not any(ord(character) < 32 or ord(character) == 127 for character in path.name))
+            if reportable:
+                recovery["retained"].append(str(path))
+                displayed = str(path)
+            else:
+                recovery["unlisted"] += 1
+                displayed = str(path.parent) + "/" + ascii(path.name)
+            recovery["notes"].append("An unfinished uninstall folder could not be safely removed and was kept: "
+                                     + displayed + " (" + str(error)[:500] + "). Review it manually; "
+                                     "the installer did not assume ownership of unverified files."
+                                     + (" Verified campaign saves and configuration remain in " + saved + "." if saved else ""))
             continue
+        recovery["removed"] += 1
         note = "Finished removing native files left by an interrupted uninstall: " + str(path) + "."
-        saved = GAME.parent / ("HaloCENativeVR-saves-" + identifier)
+        if saved:
+            note += " Verified campaign saves and configuration from that uninstall remain in " + saved + "."
+        metadata["state"] = "complete"
         try:
-            read_marker(saved / MARKER, OWNER + "-save-backup")
+            write_uninstall_record(directory, metadata)
         except (OSError, ValueError):
-            pass
-        else:
-            note += " Campaign saves and configuration from that uninstall are in " + str(saved) + "."
-        notes.append(note)
-    return notes
+            note += " Its operation record could not be updated."
+        recovery["notes"].append(note)
+    if recovery["limited"]:
+        recovery["notes"].append("More unfinished uninstall folders remain than can be checked in one operation. "
+                                 "They were kept; run Uninstall again to continue, or review them manually.")
+    return recovery
 
 
 def join_notes(notes):
     warning = " ".join(notes)
     if len(warning) > MAX_WARNING_CHARS:
-        warning = warning[:MAX_WARNING_CHARS].rstrip() + " (earlier notes omitted)"
+        suffix = " (additional notes omitted; some folders may still need manual cleanup)"
+        warning = warning[:MAX_WARNING_CHARS - len(suffix)].rstrip() + suffix
     return warning
+
+
+def uninstall_recovery_result(response, recovery, notes=()):
+    pending = bool(recovery["retained"] or recovery["limited"] or recovery["unlisted"])
+    response["removalPending"] = pending
+    response["retainedQuarantinePaths"] = recovery["retained"]
+    response["recoveredSaveBackupPaths"] = list(dict.fromkeys(recovery["saved"]))
+    if pending:
+        response["uninstalled"] = False
+        response["alreadyAbsent"] = False
+    warning = join_notes([*recovery["notes"], *notes])
+    if warning:
+        response["warning"] = warning
+    return response
 
 
 def uninstall(value, close_steam=False, keep_saves=False):
@@ -1304,25 +1478,32 @@ def uninstall(value, close_steam=False, keep_saves=False):
     directory = run_dir(value)
     if directory.exists():
         metadata = private_json(directory / MARKER, directory)
-        if metadata.get("operation") != "uninstall":
+        if metadata.get("owner") != OWNER or metadata.get("operation") != "uninstall":
             raise ValueError("Use a fresh run identifier for uninstall.")
     else:
         metadata = owned(directory)
         metadata["operation"] = "uninstall"
-        (directory / MARKER).write_text(json.dumps(metadata) + "\n")
+        write_uninstall_record(directory, metadata)
     identity = uninstall_identity()
     game_closed()
     no_active_build()
     inventory = uninstall_inventory(GAME) if identity else {}
     save_files, external = uninstall_save_files(inventory) if identity and keep_saves else ([], [])
-    quarantine = beneath(GAME.parent / (".HaloCENativeVR-uninstall-" + value), HOME)
+    quarantine = GAME.parent / (".HaloCENativeVR-uninstall-" + value)
     saved = beneath(GAME.parent / ("HaloCENativeVR-saves-" + value), HOME)
     staging = beneath(GAME.parent / (".HaloCENativeVR-saves-" + value + ".tmp"), HOME)
-    for path in (quarantine, staging):
-        if path.exists() or path.is_symlink():
-            raise ValueError("An unfinished uninstall folder already exists: " + str(path))
+    if staging.exists() or staging.is_symlink():
+        raise ValueError("An unfinished save backup already exists and was kept: " + str(staging)
+                         + ". Use a fresh uninstall run.")
+    if identity and ((quarantine.exists() or quarantine.is_symlink())
+                     or metadata.get("state") == "complete"):
+        raise ValueError("A previous uninstall used this run identifier. Use a fresh uninstall run for the installed game.")
     if save_files and (saved.exists() or saved.is_symlink()):
         raise ValueError("The selected save backup already exists. Use a fresh uninstall run.")
+    if save_files:
+        needed = sum(inventory[relative][1][4] for relative in save_files)
+        if shutil.disk_usage(GAME.parent).free < needed + 1024 * 1024:
+            raise ValueError("There is not enough space to keep the selected save files. Game files were kept.")
     # Completing an earlier removal is still work this uninstall performs, but
     # only after every refusal above has cleared.
     recovered = recover_interrupted_uninstall()
@@ -1332,59 +1513,80 @@ def uninstall(value, close_steam=False, keep_saves=False):
     progress("uninstall", "Preparing to remove the managed native game and its Steam shortcut...", 0)
     try:
         if save_files:
-            needed = sum(inventory[relative][1][4] for relative in save_files)
-            if shutil.disk_usage(GAME.parent).free < needed + 1024 * 1024:
-                raise ValueError("There is not enough space to keep the selected save files. Game files were kept.")
             staging.mkdir(mode=0o700, exist_ok=False)
             staged = True
-            (staging / MARKER).write_text(json.dumps({"owner": OWNER + "-save-backup", "gamePath": str(GAME),
-                                                     "externalSavePathsPreserved": external}) + "\n")
+            backup_metadata = {"owner": OWNER + "-save-backup", "gamePath": str(GAME),
+                               "externalSavePathsPreserved": external, "files": {}}
+            write_uninstall_record(staging, backup_metadata, OWNER + "-save-backup")
             for relative in save_files:
-                copy_uninstall_save(relative, beneath(staging / relative, staging), inventory[relative][1])
+                backup_metadata["files"][relative] = copy_uninstall_save(
+                    relative, beneath(staging / relative, staging), inventory[relative][1])
                 completed[0] += 1
                 progress("uninstall", f"Keeping campaign saves and configuration: {completed[0]:,} files copied.",
                          completed[0] * 100 // total)
+            write_uninstall_record(staging, backup_metadata, OWNER + "-save-backup")
         sys.path.insert(0, str(CACHE / "resources"))
         from steam_shortcut import remove_native_shortcut
         steam = remove_native_shortcut(HOME, GAME, close_steam=close_steam)
         if steam.get("status") not in ("removed", "already-absent"):
-            return {"gamePath": str(GAME), "uninstalled": False, "savedBackupPath": None, "steam": steam}
+            existing_saved = None
+            notes = []
+            if not identity and metadata.get("savedBackupPath") is not None:
+                try:
+                    existing_saved = verified_uninstall_backup(value, metadata)
+                except (OSError, ValueError) as error:
+                    notes.append("The current operation's recorded save backup could not be verified and was left unchanged: "
+                                 + str(error)[:500] + ".")
+            return uninstall_recovery_result({"gamePath": str(GAME), "uninstalled": False,
+                                              "savedBackupPath": existing_saved, "steam": steam}, recovered, notes)
         if not identity:
             # Leftovers from an interrupted earlier run count as a removal this
             # run finished, not as "already absent": the user still gets the
             # completed-removal message and where that run's saves are.
-            response = {"gamePath": str(GAME), "uninstalled": True, "alreadyAbsent": not recovered,
-                        "savedBackupPath": metadata.get("savedBackupPath"), "steam": steam}
-            if recovered:
-                response["warning"] = join_notes(recovered)
-            return response
+            existing_saved = None
+            notes = []
+            if metadata.get("savedBackupPath") is not None:
+                try:
+                    existing_saved = verified_uninstall_backup(value, metadata)
+                except (OSError, ValueError) as error:
+                    notes.append("The current operation's recorded save backup could not be verified and was left unchanged: "
+                                 + str(error)[:500] + ".")
+            response = {"gamePath": str(GAME), "uninstalled": True, "alreadyAbsent": not recovered["removed"],
+                        "savedBackupPath": existing_saved, "steam": steam}
+            return uninstall_recovery_result(response, recovered, notes)
         game_closed()
         no_active_build()
         if uninstall_inventory(GAME) != inventory:
             raise ValueError("The native game folder changed during uninstall. Its files were kept.")
+        # The complete journal is published before either rename: recovery can prove
+        # a markerless partial removal using this directory's dev/inode/uid.
+        metadata.update({"quarantinePath": str(quarantine), "quarantineRoot": uninstall_root_identity(GAME),
+                         "savedBackupPath": str(saved) if staged else None,
+                         "savedBackupRoot": uninstall_root_identity(staging) if staged else None,
+                         "keepSaves": keep_saves, "state": "quarantining"})
+        write_uninstall_record(directory, metadata)
         if staged:
             rename_noreplace(staging, saved)
             staged, saved_path = False, str(saved)
+            verified_uninstall_backup(value, metadata)
         rename_noreplace(GAME, quarantine)
         renamed = True
-        metadata.update({"quarantinePath": str(quarantine), "savedBackupPath": saved_path, "state": "removing"})
-        (directory / MARKER).write_text(json.dumps(metadata) + "\n")
+        metadata["state"] = "removing"
+        write_uninstall_record(directory, metadata)
         game_closed((quarantine / "halo",))
         remove_uninstall_tree(quarantine, inventory, completed, total)
         renamed = False
         metadata["state"] = "complete"
-        notes = list(recovered)
+        notes = []
         try:
-            (directory / MARKER).write_text(json.dumps(metadata) + "\n")
+            write_uninstall_record(directory, metadata)
         except OSError:
             # Bookkeeping failure after deletion cannot undo a completed removal.
             notes.append("Halo was removed, but the installer operation record could not be updated.")
         progress("uninstall", "Native Halo and its Steam shortcut were removed.", 100)
         response = {"gamePath": str(GAME), "uninstalled": True, "savedBackupPath": saved_path,
                     "externalSavePathsPreserved": external, "steam": steam}
-        if notes:
-            response["warning"] = join_notes(notes)
-        return response
+        return uninstall_recovery_result(response, recovered, notes)
     except BaseException as error:
         if renamed and quarantine.exists():
             removals = completed[0] - len(save_files)

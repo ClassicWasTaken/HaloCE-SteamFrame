@@ -4,6 +4,12 @@ This community VR mod installer builds the experimental native ARM64 Linux VR po
 
 Sources were checked on 2026-10-05. Links to pinned files describe the build used here; moving documentation may describe newer behavior.
 
+## Installer contributions
+
+[dime-online](https://github.com/dime-online) contributed the fixes for [interrupted uninstalls (#7)](https://github.com/ClassicWasTaken/HaloSteamFrameMod/pull/7), [renamed native Steam shortcuts (#8)](https://github.com/ClassicWasTaken/HaloSteamFrameMod/pull/8), and [SSH cancellation/error handling (#9)](https://github.com/ClassicWasTaken/HaloSteamFrameMod/pull/9), addressing issues [#1](https://github.com/ClassicWasTaken/HaloSteamFrameMod/issues/1), [#2](https://github.com/ClassicWasTaken/HaloSteamFrameMod/issues/2), and [#3](https://github.com/ClassicWasTaken/HaloSteamFrameMod/issues/3). Release 1.3.5 builds on those contributions with operation-record and directory-identity checks before resuming file removal, explicit pending-removal and cleanup results, refusal of malformed native shortcut IDs before writes, and one bounded cancellation recovery connection using the already-approved host key.
+
+These changes affect installer recovery and library cleanup. The pinned native game source, controller/tutorial patch, and game-data requirements are unchanged. Automated regression coverage does not replace physical Frame verification of interruption, cancellation, and full uninstall.
+
 ## Native game and VR
 
 | Source | Contribution or verified requirement |

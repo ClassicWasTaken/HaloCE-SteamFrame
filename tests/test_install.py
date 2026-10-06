@@ -11,7 +11,7 @@ from unittest.mock import Mock
 import pytest
 
 from halo_frame_installer.install import EXPECTED_MAPS, Installer, SOURCE_COMMIT, close_connection, map_manifest, parse_result
-from halo_frame_installer.ssh import CancelledError, Settings, SSHError
+from halo_frame_installer.ssh import CancelledError, RemoteTimeoutError, Settings, SSHError
 
 RESOURCES = Path(__file__).resolve().parents[1] / "resources"
 
@@ -272,12 +272,132 @@ def test_cancelled_install_is_not_replaced_by_a_failed_disconnect():
 
 def test_close_connection_reports_a_swallowed_cleanup_failure():
     class FailingClose:
+        settings = Settings('', 'private', transport='usb')
         def close(self):
             raise SSHError("SSH has closed, but the temporary USB forward could not be removed.")
 
     seen = []
-    close_connection(FailingClose(), lambda *args: seen.append(args))
-    assert seen == [("detail", "SSH has closed, but the temporary USB forward could not be removed.", None)]
+    warning = close_connection(FailingClose(), lambda *args: seen.append(args))
+    assert warning.startswith('SSH has closed, but the temporary USB forward could not be removed.')
+    assert 'Unplug the USB cable' in warning
+    assert seen == [('detail', warning, None)]
+
+
+def test_successful_install_with_failed_cleanup_retains_result_and_needs_attention():
+    class ForwardCleanupFailure(FakeConnection):
+        def close(self):
+            self.closed = True
+            raise SSHError('USB forward cleanup failed private')
+    fake = ForwardCleanupFailure(Settings('', 'private', transport='usb', reinstall_existing=False))
+    events = []
+    result = Installer(lambda settings: fake, RESOURCES).run(fake.settings, None,
+        lambda *event: events.append(event))
+    assert result.steam_appid == 3732925724 and result.reused
+    assert result.connection_cleanup_pending and 'Unplug the USB cable' in result.cleanup_warning
+    assert 'private' not in result.cleanup_warning
+    assert 'disconnected' not in [event[0] for event in events]
+    assert 'complete' not in [event[0] for event in events]
+    assert events[-1][0] == 'cleanup-pending' and events[-1][2] == 99
+
+
+@pytest.mark.parametrize('primary_error', [CancelledError, RemoteTimeoutError, SSHError])
+@pytest.mark.parametrize('original_active', [False, True])
+def test_failed_remote_stop_uses_one_pinned_fresh_connection(primary_error, original_active):
+    class BrokenConnection(FakeConnection):
+        def is_active(self):
+            return original_active
+        def run(self, argv, **kwargs):
+            if argv[1] != '-c' and argv[2] == 'build':
+                self.commands.append(argv)
+                if primary_error is not SSHError:
+                    kwargs['on_cancel']()
+                messages = {CancelledError: 'Installation cancelled.',
+                            RemoteTimeoutError: 'The remote step timed out.',
+                            SSHError: 'The remote connection stopped before this step could be verified.'}
+                raise primary_error(messages[primary_error])
+            if argv[1] != '-c' and argv[2] == 'cancel':
+                self.commands.append(argv)
+                raise SSHError('Connection stopped')
+            return super().run(argv, **kwargs)
+    class RecoveryConnection(FakeConnection):
+        def connect(self, *, timeout):
+            self.connect_timeout = timeout
+        def run(self, argv, **kwargs):
+            self.commands.append(argv)
+            assert kwargs['timeout'] == 45 and 'cancel_event' not in kwargs
+            return 'HFI_RESULT {"cancelled":true}'
+    settings = Settings('frame', 'private', accept_host_key=Mock(side_effect=AssertionError('No new approval')))
+    original = BrokenConnection(settings)
+    created = []
+    def factory(current):
+        if not created:
+            created.append(original)
+            return original
+        recovery = RecoveryConnection(current)
+        created.append(recovery)
+        return recovery
+    events = []
+    with pytest.raises(primary_error) as error:
+        Installer(factory, RESOURCES).run(settings, None, lambda *event: events.append(event))
+    assert len(created) == 2
+    recovery = created[1]
+    build = next(command for command in original.commands if command[1] != '-c' and command[2] == 'build')
+    expected_id = build[build.index('--run-id') + 1]
+    assert recovery.commands == [['python3', '/home/steamos/.cache/halo-frame-installer/resources/remote_install.py', 'cancel', '--run-id', expected_id]]
+    assert recovery.connect_timeout == 10
+    assert recovery.settings.known_host_fingerprint == 'SHA256:public'
+    assert recovery.settings.accept_host_key is None and recovery.settings.known_host_fingerprints == {}
+    assert recovery.settings.password == '' and settings.password == 'private'
+    assert original.closed and recovery.closed
+    assert 'could not be confirmed' not in str(error.value)
+    assert not any(command[2] in ('finalize', 'shortcut') for command in original.commands if command[1] != '-c')
+    assert any(event[1] == 'Remote build cancellation confirmed.' for event in events)
+
+
+@pytest.mark.parametrize('failure', ['unapproved', 'changed-key', 'unconfirmed-response'])
+def test_unconfirmed_remote_stop_is_visible_without_masking_cancel(failure):
+    class BrokenConnection(FakeConnection):
+        def is_active(self):
+            return False
+        def run(self, argv, **kwargs):
+            if argv[1] != '-c' and argv[2] == 'build':
+                self.commands.append(argv)
+                raise CancelledError('Installation cancelled. Existing games and saves were kept.')
+            return super().run(argv, **kwargs)
+    settings = Settings('frame', 'private')
+    original = BrokenConnection(settings)
+    if failure == 'unapproved':
+        original.host_fingerprint = None
+    created = []
+    def factory(current):
+        if not created:
+            created.append(original)
+            return original
+        recovery = FakeConnection(current)
+        recovery.connect = Mock(side_effect=SSHError('SSH host key has changed.')) if failure == 'changed-key' else Mock()
+        recovery.run = Mock(return_value='HFI_RESULT {"cancelled":"true"}')
+        created.append(recovery)
+        return recovery
+    with pytest.raises(CancelledError) as error:
+        Installer(factory, RESOURCES).run(settings, None)
+    first_line = str(error.value).splitlines()[0]
+    assert 'cancelled' in first_line and 'Remote stopping could not be confirmed' in first_line
+    assert 'In the Frame\'s terminal, run: python3 /home/steamos/.cache/' in str(error.value)
+    assert 'private' not in str(error.value) and original.closed
+    assert len(created) == (1 if failure == 'unapproved' else 2)
+    if len(created) == 2:
+        assert created[1].closed and created[1].settings.password == ''
+
+
+def test_cleanup_display_failure_cannot_replace_the_primary_error():
+    fake = FakeConnection(Settings('frame', 'private'))
+    fake.close = Mock(side_effect=EOFError('private'))
+    def progress(stage, message, percent=None):
+        if stage == 'detail':
+            raise ValueError('Display failed')
+    with pytest.raises(SSHError, match='build failed') as error:
+        Installer(lambda settings: fake, RESOURCES).run(fake.settings, None, progress)
+    assert 'private' not in str(error.value)
 
 
 def test_cancelled_before_connect_has_no_remote_mutation():

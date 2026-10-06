@@ -7,9 +7,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/download/v1.3.4/Halo-Steam-Frame-Mod-Setup-1.3.4.exe"><strong>DOWNLOAD VR MOD INSTALLER v1.3.4 — WINDOWS EXE</strong></a><br>
+  <a href="https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/v1.3.5/Halo-Steam-Frame-Mod-Setup-1.3.5.exe"><strong>DOWNLOAD VR MOD INSTALLER v1.3.5 — WINDOWS EXE</strong></a><br>
   <sub>One installer file · No administrator rights needed</sub><br>
-  <a href="https://github.com/ClassicWasTaken/HaloCE-SteamFrame/releases/tag/v1.3.4">Release notes &amp; checksum</a>
+  <a href="https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/tag/v1.3.5">Release notes &amp; checksum</a>
 </p>
 
 **Community VR mod installer for Halo: Combat Evolved on Steam Frame.** Installs an experimental native ARM64/OpenXR port with Xbox-style controls and Steam library artwork.

@@ -30,6 +30,8 @@ PHASES = {
     "steam": (96, 99, "Updating Halo's Steam library information"),
     "disconnect": (99, 99, "Closing the setup connection"),
     "disconnected": (99, 99, "Disconnected from your Frame"),
+    "cleanup-pending": (99, 99, "Connection cleanup needs attention"),
+    "removal-pending": (99, 99, "Uninstall needs attention"),
     "complete": (99, 99, "Finishing setup"),
 }
 

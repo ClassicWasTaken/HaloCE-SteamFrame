@@ -9,11 +9,11 @@ import sys
 import tempfile
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
-from .ssh import CancelledError, Settings, SSHConnection, SSHError
+from .ssh import CancelledError, RemoteTimeoutError, Settings, SSHConnection, SSHError
 
 SOURCE_COMMIT = "88142798513ebd99fc7c6224023e8b44c05d0106"
 EXPECTED_MAPS = frozenset(name + ".map" for name in (
@@ -98,6 +98,11 @@ class InstallResult:
     source_commit: str = SOURCE_COMMIT
     repaired: bool = False
     backup_path: str | None = None
+    cleanup_warning: str | None = None
+
+    @property
+    def connection_cleanup_pending(self) -> bool:
+        return bool(self.cleanup_warning)
 
     @property
     def steam_appid(self) -> int | None:
@@ -116,23 +121,74 @@ class UninstallResult:
     saved_backup_path: str | None
     steam: dict
     host_fingerprint: str | None
+    cleanup_warning: str | None = None
+    removal_pending: bool = False
+    removal_warning: str | None = None
+    recovered_save_backup_paths: tuple[str, ...] = ()
+    retained_quarantine_paths: tuple[str, ...] = ()
+
+    @property
+    def connection_cleanup_pending(self) -> bool:
+        return bool(self.cleanup_warning)
 
     @property
     def requires_manual_steam_step(self) -> bool:
         return self.steam.get("status") not in ("removed", "already-absent")
 
 
-def close_connection(connection, progress: ProgressCallback) -> None:
-    """Disconnect without letting a cleanup failure replace an operation's own outcome.
+def cleanup_activity(progress: ProgressCallback, message: str) -> None:
+    try:
+        progress("detail", message, None)
+    except Exception:
+        pass  # A display callback cannot replace the operation outcome.
 
-    SSHConnection releases the transport and socket before USB-forward cleanup
-    can fail, so the connection is down either way. The failure itself can
-    still carry required user action, so it is reported as activity instead.
-    """
+
+def close_connection(connection, progress: ProgressCallback) -> str | None:
+    """Preserve the operation result, while keeping required cleanup visible."""
     try:
         connection.close()
-    except (SSHError, OSError) as error:
-        progress("detail", str(error), None)
+    except Exception as error:
+        settings = getattr(connection, "settings", None)
+        warning = (str(error)[:4000] if isinstance(error, SSHError) else
+                   "Setup could not verify that its connection finished closing.")
+        password = getattr(settings, "password", "")
+        if password:
+            warning = warning.replace(password, "[redacted]")
+        action = ("Unplug the USB cable to end setup's temporary connection before retrying."
+                  if getattr(settings, "transport", None) == "usb" else
+                  "Close this installer before retrying the connection.")
+        warning = warning + "\n" + action
+        cleanup_activity(progress, warning)
+        return warning
+    return None
+
+
+def uninstall_history(data: dict) -> tuple[tuple[str, ...], tuple[str, ...], str | None]:
+    """Validate direct owned-path references before showing remote recovery history."""
+    root = "/home/steamos/Games/"
+    backups, retained = [], []
+    for key, target in (("recoveredSaveBackupPaths", backups),
+                        ("retainedQuarantinePaths", retained)):
+        values = data.get(key, [])
+        if not isinstance(values, list) or len(values) > 64:
+            raise SSHError("The Frame returned an invalid uninstall recovery history.")
+        for value in values:
+            if (not isinstance(value, str) or len(value) > 512
+                    or len(value.rsplit("/", 1)[-1]) > 255 or value in target):
+                raise SSHError("The Frame returned an invalid uninstall recovery history.")
+            if key == "recoveredSaveBackupPaths":
+                valid = re.fullmatch(re.escape(root) + r"HaloCENativeVR-saves-[a-f0-9]{32}", value)
+            else:
+                prefix = root + ".HaloCENativeVR-uninstall-"
+                suffix = value[len(prefix):] if value.startswith(prefix) else ""
+                valid = suffix and not any(c in "/\\" or ord(c) < 32 or ord(c) == 127 for c in suffix)
+            if not valid:
+                raise SSHError("The Frame returned an invalid uninstall recovery history.")
+            target.append(value)
+    warning = data.get("warning")
+    if warning is not None and (not isinstance(warning, str) or not 0 < len(warning) <= 4096):
+        raise SSHError("The Frame returned an invalid uninstall warning.")
+    return tuple(backups), tuple(retained), warning
 
 
 class Installer:
@@ -150,7 +206,10 @@ class Installer:
         run_identifier = uuid.uuid4().hex
         remote_helper: str | None = None
         prepared = False
-        disconnected = False
+        cleanup_attempted = False
+        cancel_attempted = False
+        cancellation_warning = None
+        cancellation_unconfirmed = False
 
         def check_cancel():
             if cancel_event.is_set():
@@ -162,8 +221,55 @@ class Installer:
                 progress(*activity)
 
         def cancel_remote():
-            if remote_helper is not None and prepared:
-                connection.run(["python3", remote_helper, "cancel", "--run-id", run_identifier], timeout=45)
+            nonlocal cancel_attempted, cancellation_warning, cancellation_unconfirmed
+            if remote_helper is None or not prepared or cancel_attempted:
+                return
+            cancel_attempted = True
+            argv = ["python3", remote_helper, "cancel", "--run-id", run_identifier]
+
+            def request(target):
+                response = parse_result(target.run(argv, timeout=45))
+                if response.get("cancelled") is not True:
+                    raise SSHError("The Frame did not confirm this installer run's cancellation.")
+
+            try:
+                active = getattr(connection, "is_active", lambda: True)()
+                if active:
+                    request(connection)
+                    cleanup_activity(progress, "Remote build cancellation confirmed.")
+                    return
+            except Exception:
+                pass
+            recovery = recovery_settings = None
+            try:
+                approved = (connection.host_fingerprint or settings.known_host_fingerprint
+                            or settings.known_host_fingerprints.get(settings.host_identity))
+                if not isinstance(approved, str) or not approved.startswith("SHA256:"):
+                    raise SSHError("No approved host fingerprint is available for recovery.")
+                recovery_settings = replace(settings, known_host_fingerprint=approved,
+                                            known_host_fingerprints={}, accept_host_key=None)
+                recovery = self.connection_factory(recovery_settings)
+                if recovery is connection:
+                    recovery = None
+                    raise SSHError("A fresh recovery connection could not be created.")
+                cleanup_activity(progress, "Reconnecting once to stop this installer run, using the approved SSH host key...")
+                recovery.connect(timeout=10)
+                request(recovery)
+                cleanup_activity(progress, "Remote build cancellation confirmed.")
+            except Exception:
+                cancellation_unconfirmed = True
+                cancellation_warning = (
+                    "Remote stopping could not be confirmed. The installer build may still be running on the Frame. "
+                    "Restore the connection and stop this run before retrying installation or uninstalling.\n"
+                    "In the Frame's terminal, run: " + " ".join(argv))
+                cleanup_activity(progress, cancellation_warning)
+            finally:
+                if recovery is not None:
+                    warning = close_connection(recovery, progress)
+                    if warning:
+                        cancellation_warning = (cancellation_warning + "\n\n" if cancellation_warning else "") + warning
+                if recovery_settings is not None:
+                    recovery_settings.password = ""
 
         repair = settings.reinstall_existing and not registration_only
 
@@ -273,24 +379,34 @@ class Installer:
             # Keep the result's public fingerprint before releasing the client.
             host_fingerprint = connection.host_fingerprint
             progress("disconnect", "Closing the setup SSH connection...", None)
-            close_connection(connection, progress)
-            disconnected = True
-            progress("disconnected", "Setup has disconnected from your Frame.", None)
-            progress("complete", "Native VR game is ready. Launch Halo: Combat Evolved VR (Native) from your Steam library." if steam.get("status") == "added" else "Native VR game is installed. One Steam library step remains.", 100)
+            cleanup_warning = close_connection(connection, progress)
+            cleanup_attempted = True
+            if cleanup_warning:
+                progress("cleanup-pending", "Native Halo VR is installed; setup's connection cleanup needs attention.", 99)
+            else:
+                progress("disconnected", "Setup has disconnected from your Frame.", None)
+                progress("complete", "Native VR game is ready. Launch Halo: Combat Evolved VR (Native) from your Steam library." if steam.get("status") == "added" else "Native VR game is installed. One Steam library step remains.", 100)
             return InstallResult(installed["gamePath"], bool(installed.get("reused")),
                                  steam, host_fingerprint, repaired=bool(installed.get("repaired")),
-                                 backup_path=installed.get("backupPath"))
-        except CancelledError:
-            try:
-                cancel_remote()
-            except (SSHError, OSError):
-                pass
+                                 backup_path=installed.get("backupPath"), cleanup_warning=cleanup_warning)
+        except (CancelledError, RemoteTimeoutError, SSHError) as error:
+            cancel_remote()
+            if cancellation_warning:
+                message = str(error)
+                if cancellation_unconfirmed:
+                    first, separator, rest = message.partition("\n")
+                    message = first + " Remote stopping could not be confirmed; the build may still be running on the Frame." + (separator + rest if separator else "")
+                error.args = (message + "\n\n" + cancellation_warning,)
             raise
         finally:
-            if not disconnected:
-                progress("detail", "Closing the setup SSH connection...", None)
-                close_connection(connection, progress)
-                progress("detail", "Setup has disconnected from your Frame.", None)
+            if not cleanup_attempted:
+                cleanup_activity(progress, "Closing the setup SSH connection...")
+                warning = close_connection(connection, progress)
+                if warning is None:
+                    cleanup_activity(progress, "Setup has disconnected from your Frame.")
+                elif sys.exc_info()[1] is not None:
+                    error = sys.exc_info()[1]
+                    error.args = (str(error) + "\n\n" + warning,)
 
     def add_to_steam(self, settings: Settings, progress_callback: ProgressCallback | None = None,
                      cancel_event: threading.Event | None = None) -> InstallResult:
@@ -304,7 +420,7 @@ class Installer:
         cancel_event = cancel_event or threading.Event()
         connection = self.connection_factory(settings)
         run_identifier = uuid.uuid4().hex
-        disconnected = False
+        cleanup_attempted = False
 
         def check_cancel():
             if cancel_event.is_set():
@@ -345,31 +461,54 @@ class Installer:
             steam = data.get("steam")
             if not isinstance(steam, dict):
                 raise SSHError("The Frame returned an invalid uninstall result.")
+            recovered, retained, warning = uninstall_history(data)
+            for text in ([warning] if warning else []) + ["Recovered campaign save backup: " + path for path in recovered] + ["Preserved uninstall folder: " + path for path in retained]:
+                progress("detail", text, None)
             if steam.get("status") == "manual":
-                raise SSHError(steam.get("reason", "Steam could not close safely; the game was kept.")
-                    + "\n" + steam.get("instructions", "Use Steam's own interface to remove the native Halo shortcut, then retry when its library can be safely updated."))
+                diagnostic = steam.get("reason", "Steam could not close safely; the game was kept.") + "\n" + steam.get("instructions", "Use Steam's own interface to remove the native Halo shortcut, then retry when its library can be safely updated.")
+                if warning:
+                    diagnostic += "\n\n" + warning
+                if recovered:
+                    diagnostic += "\n\nRecovered campaign save backups:\n" + "\n".join(recovered)
+                if retained:
+                    diagnostic += "\n\nPreserved uninstall folders:\n" + "\n".join(retained)
+                raise SSHError(diagnostic)
             uninstalled, absent = data.get("uninstalled"), data.get("alreadyAbsent", False)
+            pending = data.get("removalPending", False)
             saved = data.get("savedBackupPath")
             if (data.get("gamePath") != info["gamePath"] or type(uninstalled) is not bool
-                    or type(absent) is not bool or not (uninstalled or absent)
+                    or type(absent) is not bool or type(pending) is not bool
+                    or (pending and (uninstalled or absent))
+                    or (not pending and not (uninstalled or absent))
+                    or (retained and not pending)
                     or steam.get("status") not in ("removed", "already-absent")
                     or (saved is not None and saved != "/home/steamos/Games/HaloCENativeVR-saves-" + run_identifier)):
                 raise SSHError("The Frame returned an invalid uninstall result.")
-            warning = data.get("warning")
-            if isinstance(warning, str) and 0 < len(warning) <= 4096:
-                progress("detail", warning, None)
             host_fingerprint = connection.host_fingerprint
             progress("disconnect", "Closing the setup SSH connection...", None)
-            close_connection(connection, progress)
-            disconnected = True
-            progress("disconnected", "Setup has disconnected from your Frame.", None)
-            progress("complete", "Native Halo VR has been uninstalled." if uninstalled else "Native Halo VR was already absent; its Steam entry has been checked.", 100)
-            return UninstallResult(info["gamePath"], uninstalled, absent, saved, steam, host_fingerprint)
+            cleanup_warning = close_connection(connection, progress)
+            cleanup_attempted = True
+            if cleanup_warning:
+                progress("cleanup-pending", "Uninstall results were saved; setup's connection cleanup needs attention.", 99)
+            else:
+                progress("disconnected", "Setup has disconnected from your Frame.", None)
+            if pending:
+                progress("removal-pending", "Uninstall preserved folders that need attention. See the setup activity and recovery paths.", 99)
+            elif not cleanup_warning:
+                progress("complete", "Native Halo VR has been uninstalled." if uninstalled else "Native Halo VR was already absent; its Steam entry has been checked.", 100)
+            return UninstallResult(info["gamePath"], uninstalled, absent, saved, steam, host_fingerprint,
+                                   cleanup_warning=cleanup_warning, removal_pending=pending,
+                                   removal_warning=warning, recovered_save_backup_paths=recovered,
+                                   retained_quarantine_paths=retained)
         finally:
-            if not disconnected:
-                progress("detail", "Closing the setup SSH connection...", None)
-                close_connection(connection, progress)
-                progress("detail", "Setup has disconnected from your Frame.", None)
+            if not cleanup_attempted:
+                cleanup_activity(progress, "Closing the setup SSH connection...")
+                warning = close_connection(connection, progress)
+                if warning is None:
+                    cleanup_activity(progress, "Setup has disconnected from your Frame.")
+                elif sys.exc_info()[1] is not None:
+                    error = sys.exc_info()[1]
+                    error.args = (str(error) + "\n\n" + warning,)
 
 
 def run(settings: Settings, maps_dir: Path | None, progress_callback=None,

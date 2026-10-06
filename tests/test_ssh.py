@@ -203,7 +203,7 @@ def test_uninstall_timeout_reports_uncertain_removal_and_closes_channel(monkeypa
     assert not connection._command_channels
 
 
-@pytest.mark.parametrize('failure', [paramiko.SSHException('SSH session not active'), SSHError('cancel command failed')])
+@pytest.mark.parametrize('failure', [paramiko.SSHException('SSH session not active'), SSHError('cancel command failed'), EOFError('private'), ValueError('private')])
 def test_failed_cancel_notice_does_not_mask_the_cancellation(monkeypatch, failure):
     channel = Mock()
     channel.recv_ready.return_value = False
@@ -255,3 +255,105 @@ def test_failed_cancel_notice_does_not_mask_the_timeout_error(monkeypatch):
     with pytest.raises(SSHError, match='timed out'):
         SSHConnection(Settings('frame', 'private')).run(['python3', 'helper.py'], timeout=600, on_cancel=on_cancel)
     on_cancel.assert_called_once()
+
+
+@pytest.mark.parametrize('failure', [EOFError('private'), paramiko.SSHException('private'), OSError('private')])
+def test_command_start_errors_are_redacted_without_exposing_a_cause(monkeypatch, failure):
+    client = Mock()
+    client.exec_command.side_effect = failure
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    with pytest.raises(SSHError, match='could not be started') as error:
+        SSHConnection(Settings('frame', 'private')).run(['python3', 'helper.py'])
+    assert 'private' not in str(error.value)
+    assert error.value.__suppress_context__ and error.value.__cause__ is None
+
+
+def test_cancel_during_failed_command_start_remains_a_cancellation(monkeypatch):
+    cancel = threading.Event()
+    client = Mock()
+    def fail(*args, **kwargs):
+        cancel.set()
+        raise EOFError('private')
+    client.exec_command.side_effect = fail
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    on_cancel = Mock(side_effect=EOFError('private'))
+    with pytest.raises(CancelledError, match='cancelled') as error:
+        SSHConnection(Settings('frame', 'private')).run(['helper'], cancel_event=cancel, on_cancel=on_cancel)
+    on_cancel.assert_called_once()
+    assert 'private' not in str(error.value)
+
+
+@pytest.mark.parametrize('failing_method', ['set_combine_stderr', 'recv_ready', 'recv', 'recv_exit_status'])
+def test_channel_setup_and_read_errors_are_redacted_and_closed(monkeypatch, failing_method):
+    channel = Mock()
+    channel.recv_ready.return_value = failing_method == 'recv'
+    channel.exit_status_ready.return_value = True
+    getattr(channel, failing_method).side_effect = EOFError('private')
+    client = Mock()
+    client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    with pytest.raises(SSHError, match='connection stopped') as error:
+        SSHConnection(Settings('frame', 'private')).run(['helper'])
+    assert 'private' not in str(error.value) and error.value.__suppress_context__
+    channel.close.assert_called_once()
+
+
+def test_channel_close_failure_cannot_replace_the_timeout(monkeypatch):
+    from halo_frame_installer import ssh
+    channel = Mock()
+    channel.close.side_effect = paramiko.SSHException('private')
+    client = Mock()
+    client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    monkeypatch.setattr(ssh.time, 'monotonic', Mock(side_effect=[0, 601]))
+    connection = SSHConnection(Settings('frame', 'private'))
+    with pytest.raises(ssh.RemoteTimeoutError, match='timed out'):
+        connection.run(['helper'], timeout=600)
+    assert channel in connection._command_channels
+    connection.close()
+    assert not connection._command_channels
+    client.close.assert_called_once()
+
+
+@pytest.mark.parametrize('failure_step', ['timeout', 'put'])
+def test_sftp_setup_and_transfer_failure_survive_a_failed_close(monkeypatch, failure_step):
+    client, sftp = Mock(), Mock()
+    client.open_sftp.return_value = sftp
+    sftp.close.side_effect = EOFError('private')
+    target = sftp.get_channel.return_value.settimeout if failure_step == 'timeout' else sftp.put
+    target.side_effect = paramiko.SSHException('private')
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    connection = SSHConnection(Settings('frame', 'private'))
+    with pytest.raises(SSHError, match='transfer stopped') as error:
+        connection.put('local.txt', 'remote.txt')
+    assert 'private' not in str(error.value)
+    assert sftp in connection._sftp_clients
+    connection.close()
+    assert not connection._sftp_clients
+
+
+def test_sftp_callback_cancellation_survives_a_failed_close(monkeypatch):
+    client, sftp = Mock(), Mock()
+    client.open_sftp.return_value = sftp
+    sftp.close.side_effect = EOFError('private')
+    cancel = threading.Event()
+    def transfer(*args, **kwargs):
+        cancel.set()
+        kwargs['callback'](1, 2)
+    sftp.put.side_effect = transfer
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    with pytest.raises(CancelledError, match='cancelled') as error:
+        SSHConnection(Settings('frame', 'private')).put('local.txt', 'remote.txt', cancel_event=cancel)
+    assert 'private' not in str(error.value)
+
+
+@pytest.mark.parametrize('failure_step', ['connect', 'keepalive'])
+def test_eof_connect_or_keepalive_failure_is_redacted_and_tears_down(monkeypatch, failure_step):
+    client = Mock()
+    target = client.connect if failure_step == 'connect' else client.get_transport.return_value.set_keepalive
+    target.side_effect = EOFError('private')
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    with pytest.raises(SSHError, match='Could not connect') as error:
+        SSHConnection(Settings('frame', 'private')).connect()
+    assert 'private' not in str(error.value)
+    client.close.assert_called_once()
