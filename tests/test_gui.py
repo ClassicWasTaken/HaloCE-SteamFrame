@@ -1866,3 +1866,19 @@ def test_installer_workers_distinguish_cancel_from_failures(app, monkeypatch, op
     if cleanup_fails:
         assert 'USB forward could not be removed' in '\n'.join(app.log_lines)
     assert 'offline-secret' not in '\n'.join(app.log_lines)
+
+
+@WINDOWS_GUI
+def test_hostile_result_event_does_not_kill_the_event_pump(app):
+    from halo_frame_installer.install import InstallResult
+    app._set_busy(True)
+    app.password.set('secret')
+    result = InstallResult('/home/steamos/Games/HaloCENativeVR', False,
+        {'status': 'manual', 'reason': {'detail': 'boom'}}, None)
+    app.events.put(('complete', result))
+    app.events.put(('clear_password',))
+    app.events.put(('idle',))
+    app._drain()
+    assert not app.busy
+    assert app.password.get() == ''
+    assert any(title == 'Setup needs attention' for title, _ in app._test_dialogs)

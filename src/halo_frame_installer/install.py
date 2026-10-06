@@ -155,6 +155,19 @@ def map_manifest(maps_dir: Path) -> tuple[Path, dict]:
                       "format": "original Xbox Halo maps; user-provided data"}
 
 
+def validated_steam(steam) -> dict:
+    """The shortcut step's device-authored payload must stay plain strings and dicts."""
+    if not isinstance(steam, dict) or not isinstance(steam.get("status"), str):
+        raise SSHError("The Frame returned an invalid Steam registration response.")
+    for key in ("reason", "instructions", "launchOptions"):
+        if key in steam and not isinstance(steam[key], str):
+            raise SSHError("The Frame returned an invalid Steam registration response.")
+    for key in ("artwork", "notes"):
+        if key in steam and not isinstance(steam[key], dict):
+            raise SSHError("The Frame returned an invalid Steam registration response.")
+    return steam
+
+
 def parse_result(output: str) -> dict:
     lines = [line[len("HFI_RESULT "):] for line in output.splitlines() if line.startswith("HFI_RESULT ")]
     if len(lines) != 1:
@@ -607,7 +620,7 @@ class Installer:
                 raise SSHError("The Frame returned an unexpected installed game location.")
             check_cancel()
             progress("steam", "Updating Halo's Steam entry, artwork and game Notes while keeping Steam Home running...", None)
-            steam = step("shortcut", timeout=150)
+            steam = validated_steam(step("shortcut", timeout=150))
             # Keep the result's public fingerprint before releasing the client.
             host_fingerprint = connection.host_fingerprint
             progress("disconnect", "Closing the setup SSH connection...", None)
