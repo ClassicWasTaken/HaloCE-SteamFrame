@@ -1500,3 +1500,33 @@ def test_uninstalled_game_reports_pending_connection_cleanup(app):
     assert 'Connection cleanup needs attention' in app.status.get()
     assert 'Unplug the USB cable' in app.status.get()
     assert app._test_dialogs[-1][0] == 'Uninstall needs attention'
+
+
+@WINDOWS_GUI
+def test_user_cancel_is_not_reported_as_a_failure(app):
+    app._begin_setup_progress()
+    app.operation = 'connection'
+    app.connection_status.set('Connecting to your Frame…')
+    app.events.put(('error', 'Installation cancelled. Existing games and saves were kept.', True))
+    app.events.put(('idle',))
+    _drain_events(app)
+    assert app.phase.get() == 'Setup cancelled'
+    assert 'cancelled' in app.status.get().lower()
+    assert 'Setup stopped' not in app.status.get()
+    assert app.connection_status.get() == 'Connection check cancelled.'
+    assert not any(title == 'Setup needs attention' for title, _ in app._test_dialogs)
+
+
+@WINDOWS_GUI
+def test_genuine_failure_during_a_set_cancel_still_needs_attention(app):
+    app._begin_setup_progress()
+    app.operation = 'connection'
+    app.connection_status.set('Connecting to your Frame…')
+    app._cancel_setup()
+    app.events.put(('error', 'Could not reach the Frame: connection refused (port 22)', False))
+    app.events.put(('idle',))
+    _drain_events(app)
+    assert app.phase.get() == "Let's try that again"
+    assert 'Setup stopped' in app.status.get()
+    assert app.connection_status.get() == 'Connection check needs attention. See setup activity, then retry.'
+    assert any(title == 'Setup needs attention' for title, _ in app._test_dialogs)

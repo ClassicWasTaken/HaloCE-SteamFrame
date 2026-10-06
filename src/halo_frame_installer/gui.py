@@ -16,7 +16,7 @@ import webbrowser
 
 from . import __version__
 from .assets import inspect_image, inspect_maps, extract_image, copy_maps
-from .ssh import Settings, SSHConnection
+from .ssh import CancelledError, Settings, SSHConnection
 from .music import MenuMusic
 from .progress import SetupProgress
 from .ui import (BG, SIDEBAR, SURFACE, TEXT, MUTED, BORDER,
@@ -999,6 +999,7 @@ class App(tk.Tk):
             connection = None
             confirmed = None
             error = None
+            cancelled = False
             try:
                 connection = SSHConnection(settings)
                 connection.connect()
@@ -1007,6 +1008,7 @@ class App(tk.Tk):
                     raise ValueError("This device is not an ARM64 Steam Frame.")
                 confirmed = ("connected", settings.host_identity, connection.host_fingerprint)
             except Exception as exc:
+                cancelled = isinstance(exc, CancelledError)
                 error = str(exc)
             finally:
                 try:
@@ -1018,7 +1020,7 @@ class App(tk.Tk):
                 finally:
                     settings.password = ""
                     if error is not None:
-                        self.events.put(("error", error))
+                        self.events.put(("error", error, cancelled))
                         self.events.put(("clear_password",))
                     elif confirmed is not None:
                         self.events.put(confirmed)
@@ -1080,7 +1082,7 @@ class App(tk.Tk):
                     result = run(settings, extracted / "maps", report, self.cancel)
                 self.events.put(("complete", result))
             except Exception as exc:
-                self.events.put(("error", str(exc)))
+                self.events.put(("error", str(exc), isinstance(exc, CancelledError)))
             finally:
                 settings.password = ""
                 self.events.put(("clear_password",))
@@ -1113,7 +1115,7 @@ class App(tk.Tk):
                     lambda s,m,p=None:self.events.put(("progress",s,str(m),p)), self.cancel)
                 self.events.put(("complete",result))
             except Exception as exc:
-                self.events.put(("error",str(exc)))
+                self.events.put(("error",str(exc), isinstance(exc, CancelledError)))
             finally:
                 settings.password = ""
                 self.events.put(("clear_password",)); self.events.put(("idle",))
@@ -1156,7 +1158,7 @@ class App(tk.Tk):
                     self.cancel, keep_saves=keep_saves)
                 self.events.put(("uninstall_complete", result))
             except Exception as exc:
-                self.events.put(("error", str(exc)))
+                self.events.put(("error", str(exc), isinstance(exc, CancelledError)))
             finally:
                 settings.password = ""
                 self.events.put(("clear_password",))
@@ -1320,7 +1322,7 @@ class App(tk.Tk):
                     self.retry_button.pack_forget()
                     messagebox.showinfo("Uninstall needs attention" if pending else "Uninstall complete", done, parent=self)
                 elif kind == "error":
-                    self._show_setup_error(event[1])
+                    self._show_setup_error(event[1], len(event) > 2 and bool(event[2]))
                 elif kind == "clear_password":
                     self.password.set(""); self.password_to_redact = ""
                 elif kind == "idle":
@@ -1333,8 +1335,20 @@ class App(tk.Tk):
             pass
         self.after(10 if not self.events.empty() else 80, self._drain)
 
-    def _show_setup_error(self, text):
+    def _show_setup_error(self, text, cancelled=False):
         text = self._redact(text)
+        if cancelled:
+            # The worker tagged this outcome as a cancellation; report it as
+            # stopped, never as a connection or data problem.
+            summary = text.strip().splitlines()[0] if text.strip() else "Setup cancelled."
+            if len(summary) > 500 or "\n" in text:
+                summary = summary[:500] + "\n\nUse the setup activity panel (Show activity) for full details, or Save log for troubleshooting."
+            self.status.set(summary)
+            self.phase.set("Setup cancelled")
+            if getattr(self, "operation", None) == "connection":
+                self.connection_status.set("Connection check cancelled.")
+            self._append(text)
+            return
         self.status.set("Setup stopped. See the message below; you can retry.")
         self.phase.set("Let's try that again")
         if getattr(self, "operation", None) == "connection":
