@@ -180,6 +180,7 @@ def test_finalize_rechecks_retained_hashes_before_publishing(remote, monkeypatch
     struct.pack_into("<H", header, 18, 183)
     (build / "halo").write_bytes(header)
     (build / "libSDL3.so.0").write_bytes(header)
+    (build / "brokers.txt").write_text("broker.example.org:1883\n")
     changed = bytearray((older / "upload/maps/a10.map").read_bytes())
     changed[100] = 1
     (older / "upload/maps/a10.map").write_bytes(changed)
@@ -201,6 +202,7 @@ def test_finalize_copies_only_verified_retained_maps_and_keeps_old_upload(remote
     struct.pack_into("<H", header, 18, 183)
     (build / "halo").write_bytes(header)
     (build / "libSDL3.so.0").write_bytes(header)
+    (build / "brokers.txt").write_text("broker.example.org:1883\n")
     resources = remote.CACHE / "resources"
     resources.mkdir()
     (resources / "frame-controls.patch").write_bytes(b"verified native controls")
@@ -211,11 +213,13 @@ def test_finalize_copies_only_verified_retained_maps_and_keeps_old_upload(remote
     monkeypatch.setattr(remote, "rename_noreplace", publish)
     response = remote.finalize(NEW_RUN)
     assert response["gamePath"] == str(remote.GAME)
+    assert (remote.GAME / "brokers.txt").read_text() == "broker.example.org:1883\n"
+    assert remote.read_marker(remote.GAME / remote.MARKER)["files"]["brokers.txt"] == remote.digest(remote.GAME / "brokers.txt")
     assert remote.verify_maps(remote.GAME, manifest) == manifest["totalBytes"]
     assert remote.verify_maps(older / "upload", manifest) == manifest["totalBytes"]
     assert (older / "src/unfinished-build").read_bytes() == b"do not resume this old build"
     assert not (remote.GAME / "unfinished-build").exists()
-    assert list((remote.GAME / "save").iterdir()) == []
+    assert list(remote.save_root().iterdir()) == []
 
 
 class RetryConnection:

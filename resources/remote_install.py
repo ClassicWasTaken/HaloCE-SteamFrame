@@ -23,7 +23,8 @@ import tomllib
 
 OWNER = "halo-frame-installer"
 SOURCE_URL = "https://github.com/startupfoundry/halo-ce-universal.git"
-SOURCE_COMMIT = "88142798513ebd99fc7c6224023e8b44c05d0106"
+SOURCE_COMMIT = "2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4"
+LEGACY_SOURCE_COMMIT = "88142798513ebd99fc7c6224023e8b44c05d0106"
 MIN_FREE_BYTES = 12 * 1024 ** 3
 EXPECTED_MAPS = frozenset("maps/" + name + ".map" for name in (
     "a10", "a30", "a50", "b30", "b40", "c10", "c20", "c40", "d20", "d40",
@@ -179,6 +180,62 @@ def installed_maps_manifest():
     return value
 
 
+def save_root():
+    return GAME / "save-v1.4"
+
+
+def configured_save_path(settings):
+    """Inspect a legacy location without opening or modifying its contents."""
+    paths = settings.get("paths", {})
+    if not isinstance(paths, dict):
+        raise ValueError("The game configuration has an unsupported paths section.")
+    location = paths.get("saves", str(GAME / "save"))
+    if not isinstance(location, str) or not location:
+        raise ValueError("The configured save location is invalid. Existing saves were kept.")
+    selected = pathlib.Path(location)
+    selected = pathlib.Path(os.path.normpath(selected if selected.is_absolute() else GAME / selected))
+    if selected == GAME:
+        raise ValueError("The save location points at the entire game folder. Existing saves were kept.")
+    if selected.is_relative_to(GAME):
+        beneath(selected, GAME)
+    return str(selected)
+
+
+def previous_save_paths(metadata):
+    paths = metadata.get("previousSavePaths", [])
+    if not isinstance(paths, list) or len(paths) > 32:
+        raise ValueError("The native marker has an invalid previous save-location record.")
+    checked = []
+    for location in paths:
+        selected = configured_save_path({"paths": {"saves": location}})
+        if selected not in checked:
+            checked.append(selected)
+    return checked
+
+
+def validate_save_paths(settings, require_explicit=False):
+    """New engine checkpoints must never share the incompatible legacy directory."""
+    paths = settings.get("paths", {})
+    if not isinstance(paths, dict):
+        raise ValueError("Version 1.4 game and save paths must use their owned installation folder.")
+    for key, expected in (("data", GAME), ("saves", save_root())):
+        beneath(expected, HOME)
+        if key not in paths and not require_explicit:
+            continue
+        value = paths.get(key)
+        if not isinstance(value, str) or not value:
+            raise ValueError("Repair the game to set its version 1.4 game and save paths before reuse.")
+        candidate = pathlib.Path(value)
+        if not candidate.is_absolute():
+            candidate = GAME / candidate
+        try:
+            beneath(candidate, GAME)
+        except ValueError:
+            raise ValueError("Version 1.4 game and save paths must stay in their owned installation folder. Existing saves were kept.") from None
+        if candidate != expected:
+            raise ValueError("Version 1.4 must use its own game folder and save-v1.4 subfolder. Existing saves were kept.")
+
+
 def existing_install(repair=False, adopt=False):
     beneath(GAME, HOME)
     if not GAME.exists():
@@ -201,17 +258,39 @@ def existing_install(repair=False, adopt=False):
         installed_maps_manifest()
         value = {"owner": "manual-native-adoption", "files": {}}
         source = None
-    if source != SOURCE_COMMIT and not repair:
+    needs_upgrade = source == LEGACY_SOURCE_COMMIT and value["owner"] in (OWNER, "codex-halo-native-frame-20261005")
+    if source != SOURCE_COMMIT and not repair and not needs_upgrade:
         raise ValueError("An existing native game uses a different source revision. It was not modified.")
-    if repair:
+    if repair or needs_upgrade:
         game_closed()
-    else:
+    if not repair:
         elf_arm64(GAME / "halo")
-        ordinary(GAME / "libSDL3.so.0")
+        if needs_upgrade:
+            elf_arm64(GAME / "libSDL3.so.0")
+        else:
+            ordinary(GAME / "libSDL3.so.0")
+    previous_paths = previous_save_paths(value)
+    migrating = source != SOURCE_COMMIT
+    beneath(save_root(), GAME)
+    if save_root().exists() and (not save_root().is_dir() or (migrating and any(save_root().iterdir()))):
+        raise ValueError("The version 1.4 save destination already contains files or is not a directory. Existing saves were kept.")
     if (GAME / "config.toml").exists():
         ordinary(GAME / "config.toml")
+        settings = tomllib.loads((GAME / "config.toml").read_text())
+        if migrating:
+            previous = configured_save_path(settings)
+            if previous not in previous_paths:
+                previous_paths.append(previous)
+        else:
+            validate_save_paths(settings, require_explicit=not repair)
         if repair:
-            merge_config((GAME / "config.toml").read_text())
+            merge_config((GAME / "config.toml").read_text(), migrate=migrating)
+    elif not repair and not needs_upgrade:
+        raise ValueError("Repair the game to create its version 1.4 save configuration before reuse.")
+    elif migrating and str(GAME / "save") not in previous_paths:
+        previous_paths.append(str(GAME / "save"))
+    if len(previous_paths) > 32:
+        raise ValueError("The native marker exceeds the supported previous save-location count.")
     # Validate all hashes recorded by either supported installer before reusing it.
     files = value.get("files", {})
     if not isinstance(files, dict):
@@ -236,7 +315,8 @@ def existing_install(repair=False, adopt=False):
             raise
         maps_verified = False
     return {"gamePath": str(GAME), "reused": True, "owner": value["owner"], "sourceCommit": source,
-            "mapsVerified": maps_verified, "needsImage": not maps_verified, "programIssues": issues}
+            "mapsVerified": maps_verified, "needsImage": not maps_verified, "programIssues": issues,
+            "needsUpgrade": needs_upgrade, "previousSavePaths": previous_paths}
 
 
 def os_release():
@@ -288,7 +368,7 @@ def preflight(repair=False, adopt=False):
             raise ValueError("An installer resource path is not a private ordinary file.")
     existing = existing_install(repair, adopt)
     free = shutil.disk_usage(HOME).free
-    if (existing is None or repair) and free < MIN_FREE_BYTES:
+    if (existing is None or repair or existing.get("needsUpgrade")) and free < MIN_FREE_BYTES:
         raise ValueError("At least 12 GiB of free space is needed for the Xbox data and isolated build. Free space and retry.")
     # Podman itself is unprivileged. Never use sudo or disable SteamOS read-only protection.
     podman = json.loads(command(["podman", "info", "--format", "json"]))
@@ -331,6 +411,8 @@ def preflight_library():
     current = existing_install()
     if current is None:
         raise ValueError("Install and verify native Halo VR before updating its Steam information.")
+    if current.get("needsUpgrade"):
+        raise ValueError("Use Install to upgrade the existing native game to version 1.4 before updating its Steam information.")
     info.pop("uninstallSupported", None)
     info["existing"] = current
     return info
@@ -745,7 +827,10 @@ class BuildLogMonitor:
 def build(value, repair=False, adopt=False):
     directory = run_dir(value)
     metadata = read_marker(directory / MARKER)
-    if existing_install(repair, adopt) and not repair:
+    existing = existing_install(repair, adopt)
+    if existing and not repair:
+        if existing.get("needsUpgrade"):
+            raise ValueError("The existing native game needs a version 1.4 upgrade. Start Install to rebuild it.")
         return {"reused": True}
     upload = directory / "upload"
     def check_cancelled():
@@ -857,12 +942,18 @@ def cancel(value):
     return {"cancelled": True}
 
 
-def merge_config(original):
+def merge_config(original, migrate=False):
     """Restore required native controls while preserving unrelated TOML settings."""
     settings = tomllib.loads(original) if original.strip() else {}
-    required = {"vr": {"enabled": True, "aim": "controller", "melee_gesture": False},
-                "update": {"auto": False}}
-    defaults = {"refresh_rate": 72.0, "resolution_scale": 1.0, "turn": "smooth",
+    if migrate:
+        configured_save_path(settings)
+    else:
+        validate_save_paths(settings)
+    required = {"vr": {"enabled": True, "aim": "controller", "movement": "head", "melee_gesture": False},
+                "update": {"auto": False}, "paths": {"data": str(GAME), "saves": str(save_root())}}
+    if "coop_enemies_mode" not in settings.get("network", {}):
+        required["network"] = {"coop_enemies_mode": "none"}
+    defaults = {"refresh_rate": 72.0, "resolution_scale": 1.0, "sun_glow_strength": 0.5, "turn": "smooth",
                 "smooth_turn_speed": 90.0, "two_handed": True, "height": "seated", "depth": False}
     vr = settings.get("vr", {})
     for key, default in defaults.items():
@@ -966,6 +1057,8 @@ def finalize(value, repair=False, adopt=False):
     check_cancelled()
     existing = existing_install(repair, adopt)
     if existing and not repair:
+        if existing.get("needsUpgrade"):
+            raise ValueError("The existing native game needs a version 1.4 upgrade. Start Install to rebuild it.")
         return existing
     source = directory / "src"
     binary = source / "build/linux_arm64/halo"
@@ -977,6 +1070,16 @@ def finalize(value, repair=False, adopt=False):
     shutil.copy2(binary, stage / "halo")
     (stage / "halo").chmod(0o755)
     shutil.copy2(ordinary(source / "build/linux_arm64/libSDL3.so.0"), stage / "libSDL3.so.0")
+    broker_source = ordinary(source / "build/linux_arm64/brokers.txt")
+    if not 0 < broker_source.stat().st_size <= 16 * 1024:
+        raise ValueError("The native internet-play broker list is missing or invalid.")
+    broker_text = broker_source.read_text(encoding="utf-8")
+    if not any(
+            line.strip() and not line.lstrip().startswith("#") for line in broker_text.splitlines()):
+        raise ValueError("The native internet-play broker list is missing or invalid.")
+    shutil.copy2(broker_source, stage / "brokers.txt")
+    if digest(stage / "brokers.txt") != digest(broker_source):
+        raise ValueError("The native internet-play broker list failed copy verification.")
     upload = directory / "upload"
     manifest = json.loads(ordinary(upload / "xbox-data-manifest.json").read_text())
     reuse_maps = run_metadata.get("mapsOrigin") == "existing"
@@ -992,15 +1095,15 @@ def finalize(value, repair=False, adopt=False):
     if not existing or not reuse_maps:
         verify_maps(stage, manifest, check_cancelled)
     if not existing:
-        (stage / "save").mkdir()
-    config = ('[paths]\ndata = "' + str(GAME) + '"\nsaves = "' + str(GAME / "save") + '"\n\n'
-              '[update]\nauto = false\n\n[network]\nonline = true\n\n'
-              '[vr]\nenabled = true\nrefresh_rate = 72.0\nresolution_scale = 1.0\n'
-              'aim = "controller"\nturn = "smooth"\nsmooth_turn_speed = 90.0\n'
+        (stage / save_root().name).mkdir()
+    config = ('[paths]\ndata = ' + json.dumps(str(GAME)) + '\nsaves = ' + json.dumps(str(save_root())) + '\n\n'
+              '[update]\nauto = false\n\n[network]\nonline = true\ncoop_enemies_mode = "none"\n\n'
+              '[vr]\nenabled = true\nrefresh_rate = 72.0\nresolution_scale = 1.0\nsun_glow_strength = 0.5\n'
+              'aim = "controller"\nmovement = "head"\nturn = "smooth"\nsmooth_turn_speed = 90.0\n'
               'melee_gesture = false\ntwo_handed = true\nheight = "seated"\ndepth = false\n')
     if existing:
         original = ordinary(GAME / "config.toml").read_text() if (GAME / "config.toml").exists() else ""
-        config = merge_config(original)
+        config = merge_config(original, migrate=existing["sourceCommit"] != SOURCE_COMMIT)
     (stage / "config.toml").write_text(config)
     shutil.copy2(CACHE / "resources/frame-controls.patch", stage / "frame-controls.patch")
     notices = {
@@ -1027,12 +1130,20 @@ def finalize(value, repair=False, adopt=False):
         raise ValueError("A required native runtime library is missing:\n" + libs)
     metadata = {"owner": OWNER, "version": 1, "sourceCommit": SOURCE_COMMIT,
                 "sourceUrl": SOURCE_URL, "architecture": "native ARM64 ELF64 / ILP32 AArch64 guest",
-                "files": {name: digest(stage / name) for name in ("halo", "libSDL3.so.0", "frame-controls.patch")},
+                "files": {name: digest(stage / name) for name in ("halo", "libSDL3.so.0", "brokers.txt", "frame-controls.patch")},
                 "maps": {"files": 24, "bytes": manifest["totalBytes"]},
-                "controls": "Xbox buttons, motion aim, LB grenade change, RB flashlight",
+                "controls": "Head-directed walking, Xbox buttons, motion aim, LB grenade change, RB flashlight",
+                "installerVersion": "1.4.0", "networkProtocol": 17, "saveRoot": str(save_root()),
+                "previousSavePaths": existing.get("previousSavePaths", []) if existing else [],
                 "buildLog": str(directory / "native-build.log")}
     (stage / MARKER).write_text(json.dumps(metadata, indent=2) + "\n")
     if existing:
+        # This directory contains only new-format checkpoints. Program rollback
+        # restores the old config and leaves both generations of saves untouched.
+        beneath(save_root(), GAME).mkdir(exist_ok=True)
+        if existing.get("previousSavePaths"):
+            progress("upgrade", "Previous checkpoints remain in " + ", ".join(existing["previousSavePaths"])
+                     + ". Version 1.4 uses fresh campaign saves in " + str(save_root()) + ".")
         names = [item.name for item in stage.iterdir() if item.is_file() and item.name != MARKER]
         if not reuse_maps:
             names += [item["path"] for item in manifest["files"]]
@@ -1040,7 +1151,8 @@ def finalize(value, repair=False, adopt=False):
         names.append(MARKER)
         backup = repair_program_files(stage, directory, names, check_cancelled)
         return {"gamePath": str(GAME), "reused": False, "repaired": True,
-                "sourceCommit": SOURCE_COMMIT, "backupPath": backup, "mapsReinstalled": not reuse_maps}
+                "sourceCommit": SOURCE_COMMIT, "backupPath": backup, "mapsReinstalled": not reuse_maps,
+                "previousSavePaths": existing.get("previousSavePaths", [])}
     beneath(GAME.parent, HOME).mkdir(exist_ok=True)
     if GAME.exists() or GAME.is_symlink():
         raise ValueError("The game destination appeared during installation. It was not modified.")
@@ -1069,6 +1181,8 @@ def shortcut(close_steam=False):
     current = existing_install()
     if current is None:
         raise ValueError("Install and verify the native game before adding it to Steam.")
+    if current.get("needsUpgrade"):
+        raise ValueError("Use Install to upgrade the existing native game to version 1.4 before adding it to Steam.")
     sys.path.insert(0, str(CACHE / "resources"))
     from steam_shortcut import add_native_shortcut
     response = add_native_shortcut(HOME, GAME, close_steam=close_steam)
@@ -1200,7 +1314,14 @@ def uninstall_inventory(directory):
 
 
 def uninstall_save_files(inventory):
-    roots, external = [GAME / "save"], []
+    roots, external = [GAME / "save", save_root()], []
+    metadata = uninstall_identity()
+    for location in previous_save_paths(metadata or {}):
+        selected = pathlib.Path(location)
+        if selected.is_relative_to(GAME):
+            roots.append(beneath(selected, GAME))
+        else:
+            external.append(str(selected))
     config = GAME / "config.toml"
     if "config.toml" in inventory:
         if config.stat().st_size > MAX_MANIFEST_BYTES:

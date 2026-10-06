@@ -15,7 +15,7 @@ from typing import Callable
 
 from .ssh import CancelledError, RemoteTimeoutError, Settings, SSHConnection, SSHError
 
-SOURCE_COMMIT = "88142798513ebd99fc7c6224023e8b44c05d0106"
+SOURCE_COMMIT = "2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4"
 EXPECTED_MAPS = frozenset(name + ".map" for name in (
     "a10", "a30", "a50", "b30", "b40", "c10", "c20", "c40", "d20", "d40",
     "beavercreek", "bloodgulch", "boardingaction", "carousel", "chillout", "damnation",
@@ -305,6 +305,11 @@ class Installer:
                 raise SSHError("The Frame reported an unexpected installation location.")
             if registration_only and info.get("existing") is None:
                 raise SSHError("Install and verify native Halo VR before updating its Steam information.")
+            if (info.get("existing") or {}).get("needsUpgrade"):
+                if registration_only:
+                    raise SSHError("Use Install to upgrade the existing native game to version 1.4 before updating its Steam information.")
+                repair = True
+                progress("upgrade", "Upgrading the existing native game to version 1.4. Previous checkpoints stay in place; new saves use save-v1.4...", None)
             if info.get("pcVersionDetected"):
                 progress("detect", "Found an older Halo PC installation. The native VR build requires original Xbox maps.", None)
             remote_resources = info["cachePath"] + "/resources"

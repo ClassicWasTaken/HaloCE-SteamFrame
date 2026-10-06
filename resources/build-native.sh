@@ -28,6 +28,11 @@ for tool in clang ld.lld llvm-ar; do
 done
 clang --version
 cd /build/src
+phase configure 'Checking Xbox controls, render-rate reticle, stereo sun glow and LAN/online campaign menus...'
+python3 tools/test_vr_locomotion.py --cc clang
+python3 tools/test_vr_sun_glow.py --cc clang
+python3 tools/test_vr_projectile_reticle.py --cc clang
+python3 tools/test_online_coop_menu.py --cc clang
 phase configure 'Configuring the native ARM64 OpenXR game and downloading its build sources...'
 python3 configure.py --release --vr --linux-arm64-cc clang
 export CMAKE_BUILD_PARALLEL_LEVEL=4

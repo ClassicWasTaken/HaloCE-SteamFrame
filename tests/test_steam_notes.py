@@ -1,5 +1,6 @@
 """Exercise the actual Notes JavaScript against a bounded native API contract."""
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -71,7 +72,9 @@ def run_notes(notes, **options):
     spec = notes.native_spec(notes.HOME, notes.GAME, notes.NAME)
     spec.update({"appid": 3000000001, "noteId": notes.NOTE_ID,
                  "title": notes.NOTE_TITLE, "content": notes.NOTE_CONTENT,
-                 "maxBytes": notes.MAX_DOCUMENT_BYTES, "maxNotes": notes.MAX_NOTES})
+                 "maxBytes": notes.MAX_DOCUMENT_BYTES, "maxNotes": notes.MAX_NOTES,
+                 "previousContents": list(notes.PREVIOUS_NOTE_CONTENTS)})
+    spec.update(options.pop("spec_overrides", {}))
     body = {"spec": spec, "expression": notes.expression(notes.NOTES, spec), **options}
     output = subprocess.run([node, "-e", NODE_CLIENT], input=json.dumps(body),
                             capture_output=True, text=True, encoding="utf-8", check=True, timeout=12)
@@ -127,6 +130,80 @@ def test_matching_managed_note_is_idempotent(notes):
     assert result["result"]["status"] == "existing"
     assert result["document"] == original
     assert "SaveNotes" not in methods(result)
+
+
+def test_only_exact_shipped_notes_are_allowed_previous_installer_content(notes):
+    assert notes.PREVIOUS_NOTE_CONTENTS == (notes.A2_NOTE_CONTENT, notes.A4_NOTE_CONTENT, notes.STABLE_NOTE_CONTENT)
+    assert hashlib.sha256(notes.A2_NOTE_CONTENT.encode("utf-8")).hexdigest() == \
+        "a4e1776caa60548620e0510acbe194aa414645be8d042771d9cbe1ec49edc05e"
+    assert hashlib.sha256(notes.A4_NOTE_CONTENT.encode("utf-8")).hexdigest() == \
+        "55785ec794857e844722ba758a4ce47fdb607a6bba2c30f23a437dd8f320ae30"
+    assert hashlib.sha256(notes.STABLE_NOTE_CONTENT.encode("utf-8")).hexdigest() == "ceed0d2d403fa18904c5d529ae409c8bfedad733fa1f1a7d93a6e2c2fdb8d32a"
+    assert "save-v1.4" in notes.NOTE_CONTENT and "old save folder is retained" in notes.NOTE_CONTENT
+    assert notes.NOTE_CONTENT != notes.A2_NOTE_CONTENT
+    assert "LISTING to PUBLIC" in notes.NOTE_CONTENT and "PUBLIC lets anyone" in notes.NOTE_CONTENT
+    assert "HOST LOCAL (LAN)" in notes.NOTE_CONTENT and "JOIN ONLINE (INTERNET)" in notes.NOTE_CONTENT
+    assert "Flat-screen CO-OP CAMPAIGN retains local split-screen" not in notes.NOTE_CONTENT
+
+
+@pytest.mark.parametrize("previous", ["A2_NOTE_CONTENT", "A4_NOTE_CONTENT", "STABLE_NOTE_CONTENT"])
+def test_exact_unchanged_previous_note_is_upgraded_with_every_other_field_preserved(notes, previous):
+    custom = {"id": "my-note", "title": "My campaign", "content": "Leave untouched", "extra": [1, 2]}
+    old = managed(notes, content=getattr(notes, previous), ordinal=8, time_created=123, unknown={"keep": True})
+    original = document(notes, [custom, old], unknown_document={"keep": [3]})
+    result = run_notes(notes, document=original)
+    assert result["result"]["status"] == "updated"
+    assert methods(result).count("SaveNotes") == 1
+    updated = result["document"]
+    assert updated["unknown_document"] == original["unknown_document"]
+    assert updated["notes"][0] == custom
+    assert {key: value for key, value in updated["notes"][1].items() if key not in ("content", "time_modified")} == \
+        {key: value for key, value in old.items() if key not in ("content", "time_modified")}
+    assert updated["notes"][1]["content"] == notes.NOTE_CONTENT
+    assert updated["notes"][1]["time_modified"] > old["time_modified"]
+    assert run_notes(notes, document=updated)["result"]["status"] == "existing"
+
+
+@pytest.mark.parametrize("field", ["content", "title", "shortcut_name"])
+@pytest.mark.parametrize("previous", ["A2_NOTE_CONTENT", "A4_NOTE_CONTENT", "STABLE_NOTE_CONTENT"])
+def test_previous_note_with_any_user_edit_or_identity_mismatch_is_preserved(notes, field, previous):
+    old = getattr(notes, previous)
+    changes = {"content": old}
+    changes[field] = {"content": old + " ", "title": "My title", "shortcut_name": "Other game"}[field]
+    original = document(notes, [managed(notes, **changes)])
+    result = run_notes(notes, document=original)
+    assert result["result"]["status"] == "custom"
+    assert result["document"] == original
+    assert "SaveNotes" not in methods(result)
+
+
+@pytest.mark.parametrize("previous", ["A2_NOTE_CONTENT", "A4_NOTE_CONTENT", "STABLE_NOTE_CONTENT"])
+def test_concurrent_edit_during_previous_note_upgrade_is_kept_without_write(notes, previous):
+    old = getattr(notes, previous)
+    original = document(notes, [managed(notes, content=old)])
+    changed = document(notes, [managed(notes, content=old + " edited")])
+    result = run_notes(notes, document=original, changeDocumentAtRead=2, changedDocument=changed)
+    assert result["result"]["status"] == "manual"
+    assert result["document"] == changed
+    assert "SaveNotes" not in methods(result)
+
+
+@pytest.mark.parametrize("previous", [None, [None], ["old"] * 5, ["é" * 8193]])
+def test_malformed_or_excessive_previous_content_list_never_writes(notes, previous):
+    original = document(notes, [managed(notes, content=notes.A2_NOTE_CONTENT)])
+    result = run_notes(notes, document=original, spec_overrides={"previousContents": previous})
+    assert result["result"]["status"] == "manual"
+    assert result["document"] == original
+    assert "SaveNotes" not in methods(result)
+
+
+@pytest.mark.parametrize("previous", ["A2_NOTE_CONTENT", "A4_NOTE_CONTENT", "STABLE_NOTE_CONTENT"])
+def test_exact_previous_note_upgrade_does_not_need_an_extra_note_slot(notes, previous):
+    others = [{"id": str(index), "content": "Keep"} for index in range(notes.MAX_NOTES - 1)]
+    result = run_notes(notes, document=document(notes, [*others, managed(notes, content=getattr(notes, previous))]))
+    assert result["result"]["status"] == "updated"
+    assert len(result["document"]["notes"]) == notes.MAX_NOTES
+    assert result["document"]["notes"][:-1] == others
 
 
 @pytest.mark.parametrize("changes", [{"content": "User edited"}, {"title": "User title"},
@@ -217,6 +294,25 @@ def test_wrapper_client_failure_keeps_optional_manual_instructions(notes, monkey
     assert "private endpoint" not in result["message"]
 
 
+def test_wrapper_reports_verified_a2_upgrade_as_updated(notes, monkeypatch):
+    class UpdatedClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *arguments):
+            pass
+
+        def evaluate(self, expression):
+            assert "previousContents" in expression
+            return {"ok": True, "status": "updated"}
+
+    monkeypatch.setattr(notes, "Client", UpdatedClient)
+    result = notes.add_notes(notes.HOME, notes.GAME, 3000000001)
+    assert result["ok"] is True and result["status"] == "updated"
+    assert "online co-op instructions" in result["message"]
+    assert result["content"] == notes.NOTE_CONTENT
+
+
 def test_module_has_no_file_or_session_mutation_routes(notes):
     source = (RESOURCES / "steam_notes.py").read_text(encoding="utf-8")
     assert "SetAppDescription" not in source and "steam_appid.txt" not in source
@@ -231,4 +327,4 @@ def test_authored_note_matches_current_controls_and_protocol_scope(notes):
     assert "Left bumper: change grenade type" in notes.NOTE_CONTENT
     assert "Right bumper: toggle flashlight" in notes.NOTE_CONTENT
     assert "compatible native/OpenCE protocol builds" in notes.NOTE_CONTENT
-    assert "experimental native ARM64 Linux/OpenXR" in notes.NOTE_CONTENT
+    assert "native ARM64 Linux/OpenXR" in notes.NOTE_CONTENT

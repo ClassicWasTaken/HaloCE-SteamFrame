@@ -6,24 +6,22 @@
   <img src="resources/artwork/halo-ce-logo.png" alt="Halo: Combat Evolved" width="180">
 </p>
 
+**Halo CE Steam Frame VR Mod — 1.4.0**
+
+[**Download Halo-Steam-Frame-Mod-Setup-1.4.0.exe**](https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/v1.4.0/Halo-Steam-Frame-Mod-Setup-1.4.0.exe) for Windows 10/11 x64. Run this one file; Python, an installer ZIP, and a separate USB tools download are unnecessary. [Release notes & SHA256 checksum](https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/tag/v1.4.0) · [1.4.0 source](https://github.com/ClassicWasTaken/HaloSteamFrameMod/tree/v1.4.0).
+
+Play native ARM64/OpenXR Halo CE with **LAN and online campaign co-op**, **head-directed walking**, and Xbox-style buttons. Aim with the right controller; the reticle follows the nominal shot trajectory at render rate. Stereo sun glow defaults to half intensity. The headset tester confirmed reticle motion and LAN/online campaign co-op work with the engine patch used by this release. Measured performance and distant-peer coverage have not been reported.
+
 <p align="center">
-  <a href="https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/v1.3.5/Halo-Steam-Frame-Mod-Setup-1.3.5.exe"><strong>DOWNLOAD VR MOD INSTALLER v1.3.5 — WINDOWS EXE</strong></a><br>
-  <sub>One installer file · No administrator rights needed</sub><br>
-  <a href="https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/tag/v1.3.5">Release notes &amp; checksum</a>
+  <img src="docs/images/halocevr-steam-frame-example.jpeg" alt="Halo CE VR gameplay example with tracked hands and a plasma rifle beneath Halo's night sky" width="800">
 </p>
 
-**Community VR mod installer for Halo: Combat Evolved on Steam Frame.** Installs an experimental native ARM64/OpenXR port with Xbox-style controls and Steam library artwork.
+*Community VR example by [u/Sea-Communication760](https://www.reddit.com/r/virtualreality/comments/1wpvi8n/halo_halocevr_working_great_on_steam_frame/): PC HaloCEVR on Steam Frame through Proton ARM. This is not a native 1.4.0 capture.*
 
-You need **Windows 10/11 x64**, a **Steam Frame**, and your own authorized **original Xbox Halo CE ISO/XISO or extracted maps**. **USA Rev 2 is validated**; Halo PC, Xbox 360 Anniversary, and MCC data are unsupported.
+Supply your own authorized **original Xbox Halo CE ISO/XISO or extracted maps**. USA Rev 2 was validated with the stable installer; PC, Xbox 360 Anniversary, and MCC data are unsupported. No retail executable, disc image, maps, product keys, or soundtrack is included or downloaded. Halo artwork and licensed components retain their rights and notices.
 
-No retail game executable, disc image, maps, product keys, or soundtrack is included or downloaded. Halo artwork and trademarks retain their owners' rights; software components keep their licenses. This community project is unaffiliated with Microsoft, Xbox, Bungie, or Valve.
+Choose **Install**, select your data, and follow the USB-C or network SSH guide. Setup adds Steam artwork and Notes automatically. The first build on the Frame can take tens of minutes.
 
-1. Run the EXE, choose **Install**, and select your ISO or maps folder.
-2. Enable Frame Developer Mode, set its user password, and connect over **USB-C** or **Wi-Fi / Ethernet**. The app guides you through SSH setup.
-3. Save and close games, keep **Steam Home** running, and click **Install Halo VR**. The first build can take tens of minutes; your Frame needs internet access.
+1.4.0 **replaces 1.3.5 in place** at `~/Games/HaloCENativeVR`, keeping **Halo: Combat Evolved VR (Native)** in Steam. **Install** recognizes a verified 1.3.5 installation and rebuilds it; **Repair** also upgrades it. Verified Xbox maps can be reused without an ISO. Old saves remain unchanged; the new engine uses `save-v1.4` and requires a new profile/campaign because older checkpoints are incompatible. Campaign has one player per machine, with LAN, Internet, and invite joining. Peers need matching **protocol 17** builds; 1.3.5 protocol 11 cannot join.
 
-Steam artwork and the description/control guide in **Notes** are added automatically during Install and Repair. Already installed? Choose **Repair** to refresh the game, or **Uninstall** to remove it with an optional save backup.
-
-The port is experimental; newer USB and library features still need physical Frame verification.
-
-[Detailed setup & troubleshooting](docs/SETUP.md) · [Controls](docs/CONTROLS.md) · [Sources](docs/SOURCES.md) · [Third-party notices](docs/THIRD_PARTY.md) · [Build from source](docs/SETUP.md#develop-and-rebuild-the-executable)
+[Setup](docs/SETUP.md) · [Controls](docs/CONTROLS.md) · [Release notes](docs/RELEASE_NOTES.md) · [Sources](docs/SOURCES.md) · [Third-party notices](docs/THIRD_PARTY.md)

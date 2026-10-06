@@ -25,7 +25,12 @@ from .ui import (BG, SIDEBAR, SURFACE, TEXT, MUTED, BORDER,
 SETUP_URL = "https://partner.steamgames.com/doc/steamhardware/steamframe/setup"
 PLATFORM_TOOLS_URL = "https://developer.android.com/tools/releases/platform-tools"
 SOURCE_URL = "https://github.com/OpenCommunityEdition/OpenCE/pull/85"
-APP_TITLE = "Halo • Community Steam Frame VR Mod Installer"
+APP_TITLE = "Halo • Steam Frame VR Mod Installer"
+EXPERIMENTAL_NOTICE = (
+    "LAN/online campaign, head-directed walking, and render-rate reticle.\n"
+    "Upgrades the native game; old saves are kept. Older checkpoints cannot be loaded.\n"
+    "Campaign uses one player per machine; co-op partners need matching builds."
+)
 CONTENT_DISCLOSURE = "No retail game executable, ISO, maps, product keys, or soundtrack is provided."
 ARTWORK_CREDIT = "Halo artwork is included. Halo artwork and trademarks belong to Microsoft."
 XBOX_REVISION_NOTE = "Original Xbox USA Rev 2 validated; other retail revisions are checked automatically."
@@ -39,7 +44,7 @@ STEAM_REMOVE_NOTE = ("Use Steam's Remove Non-Steam Game option for Halo: Combat 
 CONTROLS = (
     "A  Jump / accept     B  Melee / back     X  Reload / use     Y  Change weapon\n"
     "RT  Fire     LT  Grenade     LB  Change grenade     RB  Flashlight\n"
-    "Left stick  Move / click to crouch     Right stick  Turn / click to zoom\n"
+    "Left stick  Move by head direction / click to crouch     Right stick  Turn / click to zoom\n"
     "Menu  Pause     View  Scoreboard     Both grips  Recenter"
 )
 
@@ -316,8 +321,8 @@ class App(tk.Tk):
         choices.columnconfigure((0, 1, 2), weight=1, uniform="operations")
         self.mode_choices = []
         for index, title, subtitle, value in (
-            (0, "Install", "New native game", "install"),
-            (1, "Repair", "Keep saves", "repair"),
+            (0, "Install", "Install or upgrade", "install"),
+            (1, "Repair", "Refresh files", "repair"),
             (2, "Uninstall", "Remove game", "uninstall")):
             choice = Choice(choices, title, subtitle, self.mode, value, self._mode_changed)
             choice.grid(row=0, column=index, sticky="ew",
@@ -609,7 +614,7 @@ class App(tk.Tk):
         titles = ("UNINSTALL HALO VR" if uninstall else "GAME DATA", "CONNECT FRAME",
                   "UNINSTALL HALO VR" if uninstall else "INSTALL HALO VR")
         subtitles = ("Choose your save preference before removing the native game." if uninstall else
-                     "Install, repair, or uninstall the community VR mod.",
+                     "Upgrades the native game; older checkpoints cannot load.\nCo-op uses one player per machine and matching builds.",
                      "Prepare SSH, then connect to your Steam Frame.",
                      "Review the native game and saves before removing them." if uninstall else
                      "Community VR mod. Xbox controls. Your Steam library.")
@@ -834,7 +839,7 @@ class App(tk.Tk):
             "• Install SteamVR and allow at least 12 GB free on your Frame.\n"
             "• Repair refreshes the program and controls while preserving saves.\n"
             "• Install and repair automatically add Steam artwork and a game description in Steam Notes.\n"
-            "• Online play uses the native port's own multiplayer protocol.",
+            "• Online play uses the native port's own multiplayer protocol.\n\n" + EXPERIMENTAL_NOTICE,
             10, background=SURFACE, wraplength=530).pack(anchor="w")
         links = self._card(body, "Project references")
         Button(links, "Steam Frame SSH guide", lambda:webbrowser.open(SETUP_URL),

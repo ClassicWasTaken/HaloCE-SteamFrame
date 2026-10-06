@@ -452,6 +452,7 @@ def remote(tmp_path, monkeypatch):
     module.HOME = home
     module.CACHE = home / "cache"
     module.GAME = home / "Games/HaloCENativeVR"
+    monkeypatch.setattr(module.os, "getuid", lambda: home.stat().st_uid, raising=False)
     monkeypatch.setattr(module, "game_closed", lambda: None)
     return module
 
@@ -549,10 +550,10 @@ def test_remote_detects_changed_original_xbox_header(remote, tmp_path):
         remote.verify_maps(directory, manifest)
 
 
-def test_config_repair_preserves_save_location_and_user_preferences(remote):
-    old = '[paths]\nsaves = "/another/save/location"\n\n[audio]\nvolume = 0.4\n\n[vr]\naim="head"\nturn="snap"\nrefresh_rate=90.0\n\n[[plugins]]\nname="custom"\n'
+def test_config_repair_preserves_isolated_save_location_and_user_preferences(remote):
+    old = '[paths]\nsaves = ' + json.dumps(str(remote.save_root())) + '\n\n[audio]\nvolume = 0.4\n\n[vr]\naim="head"\nturn="snap"\nrefresh_rate=90.0\n\n[[plugins]]\nname="custom"\n'
     result = remote.tomllib.loads(remote.merge_config(old))
-    assert result["paths"]["saves"] == "/another/save/location"
+    assert result["paths"]["saves"] == str(remote.save_root())
     assert result["audio"]["volume"] == 0.4
     assert result["vr"]["aim"] == "controller"
     assert result["vr"]["turn"] == "snap" and result["vr"]["refresh_rate"] == 90.0
@@ -563,6 +564,71 @@ def test_config_repair_refuses_semantic_changes_inside_multiline_string(remote):
     old = '[vr]\nnote = """\n[other]\nexample text\n"""\naim = "head"\nenabled = false\nmelee_gesture = true\n'
     with pytest.raises(ValueError, match="safely|unrelated"):
         remote.merge_config(old)
+
+
+@pytest.mark.parametrize('value', ['/another/save/location', '../HaloCENativeVR/save', 'save', '', False])
+def test_new_config_refuses_legacy_external_or_ambiguous_save_paths(remote, value):
+    original = '[paths]\nsaves = ' + json.dumps(value) + '\n'
+    with pytest.raises(ValueError, match='owned|own game folder|version 1.4'):
+        remote.merge_config(original)
+
+
+def test_new_config_missing_paths_gets_versioned_defaults(remote):
+    updated = remote.tomllib.loads(remote.merge_config('[audio]\nvolume = 0.4\n'))
+    assert updated['paths'] == {'data': str(remote.GAME), 'saves': str(remote.save_root())}
+    assert updated['audio']['volume'] == 0.4
+    assert updated['vr']['aim'] == 'controller' and updated['vr']['movement'] == 'head'
+    assert updated['vr']['sun_glow_strength'] == 0.5
+    assert updated['network']['coop_enemies_mode'] == 'none'
+
+
+def test_repair_preserves_custom_sun_glow_strength(remote):
+    updated = remote.tomllib.loads(remote.merge_config('[vr]\nsun_glow_strength=0.25\n'))
+    assert updated['vr']['sun_glow_strength'] == 0.25
+
+
+@pytest.mark.parametrize('repair', [False, True])
+@pytest.mark.parametrize('unsafe', ['legacy-save-config', 'copied-experimental-config', 'symlinked-save-directory', 'missing-paths'])
+def test_new_reuse_and_repair_guard_save_format_and_keep_experimental_instance(remote, repair, unsafe):
+    experimental = remote.GAME.parent / 'HaloCENativeVRExperimental'
+    (experimental / 'save').mkdir(parents=True)
+    (experimental / 'halo').write_bytes(b'experimental executable')
+    (experimental / 'save/checkpoint').write_bytes(b'experimental checkpoint')
+    game = remote.GAME
+    game.mkdir()
+    header = bytearray(64)
+    header[:6] = b'\x7fELF\x02\x01'
+    struct.pack_into('<H', header, 18, 183)
+    for name in ('halo', 'libSDL3.so.0'):
+        (game / name).write_bytes(header)
+    maps = xbox_maps(game, remote)
+    (game / 'xbox-data-manifest.json').write_text(json.dumps(maps))
+    (game / remote.MARKER).write_text(json.dumps({'owner': remote.OWNER,
+        'sourceCommit': remote.SOURCE_COMMIT,
+        'files': {name: remote.digest(game / name) for name in ('halo', 'libSDL3.so.0')}}))
+    if unsafe == 'legacy-save-config':
+        config = {'paths': {'data': str(game), 'saves': str(game / 'save')}}
+    elif unsafe == 'copied-experimental-config':
+        config = {'paths': {'data': str(experimental), 'saves': str(experimental / 'save')}}
+    elif unsafe == 'missing-paths':
+        config = {'audio': {'volume': 0.4}}
+    else:
+        try:
+            remote.save_root().symlink_to(experimental / 'save', target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip('This host cannot create directory symlinks')
+        config = {'paths': {'data': str(game), 'saves': str(remote.save_root())}}
+    original = '\n'.join('[' + section + ']\n' + '\n'.join(key + ' = ' + json.dumps(value)
+        for key, value in entries.items()) for section, entries in config.items()) + '\n'
+    (game / 'config.toml').write_text(original)
+    if unsafe == 'missing-paths' and repair:
+        assert remote.existing_install(repair=True)['mapsVerified']
+    else:
+        with pytest.raises(ValueError, match='version 1.4|owned|own game folder|Symbolic links'):
+            remote.existing_install(repair=repair)
+    assert (game / 'config.toml').read_text() == original
+    assert (experimental / 'halo').read_bytes() == b'experimental executable'
+    assert (experimental / 'save/checkpoint').read_bytes() == b'experimental checkpoint'
 
 
 def test_repair_backup_and_replacements_preserve_saves_and_unrelated_files(remote):
@@ -641,7 +707,7 @@ def test_full_repair_rebuilds_damaged_native_files_preserves_maps_saves_and_conf
     (game / "xbox-data-manifest.json").write_text(json.dumps(maps))
     (game / "halo").write_bytes(b"damaged executable")
     (game / "libSDL3.so.0").write_bytes(b"old library")
-    (game / "config.toml").write_text('[paths]\nsaves="/my/saves"\n[audio]\nvolume=0.3\n[vr]\naim="head"\nturn="snap"\n')
+    (game / "config.toml").write_text('[paths]\nsaves=' + json.dumps(str(game / "save")) + '\n[audio]\nvolume=0.3\n[vr]\naim="head"\nturn="snap"\n')
     (game / "save").mkdir()
     (game / "save/checkpoint").write_bytes(b"campaign progress")
     (game / "maps/custom.map").write_bytes(b"user mod")
@@ -668,15 +734,298 @@ def test_full_repair_rebuilds_damaged_native_files_preserves_maps_saves_and_conf
     struct.pack_into("<H", header, 18, 183)
     (build / "halo").write_bytes(header + b"new native game")
     (build / "libSDL3.so.0").write_bytes(header + b"new native library")
+    (build / "brokers.txt").write_text("broker.example.org:1883\n")
     monkeypatch.setattr(remote, "command", lambda argv, **kwargs: "native libraries resolved")
     response = remote.finalize(identifier, repair=True)
     assert response["repaired"] is True and response["mapsReinstalled"] is False
     assert (game / "halo").read_bytes() == header + b"new native game"
     assert (game / "save/checkpoint").read_bytes() == b"campaign progress"
+    assert (game / "brokers.txt").read_text() == "broker.example.org:1883\n"
+    assert remote.read_marker(game / remote.MARKER)["files"]["brokers.txt"] == remote.digest(game / "brokers.txt")
     assert (game / "maps/custom.map").read_bytes() == b"user mod"
     merged = remote.tomllib.loads((game / "config.toml").read_text())
-    assert merged["paths"]["saves"] == "/my/saves"
+    assert merged["paths"]["saves"] == str(remote.save_root())
+    assert remote.save_root().is_dir() and not any(remote.save_root().iterdir())
     assert merged["audio"]["volume"] == 0.3
     assert merged["vr"]["aim"] == "controller" and merged["vr"]["turn"] == "snap"
     assert remote.read_marker(game / remote.MARKER)["sourceCommit"] == remote.SOURCE_COMMIT
     assert remote.existing_install()["mapsVerified"] is True
+
+
+def native_install(remote, *, source=None, save_path=None):
+    game = remote.GAME
+    game.mkdir(parents=True)
+    header = bytearray(64)
+    header[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<H", header, 18, 183)
+    for name in ("halo", "libSDL3.so.0"):
+        (game / name).write_bytes(header + b"previous native program")
+    manifest = xbox_maps(game, remote)
+    (game / "xbox-data-manifest.json").write_text(json.dumps(manifest))
+    save_path = save_path or game / "save"
+    save_path.mkdir(parents=True)
+    (save_path / "checkpoint").write_bytes(b"incompatible previous checkpoint")
+    (game / "config.toml").write_text('[paths]\ndata = ' + json.dumps(str(game))
+        + '\nsaves = ' + json.dumps(str(save_path)) + '\n[audio]\nvolume = 0.3\n[vr]\nturn = "snap"\n')
+    marker = {"owner": remote.OWNER, "sourceCommit": source or remote.LEGACY_SOURCE_COMMIT,
+              "files": {name: remote.digest(game / name) for name in ("halo", "libSDL3.so.0")}}
+    (game / remote.MARKER).write_text(json.dumps(marker))
+    return manifest, save_path
+
+
+def built_run(remote, manifest, identifier, *, existing=True):
+    remote.owned(remote.CACHE)
+    resources = remote.CACHE / "resources"
+    resources.mkdir(exist_ok=True)
+    (resources / "frame-controls.patch").write_bytes(b"tested gameplay patch")
+    directory = remote.CACHE / "runs" / identifier
+    remote.owned(directory)
+    metadata = remote.read_marker(directory / remote.MARKER)
+    metadata["mapsOrigin"] = "existing" if existing else "upload"
+    (directory / remote.MARKER).write_text(json.dumps(metadata))
+    (directory / "stage").mkdir()
+    upload = directory / "upload"
+    upload.mkdir()
+    if not existing:
+        manifest = xbox_maps(upload, remote)
+    (upload / "xbox-data-manifest.json").write_text(json.dumps(manifest))
+    build = directory / "src/build/linux_arm64"
+    build.mkdir(parents=True)
+    header = bytearray(64)
+    header[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<H", header, 18, 183)
+    for name in ("halo", "libSDL3.so.0"):
+        (build / name).write_bytes(header + b"new native program")
+    (build / "brokers.txt").write_text("broker.example.org:1883\n")
+    return directory
+
+
+@pytest.mark.parametrize("kind", ["default", "custom-internal", "external"])
+def test_verified_stable_upgrade_keeps_old_checkpoints_and_backs_up_config(remote, monkeypatch, kind):
+    path = {"default": remote.GAME / "save", "custom-internal": remote.GAME / "profiles/custom",
+            "external": remote.HOME / "external-checkpoints"}[kind]
+    manifest, previous = native_install(remote, save_path=path)
+    checkpoint = previous / "checkpoint"
+    before = (checkpoint.read_bytes(), checkpoint.stat().st_mtime_ns)
+    old_config = (remote.GAME / "config.toml").read_bytes()
+    old_program = (remote.GAME / "halo").read_bytes()
+    closed = Mock()
+    monkeypatch.setattr(remote, "game_closed", closed)
+    verified = remote.existing_install()
+    assert verified["needsUpgrade"] and verified["mapsVerified"]
+    assert verified["previousSavePaths"] == [str(previous)]
+    closed.assert_called_once()
+    identifier = "e" * 32
+    built_run(remote, manifest, identifier)
+    monkeypatch.setattr(remote, "command", lambda argv, **kwargs: "native libraries resolved")
+    result = remote.finalize(identifier, repair=True)
+    assert result["repaired"] and not result["mapsReinstalled"]
+    assert result["previousSavePaths"] == [str(previous)]
+    assert (checkpoint.read_bytes(), checkpoint.stat().st_mtime_ns) == before
+    assert (Path(result["backupPath"]) / "config.toml").read_bytes() == old_config
+    assert (Path(result["backupPath"]) / "halo").read_bytes() == old_program
+    settings = remote.tomllib.loads((remote.GAME / "config.toml").read_text())
+    assert settings["paths"] == {"data": str(remote.GAME), "saves": str(remote.save_root())}
+    assert settings["audio"]["volume"] == 0.3 and settings["vr"]["turn"] == "snap"
+    assert remote.save_root().is_dir() and not any(remote.save_root().iterdir())
+    marker = remote.read_marker(remote.GAME / remote.MARKER)
+    assert marker["installerVersion"] == "1.4.0" and marker["networkProtocol"] == 17
+    assert marker["saveRoot"] == str(remote.save_root()) and "experimental" not in marker
+    assert not remote.existing_install()["needsUpgrade"]
+    # A later Repair preserves both generations and the former custom location.
+    (remote.save_root() / "checkpoint").write_bytes(b"new compatible checkpoint")
+    built_run(remote, manifest, "f" * 32)
+    remote.finalize("f" * 32, repair=True)
+    assert remote.read_marker(remote.GAME / remote.MARKER)["previousSavePaths"] == [str(previous)]
+    assert checkpoint.read_bytes() == before[0]
+    assert (remote.save_root() / "checkpoint").read_bytes() == b"new compatible checkpoint"
+    inventory = remote.uninstall_inventory(remote.GAME)
+    selected, external = remote.uninstall_save_files(inventory)
+    assert str(Path("save-v1.4/checkpoint")) in selected
+    if kind == "external":
+        assert external == [str(previous)] and not any("external-checkpoints" in item for item in selected)
+    else:
+        assert str(checkpoint.relative_to(remote.GAME)) in selected
+
+
+@pytest.mark.parametrize("trigger", ["marker-failure", "cancel-after-marker"])
+def test_failed_upgrade_restores_original_program_config_marker_and_all_checkpoints(remote, monkeypatch, trigger):
+    manifest, previous = native_install(remote)
+    old = {name: (remote.GAME / name).read_bytes() for name in ("halo", "libSDL3.so.0", "config.toml", remote.MARKER)}
+    checkpoint = previous / "checkpoint"
+    checkpoint_signature = (checkpoint.read_bytes(), checkpoint.stat().st_mtime_ns)
+    identifier = "a" * 32
+    directory = built_run(remote, manifest, identifier)
+    monkeypatch.setattr(remote, "command", lambda argv, **kwargs: "native libraries resolved")
+    replace = remote.os.replace
+    def fail_marker(source, target):
+        if Path(source) == directory / "stage" / remote.MARKER:
+            if trigger == "marker-failure":
+                raise OSError("injected final marker failure")
+            replace(source, target)
+            (directory / "cancelled").write_text("cancel immediately after marker publication")
+            return
+        return replace(source, target)
+    monkeypatch.setattr(remote.os, "replace", fail_marker)
+    with pytest.raises((OSError, ValueError), match="marker failure|cancelled"):
+        remote.finalize(identifier, repair=True)
+    assert {name: (remote.GAME / name).read_bytes() for name in old} == old
+    assert (checkpoint.read_bytes(), checkpoint.stat().st_mtime_ns) == checkpoint_signature
+    assert remote.save_root().is_dir() and not any(remote.save_root().iterdir())
+    assert remote.existing_install()["needsUpgrade"]  # Empty failed-run directory permits retry.
+
+
+@pytest.mark.parametrize("damage", ["program-hash", "map", "unknown-revision", "occupied-new-save"])
+def test_automatic_upgrade_refuses_unverified_or_unknown_state(remote, damage):
+    _, previous = native_install(remote)
+    config = (remote.GAME / "config.toml").read_bytes()
+    if damage == "program-hash":
+        with (remote.GAME / "halo").open("ab") as stream:
+            stream.write(b"modified")
+    elif damage == "map":
+        (remote.GAME / "maps/a10.map").write_bytes(b"invalid map")
+    elif damage == "unknown-revision":
+        marker = remote.read_marker(remote.GAME / remote.MARKER)
+        marker["sourceCommit"] = "unknown source"
+        (remote.GAME / remote.MARKER).write_text(json.dumps(marker))
+    else:
+        remote.save_root().mkdir()
+        (remote.save_root() / "checkpoint").write_bytes(b"unknown save format")
+    with pytest.raises(ValueError):
+        remote.existing_install()
+    assert (remote.GAME / "config.toml").read_bytes() == config
+    assert (previous / "checkpoint").read_bytes() == b"incompatible previous checkpoint"
+
+
+def test_legacy_library_and_finalize_cannot_shortcut_the_upgrade(remote, monkeypatch):
+    manifest, _ = native_install(remote)
+    monkeypatch.setattr(remote, "preflight_uninstall", lambda: {"home": str(remote.HOME)})
+    with pytest.raises(ValueError, match="Use Install"):
+        remote.preflight_library()
+    with pytest.raises(ValueError, match="Use Install"):
+        remote.shortcut()
+    built_run(remote, manifest, "b" * 32)
+    with pytest.raises(ValueError, match="needs a version 1.4 upgrade"):
+        remote.build("b" * 32)
+    with pytest.raises(ValueError, match="needs a version 1.4 upgrade"):
+        remote.finalize("b" * 32)
+
+
+def test_install_automatically_promotes_verified_legacy_source_to_repair_without_map_upload():
+    class UpgradeConnection(FakeConnection):
+        def run(self, argv, **kwargs):
+            if argv[1] == "-c":
+                reply = json.loads(super().run(argv, **kwargs).removeprefix("HFI_RESULT "))
+                reply["existing"]["needsUpgrade"] = True
+                return "HFI_RESULT " + json.dumps(reply)
+            if argv[2] in ("build", "finalize"):
+                self.commands.append(argv)
+                return "HFI_RESULT " + json.dumps({"gamePath": "/home/steamos/Games/HaloCENativeVR", "repaired": True})
+            return super().run(argv, **kwargs)
+    settings = Settings("frame", "private", reinstall_existing=False)
+    fake = UpgradeConnection(settings)
+    progress = []
+    result = Installer(lambda _: fake, RESOURCES).run(settings, None, lambda *args: progress.append(args))
+    assert result.repaired and not result.reused and fake.closed
+    steps = [argv for argv in fake.commands if argv[1] != "-c"]
+    assert [argv[2] for argv in steps] == ["prepare", "build", "finalize", "shortcut"]
+    assert all("--repair" in argv for argv in steps)
+    assert "--use-existing-maps" in steps[0]
+    assert all(not remote.endswith(".map") for _, remote in fake.uploads)
+    assert any(args[0] == "upgrade" and "save-v1.4" in args[1] for args in progress)
+
+
+def test_library_registration_rejects_legacy_preflight_response_without_upload_or_build():
+    class LegacyConnection(FakeConnection):
+        def run(self, argv, **kwargs):
+            reply = json.loads(super().run(argv, **kwargs).removeprefix("HFI_RESULT "))
+            reply["existing"]["needsUpgrade"] = True
+            return "HFI_RESULT " + json.dumps(reply)
+    fake = LegacyConnection(Settings("frame", "private"))
+    with pytest.raises(SSHError, match="Use Install"):
+        Installer(lambda _: fake, RESOURCES).add_to_steam(fake.settings)
+    assert fake.closed and not fake.uploads and len(fake.commands) == 1
+
+
+def test_keep_saves_retains_both_known_roots_even_without_config(remote):
+    native_install(remote)
+    (remote.GAME / "config.toml").unlink()
+    remote.save_root().mkdir()
+    (remote.save_root() / "checkpoint").write_bytes(b"new checkpoint")
+    selected, external = remote.uninstall_save_files(remote.uninstall_inventory(remote.GAME))
+    assert selected == [str(Path("save-v1.4/checkpoint")), str(Path("save/checkpoint"))] and not external
+
+
+def frame_preflight(remote, monkeypatch, free):
+    monkeypatch.setattr(remote.pwd, "getpwuid", lambda uid: types.SimpleNamespace(pw_name="steamos"))
+    monkeypatch.setattr(remote.pathlib.Path, "home", lambda: remote.HOME)
+    monkeypatch.setattr(remote.platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(remote, "os_release", lambda: {"ID": "steamos"})
+    monkeypatch.setattr(remote.shutil, "which", lambda name: name)
+    monkeypatch.setattr(remote.shutil, "disk_usage", lambda path: types.SimpleNamespace(free=free))
+    monkeypatch.setattr(remote, "command", lambda argv, **kwargs: '{"host":{"security":{"rootless":true}}}')
+    library = remote.HOME / "steamvr/linuxarm64/runtime.so"
+    library.parent.mkdir(parents=True)
+    library.write_bytes(b"test runtime")
+    runtime = remote.HOME / ".config/openxr/1/active_runtime.json"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(json.dumps({"runtime": {"library_path": str(library)}}))
+
+
+def test_automatic_upgrade_requires_build_space_and_closed_game(remote, monkeypatch):
+    native_install(remote)
+    frame_preflight(remote, monkeypatch, free=remote.MIN_FREE_BYTES - 1)
+    with pytest.raises(ValueError, match="12 GiB"):
+        remote.preflight()
+    monkeypatch.setattr(remote.shutil, "disk_usage", lambda path: types.SimpleNamespace(free=remote.MIN_FREE_BYTES))
+    closed = Mock(side_effect=ValueError("game is running"))
+    monkeypatch.setattr(remote, "game_closed", closed)
+    with pytest.raises(ValueError, match="game is running"):
+        remote.preflight()
+    closed.assert_called_once()
+    monkeypatch.setattr(remote, "game_closed", lambda: None)
+    assert remote.preflight()["existing"]["needsUpgrade"]
+
+
+def test_fresh_install_publishes_only_new_save_format(remote, monkeypatch):
+    identifier = "c" * 32
+    built_run(remote, {}, identifier, existing=False)
+    monkeypatch.setattr(remote, "command", lambda argv, **kwargs: "native libraries resolved")
+    monkeypatch.setattr(remote, "rename_noreplace", lambda source, target: source.rename(target))
+    result = remote.finalize(identifier)
+    assert not result["reused"] and remote.save_root().is_dir()
+    assert not (remote.GAME / "save").exists()
+    settings = remote.tomllib.loads((remote.GAME / "config.toml").read_text())
+    assert settings["paths"]["saves"] == str(remote.save_root())
+    assert remote.read_marker(remote.GAME / remote.MARKER)["previousSavePaths"] == []
+    assert not remote.existing_install()["needsUpgrade"]
+
+
+def test_legacy_upgrade_refuses_previous_save_metadata_overflow_before_any_replacement(remote):
+    native_install(remote)
+    marker = remote.read_marker(remote.GAME / remote.MARKER)
+    marker["previousSavePaths"] = [str(remote.GAME / ("previous-" + str(index))) for index in range(32)]
+    (remote.GAME / remote.MARKER).write_text(json.dumps(marker))
+    config = (remote.GAME / "config.toml").read_bytes()
+    with pytest.raises(ValueError, match="save-location count"):
+        remote.existing_install()
+    assert (remote.GAME / "config.toml").read_bytes() == config and not remote.save_root().exists()
+
+
+def test_recognized_codex_legacy_marker_upgrades_without_changing_old_checkpoint(remote, monkeypatch):
+    manifest, previous = native_install(remote)
+    marker = remote.read_marker(remote.GAME / remote.MARKER)
+    marker["owner"] = "codex-halo-native-frame-20261005"
+    marker["build"] = {"sourceCommit": marker.pop("sourceCommit")}
+    (remote.GAME / remote.MARKER).unlink()
+    codex = remote.GAME / ".codex-halo-native-install.json"
+    codex.write_text(json.dumps(marker))
+    before = codex.read_bytes()
+    assert remote.existing_install()["needsUpgrade"]
+    built_run(remote, manifest, "d" * 32)
+    monkeypatch.setattr(remote, "command", lambda argv, **kwargs: "native libraries resolved")
+    remote.finalize("d" * 32, repair=True)
+    assert codex.read_bytes() == before
+    assert (previous / "checkpoint").read_bytes() == b"incompatible previous checkpoint"
+    assert remote.read_marker(remote.GAME / remote.MARKER)["sourceCommit"] == remote.SOURCE_COMMIT
+    assert not remote.existing_install()["needsUpgrade"]

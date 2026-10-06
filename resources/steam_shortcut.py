@@ -26,7 +26,7 @@ ARTWORK = (("p", ".jpg", "halo-ce-cover.jpg", "84fee9349f8f00d8ade44c840330ac54e
            ("_logo", ".png", "halo-ce-logo.png", "7df3336e9988291552270764e80196b1892ab9d11b79d7d289e6243746d42dc8"))
 ICON_NAME = "halo-ce-icon.png"
 ICON_SHA256 = "184620356407e42a33877528c4f14b702df8b026415a99ed16976565fcfbce36"
-ICON_SOURCE_COMMIT = "88142798513ebd99fc7c6224023e8b44c05d0106"
+ICON_SOURCE_COMMIT = "2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4"
 ARTWORK_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 # Verified against the installed Steam client's library.js asset enum.
 # Shortcut icons have their own path setter and are not sent through this API.

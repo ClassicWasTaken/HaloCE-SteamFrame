@@ -106,15 +106,15 @@
     },
     {
       "name": "halo-steam-frame-installer",
-      "version": "1.3.5",
+      "version": "1.4.0",
       "license_expression": "MIT",
       "declared_license": null,
       "project_urls": [],
       "notices": [
         {
-          "path": "packages/halo-steam-frame-installer/halo_steam_frame_installer-1.3.5.dist-info/licenses/LICENSE",
-          "sha256": "b19db6d1e8942380f6a0dc3b9ec39cec802606c9d1c08a6050eae2990568afbb",
-          "bytes": 1318
+          "path": "packages/halo-steam-frame-installer/halo_steam_frame_installer-1.4.0.dist-info/licenses/LICENSE",
+          "sha256": "04a51df2edd89917e3099e2f6f171c36891f1d6ac234015867b57a1d10f928d5",
+          "bytes": 1343
         }
       ]
     },
@@ -212,28 +212,6 @@
           "path": "packages/pefile/pefile-2024.8.26.dist-info/LICENSE",
           "sha256": "b44409c067c6da52bfb54bb6624fb11a7b52157c3a13ae1400232f8196e86ad3",
           "bytes": 1083
-        }
-      ]
-    },
-    {
-      "name": "pillow",
-      "version": "12.3.0",
-      "license_expression": "MIT-CMU",
-      "declared_license": null,
-      "project_urls": [
-        "Release notes, https://pillow.readthedocs.io/en/stable/releasenotes/index.html",
-        "Changelog, https://github.com/python-pillow/Pillow/releases",
-        "Documentation, https://pillow.readthedocs.io",
-        "Funding, https://tidelift.com/subscription/pkg/pypi-pillow?utm_source=pypi-pillow&utm_medium=pypi",
-        "Homepage, https://python-pillow.github.io",
-        "Mastodon, https://fosstodon.org/@pillow",
-        "Source, https://github.com/python-pillow/Pillow"
-      ],
-      "notices": [
-        {
-          "path": "packages/pillow/pillow-12.3.0.dist-info/licenses/LICENSE",
-          "sha256": "4f7866a74802c6326f81faff59a56546b6aec2b10b91973e0e9308de95e79857",
-          "bytes": 78016
         }
       ]
     },

@@ -53,14 +53,14 @@ The Windows download contains the mod installer and build instructions; no retai
 
 | Upstream component | Notice/reference |
 | --- | --- |
-| [Halo native port / decompilation](https://github.com/startupfoundry/halo-ce-universal/blob/88142798513ebd99fc7c6224023e8b44c05d0106/LICENSE.md) | CC0-1.0 for the upstream source. This does not grant rights in the commercial game data or third parties' rights. |
+| [Halo native port / decompilation](https://github.com/startupfoundry/halo-ce-universal/blob/2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4/LICENSE.md) | CC0-1.0 for the upstream source. This does not grant rights in the commercial game data or third parties' rights. |
 | [Local controller/tutorial patch](../resources/frame-controls.patch) | A documented modification of the pinned upstream source; see [CONTROLS.md](CONTROLS.md). |
 | [SDL 3.4.16](https://github.com/libsdl-org/SDL/blob/release-3.4.16/LICENSE.txt) | zlib license; retain the original notice with the native library. |
 | [musl 1.2.5](https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT?h=v1.2.5) | MIT and notices identified in its COPYRIGHT file. Used for the upstream ILP32 guest. |
-| [Khronos OpenXR SDK headers](https://github.com/startupfoundry/halo-ce-universal/blob/88142798513ebd99fc7c6224023e8b44c05d0106/port/third_party/openxr/README.md) | OpenXR SDK 1.1.63, Apache-2.0 OR MIT. Header provenance is documented upstream. |
-| [mbedTLS, expat, miniupnpc, KCP, tomlc17 and stb](https://github.com/startupfoundry/halo-ce-universal/tree/88142798513ebd99fc7c6224023e8b44c05d0106/port/third_party) | Their individual upstream license files apply. Preserve the actual files when producing the native installation. |
-| [extract-xiso](https://github.com/startupfoundry/halo-ce-universal/blob/88142798513ebd99fc7c6224023e8b44c05d0106/port/third_party/extract-xiso/LICENSE.TXT) | Custom BSD-style notice with acknowledgement and attribution conditions. This product includes software developed by in <in@fishtank.com>. |
-| [Upstream font resources](https://github.com/startupfoundry/halo-ce-universal/tree/88142798513ebd99fc7c6224023e8b44c05d0106/port/assets/fonts) | Retain Overpass's SIL Open Font License and Newtown's public-domain notice when using those upstream resources. |
+| [Khronos OpenXR SDK headers](https://github.com/startupfoundry/halo-ce-universal/blob/2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4/port/third_party/openxr/README.md) | OpenXR SDK 1.1.63, Apache-2.0 OR MIT. Header provenance is documented upstream. |
+| [mbedTLS, expat, miniupnpc, KCP, tomlc17 and stb](https://github.com/startupfoundry/halo-ce-universal/tree/2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4/port/third_party) | Their individual upstream license files apply. Preserve the actual files when producing the native installation. |
+| [extract-xiso](https://github.com/startupfoundry/halo-ce-universal/blob/2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4/port/third_party/extract-xiso/LICENSE.TXT) | Custom BSD-style notice with acknowledgement and attribution conditions. This product includes software developed by in <in@fishtank.com>. |
+| [Upstream font resources](https://github.com/startupfoundry/halo-ce-universal/tree/2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4/port/assets/fonts) | Retain Overpass's SIL Open Font License and Newtown's public-domain notice when using those upstream resources. |
 
 The rootless build environment installs [Ubuntu packages](https://ubuntu.com/legal/open-source) and [LLVM](https://llvm.org/docs/DeveloperPolicy.html#license) under their own licenses inside its container. The installer does not relicense those tools or SteamOS/SteamVR. Game artwork, names and data remain the property of their respective rights holders.
 
@@ -79,6 +79,10 @@ A cover thumbnail identifies Halo inside the installer, and the portrait and lan
 Existing library art and icons are retained, including custom images with another supported file extension; missing assets can be installed. Exact image hashes, original-image hashes, and source attribution are in the [artwork resource notice](../resources/artwork/README.md). The optional artwork preparation utility uses Pillow only during development, not in the frozen installer runtime. The repository and executable still contain no disc image, commercial map data, product key, or commercial game binary.
 
 The Steam Notes description is original summary and control-guide text, not copied store text. Notes remain a private Steam feature governed by Steam's own behavior; no Steam client code is redistributed by the helper. Observed client interfaces are credited in [SOURCES.md](SOURCES.md#description-and-controls-in-steam-notes).
+
+## README gameplay image
+
+`docs/images/halocevr-steam-frame-example.jpeg` is an unchanged community screenshot by [u/Sea-Communication760](https://www.reddit.com/r/virtualreality/comments/1wpvi8n/halo_halocevr_working_great_on_steam_frame/), showing the PC HaloCEVR mod on Steam Frame through Proton ARM. It is labeled as a community example and is not a native 1.4.0 capture. The screenshot and underlying Halo content retain their respective rights; the installer's MIT code license does not apply to this image. See [the image source notice](images/README.md) for its original URL and SHA256.
 
 ## User-supplied menu audio
 

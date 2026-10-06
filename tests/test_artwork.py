@@ -215,7 +215,7 @@ def owned_game(tmp_path):
     program[18:20] = (183).to_bytes(2, "little")
     (game / "halo").write_bytes(program)
     (game / ".halo-frame-installer.json").write_text(json.dumps({
-        "owner": "halo-frame-installer", "sourceCommit": "88142798513ebd99fc7c6224023e8b44c05d0106",
+        "owner": "halo-frame-installer", "sourceCommit": "2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4",
         "files": {"halo": hashlib.sha256(program).hexdigest()}}))
     return game
 

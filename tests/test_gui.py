@@ -126,7 +126,7 @@ def test_control_guide_matches_expected_layout():
 def test_community_mod_title_and_content_disclosure_are_visible_and_accurate(app):
     import tkinter as tk
     from halo_frame_installer.gui import APP_TITLE, CONTENT_DISCLOSURE, ARTWORK_CREDIT
-    assert app.title() == APP_TITLE == 'Halo • Community Steam Frame VR Mod Installer'
+    assert app.title() == APP_TITLE == 'Halo • Steam Frame VR Mod Installer'
     visible = '\n'.join(_display_text(app))
     assert 'STEAM FRAME VR MOD' in visible and 'COMMUNITY MOD INSTALLER' in visible
     assert CONTENT_DISCLOSURE in app.data_disclosure.cget('text')
@@ -883,7 +883,7 @@ def test_default_window_shows_all_operations_and_game_data_authorization(app):
         assert top <= control.winfo_rooty()
         assert control.winfo_rooty() + control.winfo_height() <= bottom
     assert len({control.winfo_rooty() for control in app.mode_choices}) == 1
-    assert 'uninstall' in app.page_subtitle.cget('text').lower()
+    assert 'older checkpoints cannot load' in app.page_subtitle.cget('text').lower()
 
 
 @WINDOWS_GUI
