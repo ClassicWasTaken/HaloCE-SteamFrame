@@ -304,7 +304,7 @@ def update_shortcut(data: bytes | None, executable: str, directory: str) -> tupl
 
 
 def remove_shortcut(data: bytes, executable: str) -> tuple[bytes, list[int]]:
-    """Remove only exact native title/path matches; keep all foreign fields."""
+    """Remove only entries that launch the native executable; keep all foreign fields."""
     root = loads(data)
     shortcuts = root.get("shortcuts")
     if shortcuts is None or shortcuts.kind != 0:
@@ -314,13 +314,17 @@ def remove_shortcut(data: bytes, executable: str) -> tuple[bytes, list[int]]:
         if entry.kind != 0:
             raise ValueError("Unexpected Steam shortcut record; no changes were made.")
         fields = entry.value
-        title = fields.get("AppName", fields.get("appname"))
         path = fields.get("Exe", fields.get("exe"))
-        if (title is not None and title.kind == 1 and title.value == NAME
-                and path is not None and path.kind == 1 and path.value in (executable, f'"{executable}"')):
+        # Ownership is the native executable, not the display title: Steam
+        # lets users rename library entries, and the live client path treats
+        # an entry pointing at the native executable as owned as well. Match
+        # the path exactly, bare or quoted once, like the live client does.
+        # A malformed app ID leaves the entry in place instead of aborting
+        # the removal of the valid ones.
+        if path is not None and path.kind == 1 and path.value in (executable, f'"{executable}"'):
             appid = fields.get("appid")
             if appid is None or appid.kind != 2 or not 2 ** 31 <= appid.value < 2 ** 32:
-                raise ValueError("The native Halo shortcut has an invalid app ID; no changes were made.")
+                continue
             matches.append(index)
             appids.append(appid.value)
     for index in matches:
