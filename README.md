@@ -6,7 +6,7 @@
   <img src="resources/artwork/halo-ce-logo.png" alt="Halo: Combat Evolved" width="180">
 </p>
 
-# Halo CE Steam Frame VR Mod
+<h1 align="center">Halo CE Steam Frame VR Mod</h1>
 
 <h2 align="center">
   <a href="https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/v1.4.0/Halo-Steam-Frame-Mod-Setup-1.4.0.exe">Download 1.4.0 — Windows installer (.exe)</a>
