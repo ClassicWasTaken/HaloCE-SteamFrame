@@ -124,6 +124,49 @@ def test_uninstall_keeps_saves_removes_all_exact_native_entries_and_managed_art(
     assert (saved / "save/profile.sav").read_bytes() == b"campaign progress"
 
 
+def test_uninstall_removes_a_native_entry_the_user_renamed(installation):
+    remote, steam, configs, appids, _ = installation
+    config = configs[0]
+    executable = str(remote.GAME / "halo")
+    root = steam.loads((config / "shortcuts.vdf").read_bytes())
+    for entry in root["shortcuts"].value.values():
+        path = entry.value.get("Exe")
+        if path is not None and path.value in (executable, f'"{executable}"'):
+            entry.value["AppName"] = steam.Value(1, "My favorite Halo")
+    (config / "shortcuts.vdf").write_bytes(steam.dumps(root))
+    result = remote.uninstall(RUN_ID, keep_saves=True)
+    assert result["uninstalled"] and result["steam"]["status"] == "removed"
+    assert result["steam"]["accounts"] == ["10", "20"]
+    remaining = steam.loads((config / "shortcuts.vdf").read_bytes())["shortcuts"].value
+    assert set(remaining) == {"0", "2"}
+    assert "My favorite Halo" not in {entry.value["AppName"].value for entry in remaining.values()}
+    assert result["steam"]["appids"] == sorted(set(appids))
+    assert not (config / "grid" / f"{appids[0]}p.jpg").exists()
+    assert not (config / "grid" / f"{appids[0]}.png").exists()
+    assert (configs[1] / "grid" / f"{appids[1]}.png").read_bytes() == b"custom user tile"
+    assert (configs[0] / "grid/10p.jpg").read_bytes() == b"other game's art"
+    backups = list(config.glob("shortcuts.vdf.halo-frame-uninstall-*.bak"))
+    assert len(backups) == 1 and b"My favorite Halo" in backups[0].read_bytes()
+
+
+def test_uninstall_skips_native_entries_with_malformed_ids_and_odd_quoting(installation):
+    remote, steam, configs, _, _ = installation
+    config = configs[0]
+    executable = str(remote.GAME / "halo")
+    root = steam.loads((config / "shortcuts.vdf").read_bytes())
+    root["shortcuts"].value["3"] = steam.Value(0, OrderedDict([
+        ("appid", steam.Value(1, "not-a-number")), ("AppName", steam.Value(1, "Broken id")),
+        ("Exe", steam.Value(1, executable))]))
+    root["shortcuts"].value["4"] = steam.Value(0, OrderedDict([
+        ("appid", steam.Value(2, 0xF2233445)), ("AppName", steam.Value(1, "Odd quotes")),
+        ("Exe", steam.Value(1, executable + '"'))]))
+    (config / "shortcuts.vdf").write_bytes(steam.dumps(root))
+    result = remote.uninstall(RUN_ID, keep_saves=True)
+    assert result["uninstalled"] and result["steam"]["status"] == "removed"
+    remaining = steam.loads((config / "shortcuts.vdf").read_bytes())["shortcuts"].value
+    assert set(remaining) == {"0", "2", "3", "4"}
+
+
 def test_uninstall_without_keep_saves_deletes_contained_saves_only(installation):
     remote, _, _, _, _ = installation
     outside = remote.HOME / "external-saves"
