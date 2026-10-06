@@ -4,7 +4,7 @@ from unittest.mock import Mock
 import paramiko
 import pytest
 
-from halo_frame_installer.ssh import Settings, SSHConnection, SSHError, _VerifyHost, fingerprint, validate_host
+from halo_frame_installer.ssh import CancelledError, Settings, SSHConnection, SSHError, _VerifyHost, fingerprint, validate_host
 
 
 @pytest.mark.parametrize("host", ["192.168.1.12", "frame.local", "frame", "::1"])
@@ -201,3 +201,57 @@ def test_uninstall_timeout_reports_uncertain_removal_and_closes_channel(monkeypa
     assert 'were kept' not in str(error.value)
     channel.close.assert_called_once()
     assert not connection._command_channels
+
+
+@pytest.mark.parametrize('failure', [paramiko.SSHException('SSH session not active'), SSHError('cancel command failed')])
+def test_failed_cancel_notice_does_not_mask_the_cancellation(monkeypatch, failure):
+    channel = Mock()
+    channel.recv_ready.return_value = False
+    channel.exit_status_ready.return_value = False
+    client = Mock()
+    client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    cancel = threading.Event()
+    cancel.set()
+    on_cancel = Mock(side_effect=failure)
+    with pytest.raises(CancelledError, match='cancelled'):
+        SSHConnection(Settings('frame', 'private')).run(['python3', 'helper.py'],
+                                                        cancel_event=cancel, on_cancel=on_cancel)
+    on_cancel.assert_called_once()
+
+
+def test_failed_command_start_reports_a_connection_problem(monkeypatch):
+    client = Mock()
+    client.exec_command.side_effect = paramiko.SSHException('SSH session not active')
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    with pytest.raises(SSHError, match='could not be started'):
+        SSHConnection(Settings('frame', 'private')).run(['python3', 'helper.py'])
+
+
+@pytest.mark.parametrize('cancelled', [False, True])
+def test_failed_sftp_open_reports_connection_problem_or_cancellation(monkeypatch, cancelled):
+    client = Mock()
+    client.open_sftp.side_effect = paramiko.SSHException('SSH session not active')
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    cancel = threading.Event()
+    if cancelled:
+        cancel.set()
+    with pytest.raises(CancelledError if cancelled else SSHError) as error:
+        SSHConnection(Settings('frame', 'private')).put('local.txt', 'remote.txt', cancel_event=cancel)
+    if not cancelled:
+        assert 'transfer stopped' in str(error.value)
+
+
+def test_failed_cancel_notice_does_not_mask_the_timeout_error(monkeypatch):
+    from halo_frame_installer import ssh
+    channel = Mock()
+    channel.recv_ready.return_value = False
+    channel.exit_status_ready.return_value = False
+    client = Mock()
+    client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    monkeypatch.setattr(ssh.time, 'monotonic', Mock(side_effect=[0, 601]))
+    on_cancel = Mock(side_effect=paramiko.SSHException('SSH session not active'))
+    with pytest.raises(SSHError, match='timed out'):
+        SSHConnection(Settings('frame', 'private')).run(['python3', 'helper.py'], timeout=600, on_cancel=on_cancel)
+    on_cancel.assert_called_once()
