@@ -1,5 +1,5 @@
 diff --git a/port/assets/menus/ce/main_menu.multiplayer_type_select.coop.xml b/port/assets/menus/ce/main_menu.multiplayer_type_select.coop.xml
-index 1368453..8612491 100644
+index 1368453f1fd9f19937f27149eb2c9928becf72e2..8612491537dd482e464f9c583c6e101ae00f2883 100644
 --- a/port/assets/menus/ce/main_menu.multiplayer_type_select.coop.xml
 +++ b/port/assets/menus/ce/main_menu.multiplayer_type_select.coop.xml
 @@ -2,35 +2,54 @@
@@ -92,8 +92,64 @@ index 1368453..8612491 100644
  	<widget name="main_menu/multiplayer_type_select/coop/player_2_button_bar" type="column_list" width="640" height="28" flags="pass_unhandled_to_focused_child left_right_tabs_items">
  		<data input="common button bar update"/>
  		<child widget="main_menu/profile_manager/profile_manager_button_ok" x="380" y="1"/>
+diff --git a/port/linux/arm64/host_vr.c b/port/linux/arm64/host_vr.c
+index 4379c9516d90c051e288a68122b522680618906b..cac1ba7b43500f691adb4f5131da9a14905a6aff 100644
+--- a/port/linux/arm64/host_vr.c
++++ b/port/linux/arm64/host_vr.c
+@@ -875,9 +875,20 @@ int host_vr_locate(struct vr_host_views *views)
+ 	XrViewState state = { XR_TYPE_VIEW_STATE };
+ 	XrView located[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
+ 	XrSpaceLocation location = { XR_TYPE_SPACE_LOCATION };
++	const XrViewStateFlags eye_pose_flags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
++	const XrSpaceLocationFlags space_pose_flags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+ 	uint32_t count = 0;
+ 	int eye, hand, valid;
+ 
++	/* A failed fresh locate must not keep a preceding frame's valid pose. */
++	for (eye = 0; eye < 2; eye++)
++		views->eye[eye].valid = 0;
++	views->head.valid = 0;
++	for (hand = 0; hand < 2; hand++)
++	{
++		views->aim[hand].valid = 0;
++		views->grip[hand].valid = 0;
++	}
+ 	if (!vr.frame_begun)
+ 		return 0;
+ 	locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+@@ -885,7 +896,8 @@ int host_vr_locate(struct vr_host_views *views)
+ 	locate.space = vr.play_space;
+ 	if (xrLocateViews(vr.session, &locate, &state, 2, &count, located) != XR_SUCCESS || count != 2)
+ 		return 0;
+-	valid = (state.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0;
++	/* The game consumes both rotation and origin from these 6DoF poses. */
++	valid = (state.viewStateFlags & eye_pose_flags) == eye_pose_flags;
+ 	for (eye = 0; eye < 2; eye++)
+ 	{
+ 		pose_from_xr(&located[eye].pose, valid, &views->eye[eye]);
+@@ -895,17 +907,17 @@ int host_vr_locate(struct vr_host_views *views)
+ 		views->fov[eye][3] = tanf(located[eye].fov.angleDown);
+ 	}
+ 	if (xrLocateSpace(vr.view_space, vr.play_space, vr.frame.predictedDisplayTime, &location) == XR_SUCCESS)
+-		pose_from_xr(&location.pose, (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0, &views->head);
++		pose_from_xr(&location.pose, (location.locationFlags & space_pose_flags) == space_pose_flags, &views->head);
+ 	for (hand = 0; hand < 2; hand++)
+ 	{
+ 		location.type = XR_TYPE_SPACE_LOCATION;
+ 		location.next = NULL;
+ 		if (xrLocateSpace(vr.aim_spaces[hand], vr.play_space, vr.frame.predictedDisplayTime, &location) == XR_SUCCESS)
+-			pose_from_xr(&location.pose, (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0,
++			pose_from_xr(&location.pose, (location.locationFlags & space_pose_flags) == space_pose_flags,
+ 				&views->aim[hand]);
+ 		location.type = XR_TYPE_SPACE_LOCATION;
+ 		if (xrLocateSpace(vr.grip_spaces[hand], vr.play_space, vr.frame.predictedDisplayTime, &location) == XR_SUCCESS)
+-			pose_from_xr(&location.pose, (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0,
++			pose_from_xr(&location.pose, (location.locationFlags & space_pose_flags) == space_pose_flags,
+ 				&views->grip[hand]);
+ 	}
+ 	return 1;
 diff --git a/port/linux/game/menu_functions.c b/port/linux/game/menu_functions.c
-index 7d098fa..19a0018 100644
+index 7d098faad67b44185095673ab6019668945f5b9f..19a001895aca7bbf2adfca4a20a2dab0185cee78 100644
 --- a/port/linux/game/menu_functions.c
 +++ b/port/linux/game/menu_functions.c
 @@ -53,10 +53,10 @@ the one last used, else the first) and the game's saved game in it:
@@ -686,7 +742,7 @@ index 7d098fa..19a0018 100644
  			*widget_deleted = TRUE;
  		}
 diff --git a/port/linux/game/vr_render.c b/port/linux/game/vr_render.c
-index 6b98a0b..a2db297 100644
+index 6b98a0b7739800bc5c90de07b0a821629e462705..f950307f1b1f79baa265e52ed11305da6a7632f5 100644
 --- a/port/linux/game/vr_render.c
 +++ b/port/linux/game/vr_render.c
 @@ -30,9 +30,12 @@ they belong on the layer before the eyes.
@@ -737,7 +793,66 @@ index 6b98a0b..a2db297 100644
  } vr_render;
  
  /* where the crosshairs are drawn from the HUD's middle, in its 640x480
-@@ -356,6 +355,7 @@ boolean vr_render_camera(struct render_camera *camera, struct render_camera *ras
+@@ -248,6 +247,58 @@ static long seated_unit(void)
+ 	return unit_index;
+ }
+ 
++/* Scripts run between eye passes too. Build the same HMD basis and centre
++origin as the world camera from a fresh view, rather than using the ended
++render pass or the controller's weapon-facing pose. */
++boolean vr_render_player_gaze(long unit_index, real_point3d *origin, real_vector3d *forward)
++{
++	long player_index = local_player_get_player_index(0);
++	struct unit_datum *unit;
++	struct halo_vr_view view;
++	struct observer_result const *observer;
++	director_perspective perspective;
++	real_point3d position;
++	real_vector3d pointing, offset;
++	real yaw, pitch = 0.0f, length;
++	boolean aiming;
++	if (!origin || !forward || player_index == NONE || unit_index == NONE ||
++		cinematic_in_progress() || (director_camera_scripted && *director_camera_scripted) ||
++		player_get(player_index)->unit_index != unit_index ||
++		!(unit = unit_try_and_get(unit_index)) || unit->unit.player_index != player_index ||
++		unit->object.type != _object_type_biped || TEST_FLAG(unit->object.damage_flags, _object_dead_bit))
++		return FALSE;
++	perspective = director_get_perspective(0);
++	if (perspective == _director_perspective_scripted || perspective == _director_perspective_neutral ||
++		director_inhibited_facing(0) || !halo_vr_view(&view) || !halo_vr_gaze_tracking_valid())
++		return FALSE;
++	observer = render_interpolation_camera(0, observer_get_camera(0));
++	if (!observer || !isfinite(view.body_yaw) || !isfinite(view.world_units_per_metre) ||
++		view.world_units_per_metre <= 0.0f)
++		return FALSE;
++	aiming = halo_vr_aiming();
++	yaw = aiming ? view.body_yaw : (real)atan2(observer->forward.j, observer->forward.i);
++	if (view.gamepad_pitch && aiming)
++		pitch = player_control_get_facing_angles(0)->pitch;
++	if (!isfinite(yaw) || !isfinite(pitch))
++		return FALSE;
++	position = observer->position;
++	if (view.vehicle_first_person && aiming && seated_unit() == unit_index)
++		unit_get_head_position(unit_index, &position);
++	view_rotate(yaw, pitch, view.head_forward, &pointing);
++	view_rotate(yaw, pitch, view.head_position, &offset);
++	position.x += offset.i * view.world_units_per_metre;
++	position.y += offset.j * view.world_units_per_metre;
++	position.z += offset.k * view.world_units_per_metre;
++	length = magnitude3d(&pointing);
++	if (!isfinite(position.x) || !isfinite(position.y) || !isfinite(position.z) ||
++		!isfinite(length) || length <= 0.0f)
++		return FALSE;
++	normalize3d(&pointing);
++	*origin = position;
++	*forward = pointing;
++	return TRUE;
++}
++
+ /* turns the window's camera into the VR frame's centre camera (both its
+ render and rasterizer cameras); FALSE without a VR frame to draw */
+ boolean vr_render_camera(struct render_camera *camera, struct render_camera *rasterizer_camera)
+@@ -356,6 +407,7 @@ boolean vr_render_camera(struct render_camera *camera, struct render_camera *ras
  		eye_bounds.y0 = view->fov[eye][3] / tangent;
  		eye_bounds.y1 = view->fov[eye][2] / tangent;
  		render_camera_build_frustum(&eye_camera, &eye_bounds, &vr_render.eyes[eye], TRUE);
@@ -745,7 +860,7 @@ index 6b98a0b..a2db297 100644
  		render_camera_build_frustum(camera, &eye_bounds, &vr_render.eyes_at_centre[eye], TRUE);
  	}
  	{
-@@ -543,6 +543,38 @@ void vr_render_end(void)
+@@ -543,6 +595,38 @@ void vr_render_end(void)
  	vr_render.seated_unit_index = NONE;
  	vr_render.infinite = FALSE;
  	vr_render_screen_point_end();
@@ -784,7 +899,7 @@ index 6b98a0b..a2db297 100644
  }
  
  /* the object is the player's unit, which the eye pass views its vehicle
-@@ -578,41 +610,120 @@ boolean vr_render_hud_camera(struct render_camera *camera)
+@@ -578,41 +662,165 @@ boolean vr_render_hud_camera(struct render_camera *camera)
  		view_rotate(base_yaw, pitch, view->head_forward, &camera->forward);
  		view_rotate(base_yaw, pitch, view->head_up, &camera->up);
  		camera->vertical_field_of_view = 2.0f * (real)atan(view->hud_tangent);
@@ -798,8 +913,8 @@ index 6b98a0b..a2db297 100644
 +Only an unrestricted local player on foot previews the current rendered
 +pointing pose. The paired camera is the interpolated observer before camera
 +shake and physical head/hand offsets; it retains the shot's origin rules. */
-+static boolean vr_render_projectile_pose(long player_index, struct unit_datum *unit,
-+	struct projectile_preview_pose *pose)
++static boolean vr_render_pointing_pose(long player_index, struct unit_datum *unit,
++	struct halo_vr_view const *view, real base_yaw, struct projectile_preview_pose *pose)
 +{
 +	struct unit_definition *definition;
 +	struct observer_result const *observer;
@@ -813,10 +928,10 @@ index 6b98a0b..a2db297 100644
 +	if (!TEST_FLAG(definition->unit.flags, _unit_fires_from_camera_bit) ||
 +		definition->unit.aiming_velocity_maximum != 0.0f || definition->unit.aiming_acceleration_maximum != 0.0f)
 +		return FALSE;
-+	if (vr_render.view.controller_aim)
++	if (view->controller_aim)
 +	{
 +		real yaw, pitch, horizontal;
-+		yaw_rotate(vr_render.base_yaw, vr_render.view.hand_forward, &pose->forward);
++		yaw_rotate(base_yaw, view->hand_forward, &pose->forward);
 +		length = magnitude3d(&pose->forward);
 +		if (!isfinite(length) || length <= 0.0f)
 +			return FALSE;
@@ -829,7 +944,7 @@ index 6b98a0b..a2db297 100644
 +		pose->forward.j = horizontal * (real)sin(yaw);
 +		pose->forward.k = (real)sin(pitch);
 +	}
-+	else if (vr_render.view.gamepad_aim)
++	else if (view->gamepad_aim)
 +		player_control_get_facing_direction(0, &pose->forward);
 +	else
 +		return FALSE;
@@ -846,9 +961,46 @@ index 6b98a0b..a2db297 100644
 +		isfinite(pose->forward.i) && isfinite(pose->forward.j) && isfinite(pose->forward.k);
 +}
 +
++static boolean vr_render_projectile_pose(long player_index, struct unit_datum *unit,
++	struct projectile_preview_pose *pose)
++{
++	return vr_render_pointing_pose(player_index, unit, &vr_render.view, vr_render.base_yaw, pose);
++}
++
++static boolean vr_render_unarmed_ray(long player_index, long unit_index, struct unit_datum *unit,
++	struct halo_vr_view const *view, real base_yaw, real_point3d *origin, real_vector3d *forward)
++{
++	struct projectile_preview_pose pose;
++	if (unit->unit.player_index != player_index ||
++		TEST_FLAG(unit->object.damage_flags, _object_dead_bit) ||
++		unit_get_weapon_count(unit_index) != 0 || cinematic_in_progress() ||
++		unit_inventory_get_weapon(unit_index, unit->unit.current_weapon_index) != NONE ||
++		!vr_render_pointing_pose(player_index, unit, view, base_yaw, &pose))
++		return FALSE;
++	*origin = pose.camera_position;
++	*forward = pose.forward;
++	return TRUE;
++}
++
++/* The tutorial's unarmed calibration panels use the same presentation ray
++as their crosshair. A script query refreshes tracking without changing the
++renderer cache or the simulation's facing/aiming vectors. */
++boolean vr_render_player_pointing_ray(long unit_index, real_point3d *origin, real_vector3d *forward)
++{
++	long player_index = local_player_get_player_index(0);
++	struct unit_datum *unit;
++	struct halo_vr_view view;
++	if (!origin || !forward || player_index == NONE || unit_index == NONE ||
++		player_get(player_index)->unit_index != unit_index || !(unit = unit_try_and_get(unit_index)) ||
++		!halo_vr_aiming() || !halo_vr_view(&view) || !halo_vr_gaze_tracking_valid())
++		return FALSE;
++	return vr_render_unarmed_ray(player_index, unit_index, unit, &view, view.body_yaw, origin, forward);
++}
++
 +/* Query the same primary weapon as the HUD, including a vehicle gunner's
-+weapon. No tracked-hand ray fallback: an unsupported state uses the game's
-+ordinary HUD path instead of displaying a different simulated trajectory. */
++weapon. An unarmed player on foot has the HUD's default crosshair but no
++projectile: place that crosshair along the current bounded pointing pose.
++Unsupported weapon previews retain the ordinary HUD path. */
 +static boolean vr_render_projectile_ray(long player_index, real_point3d *origin,
 +	real_vector3d *direction, long *owner_object_index)
 +{
@@ -895,6 +1047,14 @@ index 6b98a0b..a2db297 100644
  		}
  	}
 -	return TRUE;
++	if (weapon_index == NONE)
++	{
++		if (!vr_render_unarmed_ray(player_index, unit_index, unit, &vr_render.view, vr_render.base_yaw,
++			origin, direction))
++			return FALSE;
++		*owner_object_index = unit_index;
++		return TRUE;
++	}
 +	return weapon_preview_projectile_ray(weapon_index, 0, player_index, origin, direction, owner_object_index,
 +		vr_render_projectile_pose(player_index, unit, &pose) ? &pose : NULL);
 +}
@@ -934,7 +1094,7 @@ index 6b98a0b..a2db297 100644
  first-person weapon is, and as large as in the HUD's layer. In that layer,
  in front of the head, they were placed for the head's pose as the frame was
  drawn, which the compositor moved them with to the pose shown while it
-@@ -624,65 +735,19 @@ rounding to the HUD's pixels). */
+@@ -624,65 +832,19 @@ rounding to the HUD's pixels). */
  void vr_render_crosshairs(void)
  {
  	struct halo_vr_view *view = &vr_render.view;
@@ -1004,7 +1164,7 @@ index 6b98a0b..a2db297 100644
  	/* the game's screen (the viewport, its pixels: x = ((ndc + 1) width -
  	1) / 2, y from the top), and its middle, where the game draws them */
 diff --git a/port/linux/src/d3d8_gl.c b/port/linux/src/d3d8_gl.c
-index 304179b..08dfc34 100644
+index 304179be60aeebea6a7f1ed3c297fed82700db1f..08dfc34ffdc824b272f420cc6c29c15081093f13 100644
 --- a/port/linux/src/d3d8_gl.c
 +++ b/port/linux/src/d3d8_gl.c
 @@ -479,6 +479,7 @@ static struct
@@ -1060,7 +1220,7 @@ index 304179b..08dfc34 100644
  {
  	static const float none[2][4] = { { 1.0f, 1.0f, 0.0f, 0.0f }, { 1.0f, 1.0f, 0.0f, 0.0f } };
 diff --git a/port/linux/src/nv2a_psh.c b/port/linux/src/nv2a_psh.c
-index c2e5de7..6c3a081 100644
+index c2e5de729dae16b503b1c5eee07834c8add9e94d..6c3a0814611add89f0d6a2abdfb9d27b01e769c2 100644
 --- a/port/linux/src/nv2a_psh.c
 +++ b/port/linux/src/nv2a_psh.c
 @@ -353,7 +353,8 @@ static void sample(struct xgpu_text *text, const struct nv2a_pixel_shader_key *k
@@ -1074,7 +1234,7 @@ index c2e5de7..6c3a081 100644
  			, stage
  #endif
 diff --git a/port/linux/src/port_config.c b/port/linux/src/port_config.c
-index c23181b..3af3418 100644
+index c23181bd889e417aa70dd1b549765265a254ba5c..f997e57f79e1253b8e36528e32ad92f2d5750d86 100644
 --- a/port/linux/src/port_config.c
 +++ b/port/linux/src/port_config.c
 @@ -159,12 +159,21 @@ static const struct config_setting config_settings[] =
@@ -1099,8 +1259,17 @@ index c23181b..3af3418 100644
  	{ "vr.gamepad_view", _config_string, "\"camera\"", "HALO_VR_GAMEPAD_VIEW", _environment_value,
  		_platform_desktop,
  		"With vr.aim = \"gamepad\", how the stick moves the view: \"camera\" turns\n"
+@@ -208,7 +217,7 @@ static const struct config_setting config_settings[] =
+ 		"Degrees of each snap turn." },
+ 	{ "vr.smooth_turn_speed", _config_real, "150.0", "HALO_VR_SMOOTH_TURN_SPEED", _environment_value, _platform_desktop,
+ 		"Degrees a second of smooth turning, the stick pushed all the way." },
+-	{ "vr.height", _config_string, "\"seated\"", "HALO_VR_HEIGHT", _environment_value, _platform_desktop,
++	{ "vr.height", _config_string, "\"standing\"", "HALO_VR_HEIGHT", _environment_value, _platform_desktop,
+ 		"\"seated\": the head where it is when recentred (both grips, or a\n"
+ 		"gamepad's Back, held) is the player's eye. \"standing\": the head\n"
+ 		"vr.player_height above the floor is." },
 diff --git a/port/linux/src/vr.c b/port/linux/src/vr.c
-index 89cfb6f..d7cbce2 100644
+index 89cfb6f0d81d1d406b6b9cff2e76a66129202b4a..110884526b023bccde19ff04b657867e1bb482b6 100644
 --- a/port/linux/src/vr.c
 +++ b/port/linux/src/vr.c
 @@ -31,6 +31,7 @@ it or in steps ("level", "snap"). The controllers are a gamepad's halves.
@@ -1111,7 +1280,7 @@ index 89cfb6f..d7cbce2 100644
  
  #include <SDL3/SDL.h>
  #include <math.h>
-@@ -99,6 +100,12 @@ static struct
+@@ -99,6 +100,14 @@ static struct
  	int aiming;
  	int aimed;
  	int aim_synced;
@@ -1121,10 +1290,12 @@ index 89cfb6f..d7cbce2 100644
 +	controller's aim, without feeding it into the game's facing */
 +	int tutorial_head_valid;
 +	float tutorial_head_yaw, tutorial_head_pitch;
++	int tutorial_turn_flags;
++	int turn_control_allowed;
  	int snap_latched;
  	float recentre_time;
  	/* a gamepad's Back held (halo_vr_gamepad_back), and for how long */
-@@ -153,6 +160,7 @@ static struct
+@@ -153,6 +162,7 @@ static struct
  	float menu_width;
  	int controller_aim;
  	int gamepad_aim;
@@ -1132,7 +1303,7 @@ index 89cfb6f..d7cbce2 100644
  	/* vr.gamepad_view: the view's heading in steps ("snap"), and pitched
  	with the facing ("camera") */
  	int gamepad_snap;
-@@ -236,6 +244,7 @@ static void settings_read(void)
+@@ -236,6 +246,7 @@ static void settings_read(void)
  	settings.menu_width = (float)config_real("vr.menu_width");
  	settings.gamepad_aim = !strcmp(config_string("vr.aim"), "gamepad");
  	settings.controller_aim = !settings.gamepad_aim && strcmp(config_string("vr.aim"), "head") != 0;
@@ -1140,7 +1311,7 @@ index 89cfb6f..d7cbce2 100644
  	settings.gamepad_snap = !strcmp(config_string("vr.gamepad_view"), "snap");
  	settings.gamepad_pitch = !settings.gamepad_snap && strcmp(config_string("vr.gamepad_view"), "level") != 0;
  	settings.melee_gesture = config_boolean("vr.melee_gesture");
-@@ -395,6 +404,7 @@ static void recentre(void)
+@@ -395,6 +406,7 @@ static void recentre(void)
  	else if (vr.origin_valid)
  		vr.body_yaw += yaw - vr.origin_yaw;
  	vr.origin_yaw = yaw;
@@ -1148,7 +1319,73 @@ index 89cfb6f..d7cbce2 100644
  	vr.origin_position[0] = head->position[0];
  	vr.origin_position[1] = settings.standing ? settings.player_height : head->position[1];
  	vr.origin_position[2] = head->position[2];
-@@ -1044,6 +1054,78 @@ int halo_vr_view(struct halo_vr_view *view)
+@@ -511,6 +523,43 @@ static void weapon_pointing(float forward[3], float up[3])
+ }
+ 
+ /* the controllers' turning and recentring, once a frame */
++/* Apply a deliberate stick view turn only while the game permits free-look.
++The tutorial observes the same turn that the headset displays. */
++static void tutorial_turn_input(float x, float seconds)
++{
++	float delta = 0.0f;
++
++	if (!vr.turn_control_allowed || settings.gamepad_aim ||
++		!halo_vr_gaze_tracking_valid() || !isfinite(x) || !isfinite(seconds) || seconds < 0.0f)
++	{
++		vr.tutorial_turn_flags = 0;
++		vr.tutorial_head_valid = 0;
++		/* A held stick must return to neutral after tracking/control recovers. */
++		vr.snap_latched = !isfinite(x) || fabsf(x) >= 0.3f;
++		return;
++	}
++	if (settings.smooth_turn)
++	{
++		if (fabsf(x) > 0.2f && isfinite(settings.smooth_speed))
++			delta = -(x - (x > 0.0f ? 0.2f : -0.2f)) / 0.8f * settings.smooth_speed * seconds;
++	}
++	else if (!vr.snap_latched && fabsf(x) > 0.7f)
++	{
++		if (isfinite(settings.snap_angle) && settings.snap_angle > 0.0f)
++			delta = x > 0.0f ? -settings.snap_angle : settings.snap_angle;
++		vr.snap_latched = 1;
++	}
++	else if (vr.snap_latched && fabsf(x) < 0.3f)
++	{
++		vr.snap_latched = 0;
++	}
++	if (isfinite(delta) && delta != 0.0f)
++	{
++		vr.body_yaw += delta;
++		vr.tutorial_turn_flags |= delta > 0.0f ? HALO_VR_TUTORIAL_TURN_LEFT : HALO_VR_TUTORIAL_TURN_RIGHT;
++	}
++}
++
+ static void input_update(void)
+ {
+ 	unsigned long now = GetTickCount();
+@@ -564,20 +613,7 @@ static void input_update(void)
+ 	{
+ 		vr.gamepad_recentre_time = 0.0f;
+ 	}
+-	if (settings.smooth_turn)
+-	{
+-		if (fabsf(x) > 0.2f)
+-			vr.body_yaw -= (x - (x > 0.0f ? 0.2f : -0.2f)) / 0.8f * settings.smooth_speed * seconds;
+-	}
+-	else if (!vr.snap_latched && fabsf(x) > 0.7f)
+-	{
+-		vr.body_yaw -= x > 0.0f ? settings.snap_angle : -settings.snap_angle;
+-		vr.snap_latched = 1;
+-	}
+-	else if (vr.snap_latched && fabsf(x) < 0.3f)
+-	{
+-		vr.snap_latched = 0;
+-	}
++	tutorial_turn_input(x, seconds);
+ 	/* (not while the left hand holds a long gun's foregrip) */
+ 	if (vr.input.left_grip > 0.8f && vr.input.right_grip > 0.8f && !vr.two_handed)
+ 	{
+@@ -1044,6 +1080,126 @@ int halo_vr_view(struct halo_vr_view *view)
  
  /* ---------- aiming */
  
@@ -1177,6 +1414,46 @@ index 89cfb6f..d7cbce2 100644
 +	halo_vr_locomotion_project(&vr.movement_heading, tracked, facing, vr.body_yaw, aim_yaw, forward, left);
 +}
 +
++int halo_vr_gaze_tracking_valid(void)
++{
++	float normalized[4];
++	int eye, axis;
++
++	if (!vr.initialized || !(vr.frame || vr.pending) || !vr.views.should_render ||
++		!vr.views.focused || !vr.views.head.valid || vr.menus || !vr.origin_valid || !vr.aim_synced ||
++		!isfinite(vr.origin_yaw) || !isfinite(vr.body_yaw) ||
++		!halo_vr_locomotion_orientation(vr.views.head.orientation, normalized))
++		return 0;
++	for (eye = 0; eye < 2; eye++)
++	{
++		if (!vr.views.eye[eye].valid ||
++			!halo_vr_locomotion_orientation(vr.views.eye[eye].orientation, normalized))
++			return 0;
++		for (axis = 0; axis < 3; axis++)
++			if (!isfinite(vr.views.eye[eye].position[axis]) || !isfinite(vr.origin_position[axis]))
++				return 0;
++	}
++	return 1;
++}
++
++void halo_vr_turn_control(int allowed)
++{
++	vr.turn_control_allowed = allowed != 0;
++	if (!allowed)
++	{
++		vr.tutorial_turn_flags = 0;
++		vr.tutorial_head_valid = 0;
++	}
++}
++
++int halo_vr_tutorial_turn(void)
++{
++	int flags = vr.tutorial_turn_flags;
++
++	vr.tutorial_turn_flags = 0;
++	return vr.turn_control_allowed && halo_vr_gaze_tracking_valid() ? flags : 0;
++}
++
 +int halo_vr_tutorial_look(float *yaw, float *pitch)
 +{
 +	static const float forwards[3] = { 0.0f, 0.0f, -1.0f };
@@ -1184,8 +1461,7 @@ index 89cfb6f..d7cbce2 100644
 +	float orientation[4], pointing[3], facing[3], head_yaw, head_pitch;
 +
 +	*yaw = *pitch = 0.0f;
-+	if (!vr.initialized || !(vr.frame || vr.pending) || !vr.views.should_render ||
-+		!vr.views.focused || !vr.views.head.valid || vr.menus || !settings.controller_aim ||
++	if (!halo_vr_gaze_tracking_valid() || !settings.controller_aim || !vr.turn_control_allowed ||
 +		!halo_vr_locomotion_orientation(vr.views.head.orientation, orientation))
 +	{
 +		vr.tutorial_head_valid = 0;
@@ -1224,10 +1500,19 @@ index 89cfb6f..d7cbce2 100644
 +	return *yaw != 0.0f || *pitch != 0.0f;
 +}
 +
++void halo_vr_tutorial_reset(void)
++{
++	float yaw, pitch;
++
++	vr.tutorial_turn_flags = 0;
++	vr.tutorial_head_valid = 0;
++	(void)halo_vr_tutorial_look(&yaw, &pitch);
++}
++
  int halo_vr_aim(float current_yaw, int long_gun, float *yaw, float *pitch)
  {
  	static const float backwards[3] = { 0.0f, 0.0f, -1.0f };
-@@ -1105,6 +1187,7 @@ void halo_vr_aim_release(void)
+@@ -1105,11 +1261,17 @@ void halo_vr_aim_release(void)
  {
  	vr.aim_synced = 0;
  	vr.aiming = 0;
@@ -1235,7 +1520,17 @@ index 89cfb6f..d7cbce2 100644
  }
  
  void halo_vr_menus(int active)
-@@ -1161,10 +1244,10 @@ void halo_vr_gamepad(void *gamepad)
+ {
+ 	vr.menus = active;
++	if (active)
++	{
++		vr.tutorial_turn_flags = 0;
++		vr.tutorial_head_valid = 0;
++	}
+ }
+ 
+ int halo_vr_aiming(void)
+@@ -1161,10 +1323,10 @@ void halo_vr_gamepad(void *gamepad)
  	analog(pad, XINPUT_GAMEPAD_B, (buttons & VR_BUTTON_B) || vr.melee_frames > 0);
  	analog(pad, XINPUT_GAMEPAD_X, buttons & VR_BUTTON_X);
  	analog(pad, XINPUT_GAMEPAD_Y, buttons & VR_BUTTON_Y);
@@ -1251,10 +1546,10 @@ index 89cfb6f..d7cbce2 100644
  	if (trigger > pad->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER])
  		pad->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] = trigger;
 diff --git a/port/linux/src/vr.h b/port/linux/src/vr.h
-index 9f78308..750b5ce 100644
+index 9f78308d963134ea03d74c3b856263ae430af933..354d738cd31e3c383641c4b66a835d24e0a9b264 100644
 --- a/port/linux/src/vr.h
 +++ b/port/linux/src/vr.h
-@@ -106,6 +106,12 @@ stays the game's (vr.aim = "gamepad"); 0 when it does not (no VR frame, a
+@@ -106,6 +106,27 @@ stays the game's (vr.aim = "gamepad"); 0 when it does not (no VR frame, a
  cinematic). With a long gun, the left hand on its foregrip aims it along
  both hands (vr.two_handed). */
  int halo_vr_aim(float current_yaw, int long_gun, float *yaw, float *pitch);
@@ -1264,10 +1559,25 @@ index 9f78308..750b5ce 100644
 +/* Physical head movement for the campaign's tutorial look-direction tests;
 +does not change controller aiming or the player's facing. */
 +int halo_vr_tutorial_look(float *yaw, float *pitch);
++/* Fresh, finite, focused HMD/eye tracking for game-side world-space gaze. */
++int halo_vr_gaze_tracking_valid(void);
++/* Game free-look gates apply to platform turns too; disabled gameplay input
++alone does not disable free-look (the cryopod tutorial). */
++void halo_vr_turn_control(int allowed);
++enum
++{
++	HALO_VR_TUTORIAL_TURN_LEFT = 1,
++	HALO_VR_TUTORIAL_TURN_RIGHT = 2,
++};
++/* Deliberate view turns since the last call, excluding recentering. */
++int halo_vr_tutorial_turn(void);
++/* The script's action reset clears recorded turns and rebases physical head
++motion at the current pose, rather than carrying a prior prompt's anchor. */
++void halo_vr_tutorial_reset(void);
  /* the aim no longer follows the head (a cinematic, a vehicle's camera
  taking over): the next halo_vr_aim starts again from the player's facing */
  void halo_vr_aim_release(void);
-@@ -153,6 +159,9 @@ void halo_vr_set_eye_transforms(const float transforms[2][16]);
+@@ -153,6 +174,9 @@ void halo_vr_set_eye_transforms(const float transforms[2][16]);
  from the centre view's (identity: 1, 1, 0, 0), for what the game projects
  to the screen itself (vr_render.c, vr_render_screen_point) */
  void halo_vr_set_screen_corrections(const float corrections[2][4]);
@@ -1279,7 +1589,7 @@ index 9f78308..750b5ce 100644
  void halo_vr_draw_eye(int eye);
 diff --git a/port/linux/src/vr_locomotion.h b/port/linux/src/vr_locomotion.h
 new file mode 100644
-index 0000000..9fb2eeb
+index 0000000000000000000000000000000000000000..9fb2eeb599ae20ed8e74d4e72a703379e8b7d76c
 --- /dev/null
 +++ b/port/linux/src/vr_locomotion.h
 @@ -0,0 +1,86 @@
@@ -1370,7 +1680,7 @@ index 0000000..9fb2eeb
 +
 +#endif
 diff --git a/port/linux/src/xgpu.h b/port/linux/src/xgpu.h
-index 27a2974..eef1d50 100644
+index 27a29747ac09406a721d886ef8775912c1f82b71..eef1d507cf784d25895796a48665187f8e539840 100644
 --- a/port/linux/src/xgpu.h
 +++ b/port/linux/src/xgpu.h
 @@ -135,7 +135,10 @@ struct nv2a_pixel_shader_key
@@ -1386,7 +1696,7 @@ index 27a2974..eef1d50 100644
  
  char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key);
 diff --git a/source/game/aim_assist.c b/source/game/aim_assist.c
-index dd5c80f..7b94680 100644
+index dd5c80fab626818dc7dede27c44f3b07e7884358..7b94680c99e554921376d467ada09807f8eb5031 100644
 --- a/source/game/aim_assist.c
 +++ b/source/game/aim_assist.c
 @@ -539,15 +539,20 @@ boolean aim_assist(
@@ -1485,7 +1795,7 @@ index dd5c80f..7b94680 100644
  	short local_player_index,
  	real *autoaim_level,
 diff --git a/source/game/aim_assist.h b/source/game/aim_assist.h
-index f557089..6a6a22c 100644
+index f5570893c4325fc94c6fd32e96e1a62d9443a318..6a6a22cbaeb975a928b18d989ac13935fd42f0c5 100644
 --- a/source/game/aim_assist.h
 +++ b/source/game/aim_assist.h
 @@ -19,6 +19,7 @@ header included in hcex build.
@@ -1513,10 +1823,28 @@ index f557089..6a6a22c 100644
  	short local_player_index,
  	real *autoaim_level,
 diff --git a/source/game/player_control.c b/source/game/player_control.c
-index f954ef1..5c67fd4 100644
+index f954ef16dd217cefa37f2988d4269f8c4cf6db3d..8eae0263e7083fe72e8f5fc4d84010e127bdeb73 100644
 --- a/source/game/player_control.c
 +++ b/source/game/player_control.c
-@@ -747,6 +747,7 @@ static void handle_one_player_input(
+@@ -619,6 +619,17 @@ static void handle_one_player_input(
+ 		&input,
+ 		0xFA,
+ 		sizeof(input));
++#ifdef HALO_VR
++	if (local_player_index == 0)
++	{
++		extern void halo_vr_turn_control(int allowed);
++		/* player_enable_input(false) still allows the tutorial's free-look. */
++		halo_vr_turn_control(player->unit_index != NONE &&
++			!TEST_FLAG(unit_get(player->unit_index)->object.damage_flags, _object_dead_bit) &&
++			player_control_camera_control_is_active() && !director_inhibited_facing(local_player_index) &&
++			!cinematic_in_progress());
++	}
++#endif
+ 	get_local_player_input_blob(
+ 		local_player_index,
+ 		time_delta_sec,
+@@ -747,6 +758,7 @@ static void handle_one_player_input(
  			and the netcode sends an ordinary player's facing */
  			extern int halo_vr_aim(float current_yaw, int long_gun, float *yaw, float *pitch);
  			extern void halo_vr_aim_release(void);
@@ -1524,7 +1852,7 @@ index f954ef1..5c67fd4 100644
  			extern boolean vr_render_long_gun(long weapon_index);
  			float vr_yaw, vr_pitch;
  			int vr_aim = 0;
-@@ -761,6 +762,10 @@ static void handle_one_player_input(
+@@ -761,6 +773,10 @@ static void handle_one_player_input(
  					unit->object.parent_object_index == NONE && vr_render_long_gun(current_weapon_index),
  					&vr_yaw, &vr_pitch);
  			}
@@ -1535,7 +1863,7 @@ index f954ef1..5c67fd4 100644
  			if (vr_aim == 1)
  			{
  				while (vr_yaw < 0.f)
-@@ -774,6 +779,13 @@ static void handle_one_player_input(
+@@ -774,6 +790,13 @@ static void handle_one_player_input(
  			{
  				halo_vr_aim_release();
  			}
@@ -1549,7 +1877,20 @@ index f954ef1..5c67fd4 100644
  		}
  #endif
  
-@@ -1762,6 +1774,25 @@ void player_control_action_test_note(
+@@ -1599,6 +1622,12 @@ void player_control_action_test_reset(
+ 
+ 	globals->action_flags = 0;
+ 	globals->action_test_flags = 0;
++#ifdef HALO_VR
++	{
++		extern void halo_vr_tutorial_reset(void);
++		halo_vr_tutorial_reset();
++	}
++#endif
+ 	return;
+ }
+ 
+@@ -1762,6 +1791,31 @@ void player_control_action_test_note(
  	{
  		globals->action_flags |= FLAG(_player_control_look_relative_right_bit);
  	}
@@ -1558,7 +1899,13 @@ index f954ef1..5c67fd4 100644
 +#ifdef HALO_VR
 +	{
 +		extern int halo_vr_tutorial_look(float *yaw, float *pitch);
++		extern int halo_vr_tutorial_turn(void);
 +		float vr_yaw, vr_pitch;
++		int vr_turn = halo_vr_tutorial_turn();
++		if (vr_turn & 1)
++			globals->action_flags |= FLAG(_player_control_look_relative_left_bit);
++		if (vr_turn & 2)
++			globals->action_flags |= FLAG(_player_control_look_relative_right_bit);
 +		if (halo_vr_tutorial_look(&vr_yaw, &vr_pitch))
 +		{
 +			if (vr_pitch > 0.f)
@@ -1575,8 +1922,127 @@ index f954ef1..5c67fd4 100644
  	if (throttle->i > 0.f)
  	{
  		globals->action_flags |= FLAG(_player_control_move_relative_forward_bit);
+@@ -1784,6 +1838,10 @@ static void player_control_action_test_check_reset_input_blob(
+ 	struct input_blob *input)
+ {
+ 	struct player_control_globals_data *globals;
++#ifdef HALO_VR
++	extern int halo_vr_active(void);
++	boolean vr_controls = halo_vr_active() != 0;
++#endif
+ 
+ 	if (input->accept && (cinematic_can_be_skipped() || network_coop_skip_offered()))
+ 	{
+@@ -1807,6 +1865,22 @@ static void player_control_action_test_check_reset_input_blob(
+ 	{
+ 		globals->action_flags |= FLAG(_player_control_zoom_bit);
+ 	}
++#ifdef HALO_VR
++	/* The tutorial tests physical B, while the VR Xbox layout maps B to
++	melee. Consume its mapped actions until that button is released; using
++	the old weapon-switch flag here releases suppression too early. */
++	if (vr_controls && (TEST_FLAG(globals->action_test_flags, _player_control_back_bit) ||
++		TEST_FLAG(globals->suppressed_action_flags, _player_control_back_bit)))
++	{
++		SET_FLAG(globals->suppressed_action_flags, _player_control_back_bit, input->back);
++		SET_FLAG(input->unit_control_flags, _unit_control_use_equipment_bit, FALSE);
++		SET_FLAG(input->unit_control_flags, _unit_control_throw_grenade_bit, FALSE);
++		SET_FLAG(input->unit_control_flags, _unit_control_weapon_secondary_trigger_bit, FALSE);
++		SET_FLAG(input->player_control_flags, _player_control_input_zoom_bit, FALSE);
++		SET_FLAG(input->player_control_flags, _player_control_rotate_weapons_bit, FALSE);
++		SET_FLAG(input->player_control_flags, _player_control_rotate_grenades_bit, FALSE);
++	}
++#endif
+ 
+ 	if (!TEST_FLAG(globals->action_test_flags, _player_control_action_bit))
+ 	{
+@@ -1838,6 +1912,10 @@ check_accept:
+ 		SET_FLAG(input->unit_control_flags, _unit_control_action_bit, FALSE);
+ 
+ 	check_back_unswapped:
++#ifdef HALO_VR
++		if (vr_controls)
++			return;
++#endif
+ 		if (!TEST_FLAG(globals->action_test_flags, _player_control_back_bit))
+ 		{
+ 			if (!TEST_FLAG(globals->suppressed_action_flags, _player_control_back_bit))
+@@ -1867,6 +1945,10 @@ check_accept:
+ 		SET_FLAG(input->unit_control_flags, _unit_control_jump_bit, FALSE);
+ 
+ 	check_back_swapped:
++#ifdef HALO_VR
++		if (vr_controls)
++			return;
++#endif
+ 		if (!TEST_FLAG(globals->action_test_flags, _player_control_back_bit))
+ 		{
+ 			if (!TEST_FLAG(globals->suppressed_action_flags, _player_control_accept_bit))
+diff --git a/source/hs/hs_library_external.c b/source/hs/hs_library_external.c
+index 0402e0234b124837d2c1f7434b5e5aa8ef0cda89..a75c12fbc851ba5706dff9f002ea79ee44266679 100644
+--- a/source/hs/hs_library_external.c
++++ b/source/hs/hs_library_external.c
+@@ -237,6 +237,37 @@ boolean hs_trigger_volume_test_objects(
+ 	return result;
+ }
+ 
++#ifdef HALO_VR
++/* The five original a10 calibration targets use a strict five-degree gate.
++Only these named scenery objects may also be pointed at with the unarmed
++hand reticle; technician/AI/other-map gaze keeps its original predicate. */
++static boolean hs_vr_calibration_panel(long object_index, real degrees)
++{
++	static char const *const names[] = {
++		"looking_panel_center", "looking_panel_left", "looking_panel_right",
++		"looking_panel_up", "looking_panel_down",
++	};
++	struct object_datum *object;
++	struct scenario *scenario;
++	struct scenario_object_name *name;
++	short index;
++
++	if (degrees != 5.f || global_scenario_index == NONE ||
++		strcmp(tag_get_name(global_scenario_index), "levels\\a10\\a10"))
++		return FALSE;
++	object = object_get(object_index);
++	scenario = global_scenario_get();
++	if (object->object.type != _object_type_scenery ||
++		!VALID_INDEX(object->object.name_index, scenario->object_names.count))
++		return FALSE;
++	name = TAG_BLOCK_GET_ELEMENT(&scenario->object_names, object->object.name_index, struct scenario_object_name);
++	for (index = 0; index < NUMBEROF(names); index++)
++		if (!strncmp(name->name, names[index], sizeof(name->name)))
++			return TRUE;
++	return FALSE;
++}
++#endif
++
+ boolean hs_unit_can_see_object(
+ 	long unit_index,
+ 	long object_index,
+@@ -258,6 +289,20 @@ boolean hs_unit_can_see_object(
+ 			unit_index,
+ 			&target_point,
+ 			DEGREES_TO_RADIANS(degrees));
++#ifdef HALO_VR
++		if (!result && hs_vr_calibration_panel(object_index, degrees))
++		{
++			extern boolean vr_render_player_pointing_ray(long unit_index, real_point3d *origin, real_vector3d *forward);
++			real_point3d origin;
++			real_vector3d forward, direction;
++			if (vr_render_player_pointing_ray(unit_index, &origin, &forward))
++			{
++				vector_from_points3d(&origin, &target_point, &direction);
++				if (normalize3d(&direction) > 0.f)
++					result = dot_product3d(&direction, &forward) > cosine(DEGREES_TO_RADIANS(degrees));
++			}
++		}
++#endif
+ 	}
+ 
+ 	return result;
 diff --git a/source/items/weapons.c b/source/items/weapons.c
-index b2e1403..7785206 100644
+index b2e1403d795586b3fc1ab5464a6fae3472ebf805..7785206b6c960acaadb475f15bd6fd87b30cd116 100644
 --- a/source/items/weapons.c
 +++ b/source/items/weapons.c
 @@ -220,6 +220,7 @@ symbols in this file:
@@ -1871,7 +2337,7 @@ index b2e1403..7785206 100644
  		if (TEST_FLAG(trigger_definition->flags, _weapon_trigger_uses_weapon_origin_bit))
  		{
 diff --git a/source/items/weapons.h b/source/items/weapons.h
-index a9c5c83..f451943 100644
+index a9c5c8308e82e1ff2ada96554b92a582fc639606..f451943f30ad6485f8a131faef5afd6b1dea3237 100644
 --- a/source/items/weapons.h
 +++ b/source/items/weapons.h
 @@ -309,6 +309,27 @@ real weapon_estimate_time_to_target(
@@ -1903,7 +2369,7 @@ index a9c5c83..f451943 100644
  /* ---------- public code */
  
 diff --git a/source/rasterizer/xbox/rasterizer_xbox_lights.c b/source/rasterizer/xbox/rasterizer_xbox_lights.c
-index 2cfc3f9..5c8e7b0 100644
+index 2cfc3f9be838a7c92c6c43484b7fcea5b6557afa..5c8e7b0b4c35e45de68a5a2b1f115584d2d8bdc0 100644
 --- a/source/rasterizer/xbox/rasterizer_xbox_lights.c
 +++ b/source/rasterizer/xbox/rasterizer_xbox_lights.c
 @@ -154,8 +154,9 @@ extern struct pixel_shader_definition pixel_shader;
@@ -1984,10 +2450,37 @@ index 2cfc3f9..5c8e7b0 100644
  
  static boolean rasterizer_project_billboard(
 diff --git a/source/units/units.c b/source/units/units.c
-index 4857fb4..a6046e0 100644
+index 4857fb4d0fe4f45e18d71834d648230f60be946d..817cfa4d15bbdf2f6dbbeeb63da62d1ffecd67d7 100644
 --- a/source/units/units.c
 +++ b/source/units/units.c
-@@ -4845,13 +4845,15 @@ void unit_scripting_exit_vehicle(
+@@ -2911,12 +2911,25 @@ boolean unit_can_see_point(
+ 		struct unit_datum *unit = unit_get(unit_index);
+ 		struct object_marker head_marker;
+ 		real_vector3d direction;
++		real_vector3d looking = unit->unit.looking_vector;
+ 
+ 		object_get_marker_by_name(unit_index, "head", &head_marker, 1);
++#ifdef HALO_VR
++		/* Only the living primary player's gaze follows the actual headset
++		view. AI/remote units retain their simulation looking vectors. */
++		if (unit->unit.player_index != NONE &&
++			!TEST_FLAG(unit->object.damage_flags, _object_dead_bit) &&
++			player_get(unit->unit.player_index)->local_player_index == 0 &&
++			player_get(unit->unit.player_index)->unit_index == unit_index)
++		{
++			extern boolean vr_render_player_gaze(long unit_index, real_point3d *origin, real_vector3d *forward);
++			(void)vr_render_player_gaze(unit_index, &head_marker.matrix.position, &looking);
++		}
++#endif
+ 		vector_from_points3d(&head_marker.matrix.position, point, &direction);
+ 		normalize3d(&direction);
+ 
+-		if (dot_product3d(&direction, &unit->unit.looking_vector)>cosine(field_of_view))
++		if (dot_product3d(&direction, &looking)>cosine(field_of_view))
+ 		{
+ 			can_see_point = TRUE;
+ 		}
+@@ -4845,13 +4858,15 @@ void unit_scripting_exit_vehicle(
  	return;
  }
  
@@ -2005,7 +2498,7 @@ index 4857fb4..a6046e0 100644
  {
  	struct unit_datum *unit;
  	real projection;
-@@ -4860,14 +4862,17 @@ void unit_adjust_projectile_ray(
+@@ -4860,14 +4875,17 @@ void unit_adjust_projectile_ray(
  	unit = unit_get(unit_index);
  	if (use_aiming_vector)
  	{
@@ -2025,7 +2518,7 @@ index 4857fb4..a6046e0 100644
  		vector_from_points3d(&camera_position, origin, &relative);
  		projection =
  			((relative.i*direction->i + relative.k*direction->k) +
-@@ -4885,6 +4890,35 @@ void unit_adjust_projectile_ray(
+@@ -4885,6 +4903,35 @@ void unit_adjust_projectile_ray(
  	return;
  }
  
@@ -2062,7 +2555,7 @@ index 4857fb4..a6046e0 100644
  	long unit_index)
  {
 diff --git a/source/units/units.h b/source/units/units.h
-index ba4d9c2..d2ebc96 100644
+index ba4d9c2bf3a8fd98bd2076eb8c40210a49de343a..d2ebc960f4904431fb0dd291506f721bd718b067 100644
 --- a/source/units/units.h
 +++ b/source/units/units.h
 @@ -820,6 +820,13 @@ void unit_adjust_projectile_ray(
@@ -2080,7 +2573,7 @@ index ba4d9c2..d2ebc96 100644
  	long object_index);
  boolean unit_clip_to_aiming_bounds(long unit_index, real_vector3d *vector, boolean use_aiming_screen);
 diff --git a/tools/port_settings.py b/tools/port_settings.py
-index 63166f2..381b666 100644
+index 63166f2ee98e00214ed4edbadda8f57e63a75d87..381b6661615ced04a955117ea747e22b13a778bd 100644
 --- a/tools/port_settings.py
 +++ b/tools/port_settings.py
 @@ -1085,40 +1085,48 @@ def _lobby() -> list:
@@ -2182,7 +2675,7 @@ index 63166f2..381b666 100644
                                         ("color", "#FF2896FF"), ("align", "center"), ("text_y", 3)],
 diff --git a/tools/test_online_coop_menu.py b/tools/test_online_coop_menu.py
 new file mode 100644
-index 0000000..72086bd
+index 0000000000000000000000000000000000000000..72086bda0960abfdbd70213e48f3e4f868a75ce7
 --- /dev/null
 +++ b/tools/test_online_coop_menu.py
 @@ -0,0 +1,536 @@
@@ -2724,10 +3217,10 @@ index 0000000..72086bd
 +    main()
 diff --git a/tools/test_vr_locomotion.py b/tools/test_vr_locomotion.py
 new file mode 100644
-index 0000000..21bfddf
+index 0000000000000000000000000000000000000000..84926978f6b60e17d53891f4ce6df113833000bc
 --- /dev/null
 +++ b/tools/test_vr_locomotion.py
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,440 @@
 +#!/usr/bin/env python3
 +"""Compile and run the production VR walking math and integration on a host.
 +
@@ -2766,7 +3259,7 @@ index 0000000..21bfddf
 +
 +
 +def source_checks(vr, player):
-+    baseline = subprocess.check_output(['git', 'show', 'HEAD:port/linux/src/vr.c'],
++    baseline = subprocess.check_output(['git', 'show', '2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4:port/linux/src/vr.c'],
 +                                       cwd=ROOT, text=True)
 +    assert function(vr, 'halo_vr_aim') == function(baseline, 'halo_vr_aim'), 'Weapon aim changed'
 +    assert function(vr, 'weapon_pointing') == function(baseline, 'weapon_pointing'), 'Long-gun aim changed'
@@ -2820,7 +3313,7 @@ index 0000000..21bfddf
 +    struct vr_host_views views;
 +    float origin_yaw, body_yaw, origin_position[3];
 +    struct halo_vr_locomotion_heading movement_heading;
-+    int tutorial_head_valid;
++    int tutorial_head_valid, tutorial_turn_flags, turn_control_allowed;
 +    float tutorial_head_yaw, tutorial_head_pitch;
 +} vr;
 +static struct {
@@ -2886,6 +3379,9 @@ index 0000000..21bfddf
 +    memset(&vr, 0, sizeof(vr)); memset(&settings, 0, sizeof(settings));
 +    vr.initialized = vr.frame = vr.origin_valid = vr.aim_synced = 1;
 +    vr.views.should_render = vr.views.focused = vr.views.head.valid = 1;
++    vr.turn_control_allowed = 1;
++    vr.views.eye[0].valid = vr.views.eye[1].valid = 1;
++    vr.views.eye[0].orientation[3] = vr.views.eye[1].orientation[3] = 1.0f;
 +    settings.head_movement = settings.controller_aim = 1;
 +    settings.player_height = 1.7f;
 +    head_pose(0.0f, 0.0f);
@@ -3121,7 +3617,8 @@ index 0000000..21bfddf
 +    hook, guard = source_checks(vr, player)
 +    functions = '\n\n'.join(function(vr, name) for name in (
 +        'quaternion_rotate', 'quaternion_yaw', 'game_axes', 'recentre',
-+        'halo_vr_locomotion', 'halo_vr_tutorial_look', 'halo_vr_aim', 'halo_vr_aim_release'))
++        'halo_vr_locomotion', 'halo_vr_gaze_tracking_valid', 'halo_vr_tutorial_turn',
++        'halo_vr_tutorial_look', 'halo_vr_aim', 'halo_vr_aim_release'))
 +    harness = HARNESS.replace('@@FUNCTIONS@@', functions).replace('@@HOOK@@', hook)
 +    harness = harness.replace('@@AIM_GUARD@@', guard)
 +    harness = harness.replace('@@TUTORIAL@@', function(player, 'player_control_action_test_note'))
@@ -3156,7 +3653,7 @@ index 0000000..21bfddf
 +                command = ['cmd.exe', '/d', '/c', str(batch)]
 +        else:
 +            command = [compiler, '-std=c11', '-Wall', '-Wextra', '-Werror', '-DHALO_VR',
-+                       '-I' + str(ROOT / 'port/linux/src'), str(source), '-lm', '-o', str(executable)]
++                       '-I' + str(ROOT / 'port/linux/src'), str(source), *([] if os.name == 'nt' else ['-lm']), '-o', str(executable)]
 +        subprocess.run(command, cwd=temp, check=True)
 +        subprocess.run([str(executable)], cwd=temp, check=True)
 +    print('PASS: production source integration, Xbox mapping and unchanged controller/long-gun aim')
@@ -3166,16 +3663,16 @@ index 0000000..21bfddf
 +    main()
 diff --git a/tools/test_vr_projectile_reticle.py b/tools/test_vr_projectile_reticle.py
 new file mode 100644
-index 0000000..dae6462
+index 0000000000000000000000000000000000000000..8725f0da3a55b453f0b4718e5f29235a317b6c6a
 --- /dev/null
 +++ b/tools/test_vr_projectile_reticle.py
-@@ -0,0 +1,534 @@
+@@ -0,0 +1,777 @@
 +#!/usr/bin/env python3
 +"""Compile actual nominal firing/preview/reticle functions with a C11 host.
 +
 +Checks source equivalence to the pinned firing path, camera/trigger offsets,
-+read-only aim assist, vehicle collision ignores, current hit depth and stereo
-+projection. Engine services are deterministic stubs; no headset or maps needed.
++read-only aim assist, vehicle collision ignores, unarmed pointing, current hit
++depth and stereo projection. Engine services are deterministic stubs; no headset or maps needed.
 +This does not validate random spread, ballistics or GPU/headset presentation.
 +"""
 +import argparse
@@ -3187,6 +3684,7 @@ index 0000000..dae6462
 +import tempfile
 +
 +ROOT = Path(__file__).resolve().parents[1]
++ORIGINAL_ENGINE_COMMIT = '2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4'
 +
 +
 +def function(text, name):
@@ -3212,8 +3710,8 @@ index 0000000..dae6462
 +
 +
 +def verify_refactors(weapons, aim, render, units):
-+    old_weapons = subprocess.check_output(['git', 'show', 'HEAD:source/items/weapons.c'], cwd=ROOT, text=True)
-+    old_aim = subprocess.check_output(['git', 'show', 'HEAD:source/game/aim_assist.c'], cwd=ROOT, text=True)
++    old_weapons = subprocess.check_output(['git', 'show', ORIGINAL_ENGINE_COMMIT + ':source/items/weapons.c'], cwd=ROOT, text=True)
++    old_aim = subprocess.check_output(['git', 'show', ORIGINAL_ENGINE_COMMIT + ':source/game/aim_assist.c'], cwd=ROOT, text=True)
 +    old_fire = function(old_weapons, 'trigger_create_projectiles')
 +    start = old_fire.index('if (!TEST_FLAG(trigger_definition->flags, _weapon_trigger_projectiles_cannot_be_aimed_bit)')
 +    end = block_end(old_fire, old_fire.index('{', start))
@@ -3242,7 +3740,7 @@ index 0000000..dae6462
 +    assert recording and 'aim_assist_unit_index' in recording.group(1) and 'aim_assist_timestamp' in recording.group(1)
 +    assert normalized(new_body[:recording.start()] + recording.group(1) + new_body[recording.end():]) == normalized(old_body), 'Shared aim math changed'
 +    assert 'TRUE' in function(aim, 'player_aim_projectile') and 'FALSE' in function(aim, 'player_preview_projectile_aim')
-+    old_units = subprocess.check_output(['git', 'show', 'HEAD:source/units/units.c'], cwd=ROOT, text=True)
++    old_units = subprocess.check_output(['git', 'show', ORIGINAL_ENGINE_COMMIT + ':source/units/units.c'], cwd=ROOT, text=True)
 +    original_unit = function(old_units, 'unit_adjust_projectile_ray')
 +    new_unit = function(units, 'unit_adjust_projectile_ray_internal')
 +    new_unit = new_unit[new_unit.index('{'):]
@@ -3252,10 +3750,11 @@ index 0000000..dae6462
 +    assert normalized(new_unit) == normalized(original_unit[original_unit.index('{'):]), 'Unit NULL firing math changed'
 +    assert 'NULL, NULL' in function(units, 'unit_adjust_projectile_ray')
 +    assert function(units, 'unit_clip_to_aiming_bounds') == function(old_units, 'unit_clip_to_aiming_bounds')
-+    pose_builder = function(render, 'vr_render_projectile_pose')
++    pose_builder = function(render, 'vr_render_pointing_pose')
 +    assert 'render_interpolation_camera(0, observer_get_camera(0))' in pose_builder
 +    assert 'hand_position' not in pose_builder and 'base_position' not in pose_builder and 'player_effect_get_camera_effect_matrix' not in pose_builder
 +    assert 'DEGREES_TO_RADIANS(85.0f)' in pose_builder and 'unit_clip_to_aiming_bounds' in pose_builder
++    assert 'vr_render_pointing_pose(player_index, unit, &vr_render.view, vr_render.base_yaw, pose)' in function(render, 'vr_render_projectile_pose')
 +    preview = function(weapons, 'weapon_preview_projectile_ray')
 +    assert 'object_get_ultimate_parent(weapon_get_projectile_owner_object_index(weapon_index))' in preview
 +    assert 'MAXIMUM_NUMBER_OF_TRIGGERS_PER_WEAPON' in preview
@@ -3293,6 +3792,8 @@ index 0000000..dae6462
 +enum { _object_dead_bit, _object_invisible_bit, _unit_fires_from_camera_bit,
 +       _weapon_trigger_projectiles_cannot_be_aimed_bit, _weapon_trigger_uses_weapon_origin_bit };
 +enum { _object_type_biped=0, _object_type_vehicle=1, _director_perspective_first_person=1 };
++enum { _object_mask_unit=3, _director_perspective_scripted=2, _director_perspective_neutral=3 };
++typedef int director_perspective;
 +enum { _collision_user_ui, _collision_user_aim_assist };
 +enum { _collision_test_for_projectiles_flags = 31, _collision_test_for_line_of_sight_flags = 7, _collision_result_object = 1 };
 +static int checks;
@@ -3303,6 +3804,7 @@ index 0000000..dae6462
 +static void point_equal(real_point3d a, real_point3d b) { CHECK(near(a.x,b.x)); CHECK(near(a.y,b.y)); CHECK(near(a.z,b.z)); }
 +static void direction_equal(real_vector3d a, real_vector3d b) { CHECK(near(a.i,b.i)); CHECK(near(a.j,b.j)); CHECK(near(a.k,b.k)); }
 +struct object_data { int type; unsigned flags,damage_flags; long parent_object_index; real_point3d position; };
++struct object_datum { struct object_data object; };
 +struct unit_datum { long definition_index; struct object_data object; struct { long player_index,actor_index,gunner_object_index; short current_weapon_index; real_vector3d aiming_vector; } unit; };
 +struct weapon_datum { long definition_index; struct object_data object; };
 +struct player_datum { long unit_index,aim_assist_unit_index,aim_assist_timestamp; short team_index; };
@@ -3311,18 +3813,20 @@ index 0000000..dae6462
 +struct weapon_definition { struct { struct trigger_block triggers; } weapon; };
 +struct unit_definition { struct { unsigned flags; real aiming_velocity_maximum,aiming_acceleration_maximum; } unit; };
 +struct projectile_preview_pose { real_point3d camera_position; real_vector3d forward; };
-+struct observer_result { real_point3d position; };
++struct observer_result { real_point3d position; real_vector3d forward; };
++typedef struct { real yaw,pitch; } real_euler_angles2d;
 +struct object_marker { struct { real_point3d position; real_vector3d forward; } matrix; };
 +struct aim_assist_parameters { real deviation_angle; };
 +struct aim_assist_target { long object_index; real_point3d position; real autoaim_level; };
 +struct collision_result { real_point3d point; int type; long object_index; };
 +struct render_frustum { struct { real n[4][3]; } world_to_view; real projection_matrix[4][4]; };
 +struct render_camera { real_point3d position; real_vector3d forward,up; real vertical_field_of_view; rectangle2d viewport_bounds,window_bounds; };
-+struct halo_vr_view { real body_yaw,hud_tangent; boolean controller_aim,gamepad_aim; real head_forward[3],head_up[3],hand_forward[3]; float fov[2][4]; };
++struct halo_vr_view { real body_yaw,hud_tangent,world_units_per_metre; boolean controller_aim,gamepad_aim,gamepad_pitch,vehicle_first_person; real head_forward[3],head_up[3],head_position[3],hand_forward[3]; float fov[2][4]; };
 +static struct { real base_yaw; boolean active,crosshairs_drawn; struct halo_vr_view view; struct render_frustum eyes[2]; } vr_render;
 +static struct { struct render_camera camera; } render;
 +static short vr_render_crosshair_offset[2];
 +static struct unit_datum units[4];
++static struct object_datum fixture_objects[4];
 +static struct weapon_datum weapons[2];
 +static struct player_datum players[1];
 +static struct weapon_definition definitions[1];
@@ -3333,7 +3837,7 @@ index 0000000..dae6462
 +static real_point3d fixture_aim_trace_origin;
 +static real_vector3d deterministic_direction, fixture_velocity;
 +static real fixture_autoaim_level, deviation_angle, wall_x;
-+static int unit_valid[4], weapon_valid[2], inventory[4], fixture_aiming_unit[4];
++static int unit_valid[4], weapon_valid[2], inventory[4], fixture_weapon_count[4], fixture_aiming_unit[4];
 +static int params_enabled, assist_enabled, actor_calls, time_calls, marker_count, marker_object;
 +static int collision_calls, aim_calls, los_calls, max_depth, last_flags;
 +static long last_ignore;
@@ -3343,12 +3847,14 @@ index 0000000..dae6462
 +#define TAG_BLOCK_GET_ELEMENT(block,index,type) (&(block)->data[(index)])
 +static struct unit_datum *unit_try_and_get(long index) { return index>=0 && index<4 && unit_valid[index] ? &units[index] : NULL; }
 +static struct unit_datum *unit_get(long index) { CHECK(unit_try_and_get(index)!=NULL); return &units[index]; }
++static struct object_datum *object_get(long index) { CHECK(unit_try_and_get(index)!=NULL); fixture_objects[index].object=units[index].object; return &fixture_objects[index]; }
 +static struct weapon_datum *weapon_try_and_get(long index) { return index>=0 && index<2 && weapon_valid[index] ? &weapons[index] : NULL; }
 +static struct weapon_datum *weapon_get(long index) { CHECK(weapon_try_and_get(index)!=NULL); return &weapons[index]; }
 +static struct player_datum *player_get(long index) { CHECK(index==0); return &players[0]; }
 +static struct weapon_definition *weapon_definition_get(long index) { CHECK(index==0); return &definitions[0]; }
 +static struct unit_definition *unit_definition_get(long index) { CHECK(index==0); return &unit_definitions[0]; }
 +static long unit_inventory_get_weapon(long index,short slot) { (void)slot; CHECK(index>=0 && index<4); return inventory[index]; }
++static short unit_get_weapon_count(long index) { CHECK(index>=0 && index<4); return (short)fixture_weapon_count[index]; }
 +static long unit_get_aiming_unit_index(long index) { CHECK(index>=0 && index<4); return fixture_aiming_unit[index]; }
 +static short unit_get_zoom_level(long index) { (void)index; return 0; }
 +static int actor_firing_blindly(long index) { (void)index; return FALSE; }
@@ -3399,6 +3905,10 @@ index 0000000..dae6462
 +@@WEAPON_HELPERS@@
 +@@PREVIEW@@
 +static struct observer_result fixture_observer;
++static real_point3d fixture_head_position;
++static real_euler_angles2d fixture_facing_angles;
++static boolean fixture_scripted_camera;
++static boolean *director_camera_scripted=&fixture_scripted_camera;
 +static int fixture_perspective,fixture_inhibited,fixture_observer_valid,fixture_clip_calls;
 +static real fixture_clip_pitch;
 +static real_vector3d fixture_facing;
@@ -3407,6 +3917,8 @@ index 0000000..dae6462
 +static struct observer_result const *observer_get_camera(short local) { (void)local; return fixture_observer_valid ? &fixture_observer : NULL; }
 +static struct observer_result const *render_interpolation_camera(short local,struct observer_result const *observer) { (void)local; return observer; }
 +static real_vector3d *player_control_get_facing_direction(short local,real_vector3d *direction) { (void)local; *direction=fixture_facing; return direction; }
++static real_euler_angles2d const *player_control_get_facing_angles(short local) { (void)local; return &fixture_facing_angles; }
++static void unit_get_head_position(long index,real_point3d *position) { CHECK(index==0); *position=fixture_head_position; }
 +static boolean unit_clip_to_aiming_bounds(long index,real_vector3d *direction,boolean aiming) {
 +    real yaw,pitch,horizontal;
 +    CHECK(index==0 && aiming); fixture_clip_calls++;
@@ -3418,11 +3930,16 @@ index 0000000..dae6462
 +static int drawn_eye,draw_count;
 +static float draw_corrections[2][4],drawn_points[2][2];
 +static boolean halo_vr_frame_active(void) { return vr_render.active; }
-+static boolean halo_vr_aiming(void) { return TRUE; }
-+static boolean cinematic_in_progress(void) { return FALSE; }
-+static long local_player_get_player_index(short local) { (void)local; return 0; }
++static int fixture_vr_aiming,fixture_cinematic;
++static long fixture_local_player;
++static struct halo_vr_view fixture_live_view;
++static int fixture_live_view_valid,fixture_tracking_valid;
++static boolean halo_vr_aiming(void) { return fixture_vr_aiming; }
++static boolean cinematic_in_progress(void) { return fixture_cinematic; }
++static long local_player_get_player_index(short local) { (void)local; return fixture_local_player; }
++static int halo_vr_view(struct halo_vr_view *view) { if(!fixture_live_view_valid) return FALSE; *view=fixture_live_view; return TRUE; }
++static int halo_vr_gaze_tracking_valid(void) { return fixture_tracking_valid; }
 +static real view_pitch(void) { return 0; }
-+static void view_rotate(real yaw,real pitch,real const local[3],real_vector3d *world) { (void)yaw; (void)pitch; world->i=local[0]; world->j=local[1]; world->k=local[2]; }
 +static void halo_vr_set_screen_corrections(float value[2][4]) { memcpy(draw_corrections,value,sizeof(draw_corrections)); }
 +static void halo_vr_draw_eye(int eye) { drawn_eye=eye; }
 +static void hud_draw_vr_crosshairs(void) { CHECK(drawn_eye==0 || drawn_eye==1); drawn_points[drawn_eye][0]=draw_corrections[drawn_eye][0]*320+draw_corrections[drawn_eye][2]; drawn_points[drawn_eye][1]=draw_corrections[drawn_eye][1]*240+draw_corrections[drawn_eye][3]; draw_count++; }
@@ -3433,9 +3950,9 @@ index 0000000..dae6462
 +    memset(units,0,sizeof(units)); memset(weapons,0,sizeof(weapons)); memset(definitions,0,sizeof(definitions));
 +    memset(players,0,sizeof(players)); memset(unit_definitions,0,sizeof(unit_definitions)); memset(&vr_render,0,sizeof(vr_render));
 +    memset(&render,0,sizeof(render));
-+    for(i=0;i<4;i++) { unit_valid[i]=1; units[i].object.parent_object_index=NONE; units[i].unit.player_index=NONE; units[i].unit.actor_index=NONE; units[i].unit.gunner_object_index=NONE; inventory[i]=NONE; fixture_aiming_unit[i]=i; }
++    for(i=0;i<4;i++) { unit_valid[i]=1; units[i].object.parent_object_index=NONE; units[i].unit.player_index=NONE; units[i].unit.actor_index=NONE; units[i].unit.gunner_object_index=NONE; inventory[i]=NONE; fixture_weapon_count[i]=0; fixture_aiming_unit[i]=i; }
 +    for(i=0;i<2;i++) { weapon_valid[i]=1; weapons[i].object.parent_object_index=NONE; }
-+    units[0].unit.player_index=0; units[0].unit.aiming_vector=(real_vector3d){1,0,0}; inventory[0]=0;
++    units[0].unit.player_index=0; units[0].unit.aiming_vector=(real_vector3d){1,0,0}; inventory[0]=0; fixture_weapon_count[0]=1;
 +    players[0].unit_index=0; players[0].aim_assist_unit_index=41; players[0].aim_assist_timestamp=42;
 +    weapons[0].object.parent_object_index=0; definitions[0].weapon.triggers.count=1;
 +    fixture_marker.matrix.position=(real_point3d){2,0.7f,0.3f}; fixture_marker.matrix.forward=(real_vector3d){0.97f,0.12f,-0.08f}; normalize3d(&fixture_marker.matrix.forward);
@@ -3456,8 +3973,13 @@ index 0000000..dae6462
 +        vr_render.view.fov[i][0]=-1; vr_render.view.fov[i][1]=1; vr_render.view.fov[i][2]=1; vr_render.view.fov[i][3]=-1;
 +    }
 +    fixture_observer.position=unit_camera; fixture_facing=units[0].unit.aiming_vector;
++    fixture_observer.forward=(real_vector3d){1,0,0}; fixture_head_position=(real_point3d){3,4,5};
++    fixture_facing_angles=(real_euler_angles2d){0,0}; fixture_scripted_camera=FALSE;
++    vr_render.view.world_units_per_metre=2;
 +    fixture_perspective=_director_perspective_first_person; fixture_inhibited=0; fixture_observer_valid=1;
 +    fixture_clip_pitch=0; fixture_clip_calls=0;
++    fixture_vr_aiming=TRUE; fixture_cinematic=FALSE; fixture_local_player=0;
++    fixture_live_view=vr_render.view; fixture_live_view_valid=TRUE; fixture_tracking_valid=TRUE;
 +    draw_count=0; drawn_eye=-1; vr_render_crosshair_offset[0]=vr_render_crosshair_offset[1]=0;
 +}
 +static void check_ray_equivalence(void) {
@@ -3610,6 +4132,218 @@ index 0000000..dae6462
 +        direction_equal(units[0].unit.aiming_vector,(real_vector3d){1,0,0});
 +    }
 +}
++static void unarmed(void) {
++    reset(); inventory[0]=NONE; fixture_weapon_count[0]=0;
++    unit_definitions[0].unit.flags=1u<<_unit_fires_from_camera_bit;
++    vr_render.view.hand_forward[0]=1; vr_render.view.hand_forward[1]=0;
++    fixture_live_view=vr_render.view;
++}
++static void check_unarmed_refresh_and_transition(void) {
++    struct unit_datum simulation;
++    struct player_datum player_state;
++    real_point3d origin,point,armed_origin; real_vector3d direction,armed_direction;
++    struct projectile_preview_pose pose;
++    long ignore,armed_ignore; int frame;
++    unarmed(); simulation=units[0]; player_state=players[0];
++    /* No weapon, trigger or projectile metadata is available. */
++    weapon_valid[0]=FALSE; definitions[0].weapon.triggers.count=0;
++    params_enabled=assist_enabled=TRUE;
++    render.camera.position=(real_point3d){9,9,9};
++    for(frame=0;frame<12;frame++) {
++        real yaw=-0.25f+0.04f*(real)frame;
++        int previous_collision;
++        vr_render.view.hand_forward[0]=cosf(yaw); vr_render.view.hand_forward[1]=sinf(yaw);
++        fixture_observer.position=(real_point3d){0.01f*(real)frame,0.02f*(real)frame,0.5f};
++        CHECK(vr_render_projectile_ray(0,&origin,&direction,&ignore));
++        point_equal(origin,fixture_observer.position);
++        direction_equal(direction,(real_vector3d){cosf(yaw),sinf(yaw),0}); CHECK(ignore==0);
++        wall_x=frame%2 ? 40.0f : 4.0f;
++        CHECK(vr_render_projectile_point(0,&point)); CHECK(near(point.x,wall_x));
++        CHECK(near(point.y,origin.y+(wall_x-origin.x)*tanf(yaw)));
++        CHECK(last_ignore==0 && last_flags==_collision_test_for_projectiles_flags);
++        previous_collision=collision_calls; draw_count=0; vr_render_crosshairs();
++        CHECK(collision_calls==previous_collision+1 && draw_count==2 && vr_render.crosshairs_drawn);
++        CHECK(near(drawn_points[0][0], ((-(point.y+0.035f)/point.x+1)*640-1)*0.5f));
++        CHECK(near(drawn_points[1][0], ((-(point.y-0.035f)/point.x+1)*640-1)*0.5f));
++        CHECK(vr_render_hud_camera(&render.camera));
++        CHECK(vr_render_crosshair_offset[0]==10000 && !vr_render.crosshairs_drawn);
++        CHECK(aim_calls==0 && marker_object==NONE && actor_calls==0 && time_calls==0);
++        CHECK(global_current_collision_user_depth==1);
++        CHECK(memcmp(&units[0],&simulation,sizeof(simulation))==0);
++        CHECK(memcmp(&players[0],&player_state,sizeof(player_state))==0);
++    }
++    /* Acquiring a weapon immediately restores its nominal origin/aim rules. */
++    inventory[0]=0; fixture_weapon_count[0]=1; weapon_valid[0]=TRUE;
++    definitions[0].weapon.triggers.count=1;
++    definitions[0].weapon.triggers.data[0].first_person_weapon_offset=(real_point3d){0.4f,0.2f,0.1f};
++    CHECK(vr_render_projectile_pose(0,&units[0],&pose));
++    CHECK(weapon_preview_projectile_ray(0,0,0,&armed_origin,&armed_direction,&armed_ignore,&pose));
++    CHECK(vr_render_projectile_ray(0,&origin,&direction,&ignore));
++    point_equal(origin,armed_origin); direction_equal(direction,armed_direction); CHECK(ignore==armed_ignore);
++    CHECK(aim_calls==2 && marker_object==0 && time_calls==0);
++    /* Gamepad unarmed pointing also refreshes without changing simulation aim. */
++    unarmed(); vr_render.view.controller_aim=FALSE; vr_render.view.gamepad_aim=TRUE;
++    for(frame=0;frame<6;frame++) {
++        real yaw=0.1f*(real)frame;
++        fixture_facing=(real_vector3d){cosf(yaw),sinf(yaw),0};
++        CHECK(vr_render_projectile_point(0,&point)); CHECK(near(point.y,wall_x*tanf(yaw)));
++        direction_equal(units[0].unit.aiming_vector,(real_vector3d){1,0,0});
++        CHECK(aim_calls==0 && time_calls==0 && global_current_collision_user_depth==1);
++    }
++    unarmed(); wall_x=1000; fixture_observer.position=(real_point3d){0.2f,0.3f,0.5f};
++    CHECK(vr_render_projectile_point(0,&point));
++    point_equal(point,(real_point3d){100.2f,0.3f,0.5f}); CHECK(collision_calls==1 && aim_calls==0);
++}
++static void check_unarmed_guards(void) {
++    real_point3d point,origin; real_vector3d direction; long ignore;
++    unarmed(); fixture_weapon_count[0]=1; CHECK(!vr_render_projectile_point(0,&point));
++    vr_render_crosshairs(); CHECK(draw_count==0 && !vr_render.crosshairs_drawn);
++    CHECK(vr_render_hud_camera(&render.camera)); CHECK(vr_render_crosshair_offset[0]==0);
++    unarmed(); units[0].unit.player_index=NONE; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); units[0].unit.player_index=1; CHECK(!vr_render_projectile_point(0,&point));
++    origin=(real_point3d){7,8,9}; direction=(real_vector3d){3,4,5}; ignore=123;
++    CHECK(!vr_render_projectile_ray(0,&origin,&direction,&ignore));
++    point_equal(origin,(real_point3d){7,8,9}); direction_equal(direction,(real_vector3d){3,4,5}); CHECK(ignore==123);
++    unarmed(); players[0].unit_index=NONE; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); unit_valid[0]=FALSE; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); units[0].object.damage_flags=1u<<_object_dead_bit; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); units[0].object.parent_object_index=1; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); units[0].unit.gunner_object_index=2; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); units[0].object.type=_object_type_vehicle; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); fixture_local_player=NONE; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); fixture_inhibited=TRUE; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); fixture_perspective=0; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); fixture_cinematic=TRUE; CHECK(!vr_render_projectile_point(0,&point));
++    vr_render_crosshairs(); CHECK(draw_count==0 && !vr_render.crosshairs_drawn);
++    unarmed(); fixture_vr_aiming=FALSE; vr_render_crosshairs(); CHECK(draw_count==0);
++    unarmed(); vr_render.active=FALSE; vr_render_crosshairs(); CHECK(draw_count==0);
++    unarmed(); fixture_observer_valid=FALSE; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); fixture_observer.position.x=NAN; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); vr_render.view.controller_aim=FALSE; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); vr_render.view.hand_forward[0]=NAN; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); vr_render.view.hand_forward[0]=INFINITY; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); vr_render.view.hand_forward[0]=0; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); unit_definitions[0].unit.flags=0; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); unit_definitions[0].unit.aiming_velocity_maximum=1; CHECK(!vr_render_projectile_point(0,&point));
++    unarmed(); unit_definitions[0].unit.aiming_acceleration_maximum=1; CHECK(!vr_render_projectile_point(0,&point));
++    /* Existing but unsupported weapons must never become an unarmed ray. */
++    unarmed(); inventory[0]=0; definitions[0].weapon.triggers.count=0;
++    CHECK(!vr_render_projectile_point(0,&point)); CHECK(aim_calls==0 && collision_calls==0);
++    unarmed(); global_current_collision_user_depth=MAXIMUM_COLLISION_USER_STACK_DEPTH-2;
++    CHECK(!vr_render_projectile_point(0,&point)); CHECK(collision_calls==0);
++    CHECK(global_current_collision_user_depth==MAXIMUM_COLLISION_USER_STACK_DEPTH-2);
++    /* Bounds remain shared with render-rate armed pointing. */
++    unarmed(); vr_render.view.hand_forward[0]=0; vr_render.view.hand_forward[2]=1;
++    CHECK(vr_render_projectile_ray(0,&origin,&direction,&ignore));
++    CHECK(near(direction.k,sinf(DEGREES_TO_RADIANS(85.0f))));
++    fixture_clip_pitch=0.25f; CHECK(vr_render_projectile_ray(0,&origin,&direction,&ignore));
++    CHECK(near(direction.k,sinf(0.25f)) && fixture_clip_calls==2);
++}
++static void check_script_pointing_ray(void) {
++    struct unit_datum simulation;
++    struct halo_vr_view cached_view;
++    real_point3d origin,render_origin; real_vector3d forward,render_forward; long owner;
++    unarmed(); simulation=units[0]; cached_view=vr_render.view;
++    vr_render.active=FALSE; /* Scripts run after the eye pass has ended. */
++    fixture_live_view.body_yaw=0.3f;
++    fixture_live_view.hand_forward[0]=cosf(0.8f); fixture_live_view.hand_forward[1]=sinf(0.8f);
++    fixture_observer.position=(real_point3d){0.2f,0.3f,0.5f};
++    CHECK(vr_render_player_pointing_ray(0,&origin,&forward));
++    point_equal(origin,fixture_observer.position);
++    direction_equal(forward,(real_vector3d){cosf(1.1f),sinf(1.1f),0});
++    CHECK(memcmp(&vr_render.view,&cached_view,sizeof(cached_view))==0 && !vr_render.active);
++    CHECK(memcmp(&units[0],&simulation,sizeof(simulation))==0);
++    CHECK(collision_calls==0 && aim_calls==0 && marker_object==NONE && time_calls==0);
++    CHECK(players[0].aim_assist_unit_index==41 && players[0].aim_assist_timestamp==42);
++    /* The next rendered view uses precisely the same unarmed ray. */
++    vr_render.view=fixture_live_view; vr_render.base_yaw=fixture_live_view.body_yaw;
++    CHECK(vr_render_projectile_ray(0,&render_origin,&render_forward,&owner));
++    point_equal(origin,render_origin); direction_equal(forward,render_forward); CHECK(owner==0);
++    fixture_tracking_valid=FALSE; CHECK(!vr_render_player_pointing_ray(0,&origin,&forward));
++    fixture_tracking_valid=TRUE; fixture_live_view_valid=FALSE; CHECK(!vr_render_player_pointing_ray(0,&origin,&forward));
++    fixture_live_view_valid=TRUE; fixture_vr_aiming=FALSE; CHECK(!vr_render_player_pointing_ray(0,&origin,&forward));
++    unarmed(); CHECK(!vr_render_player_pointing_ray(1,&origin,&forward));
++    CHECK(!vr_render_player_pointing_ray(NONE,&origin,&forward));
++    CHECK(!vr_render_player_pointing_ray(0,NULL,&forward)); CHECK(!vr_render_player_pointing_ray(0,&origin,NULL));
++    unarmed(); fixture_local_player=NONE; CHECK(!vr_render_player_pointing_ray(0,&origin,&forward));
++    unarmed(); fixture_weapon_count[0]=1; CHECK(!vr_render_player_pointing_ray(0,&origin,&forward));
++    unarmed(); inventory[0]=0; CHECK(!vr_render_player_pointing_ray(0,&origin,&forward));
++    unarmed(); units[0].unit.player_index=1; CHECK(!vr_render_player_pointing_ray(0,&origin,&forward));
++    unarmed(); units[0].object.damage_flags=1u<<_object_dead_bit; CHECK(!vr_render_player_pointing_ray(0,&origin,&forward));
++    unarmed(); units[0].object.parent_object_index=1; CHECK(!vr_render_player_pointing_ray(0,&origin,&forward));
++    unarmed(); fixture_cinematic=TRUE; CHECK(!vr_render_player_pointing_ray(0,&origin,&forward));
++    unarmed(); fixture_inhibited=TRUE; CHECK(!vr_render_player_pointing_ray(0,&origin,&forward));
++    unarmed(); fixture_perspective=0; CHECK(!vr_render_player_pointing_ray(0,&origin,&forward));
++    unarmed(); fixture_live_view.hand_forward[0]=NAN;
++    origin=(real_point3d){7,8,9}; forward=(real_vector3d){3,4,5};
++    CHECK(!vr_render_player_pointing_ray(0,&origin,&forward));
++    point_equal(origin,(real_point3d){7,8,9}); direction_equal(forward,(real_vector3d){3,4,5});
++}
++static void check_script_hmd_gaze(void) {
++    struct unit_datum simulation;
++    struct halo_vr_view cached_view;
++    real_point3d origin,expected_position; real_vector3d forward,expected_forward;
++    int frame;
++    reset(); simulation=units[0]; cached_view=vr_render.view; vr_render.active=FALSE;
++    for(frame=0;frame<12;frame++) {
++        real yaw=0.1f*(real)frame,head_yaw=-0.3f+0.02f*(real)frame;
++        real pitch=frame>=6 ? 0.15f : 0;
++        real px,py,pz;
++        fixture_live_view.body_yaw=yaw;
++        fixture_live_view.head_forward[0]=cosf(head_yaw); fixture_live_view.head_forward[1]=sinf(head_yaw);
++        fixture_live_view.head_forward[2]=0;
++        fixture_live_view.head_position[0]=0.1f; fixture_live_view.head_position[1]=0.2f; fixture_live_view.head_position[2]=0.3f;
++        fixture_live_view.gamepad_pitch=frame>=6; fixture_facing_angles.pitch=pitch;
++        fixture_observer.position=(real_point3d){0.01f*(real)frame,0.02f*(real)frame,0.5f};
++        CHECK(vr_render_player_gaze(0,&origin,&forward));
++        px=cosf(head_yaw)*cosf(pitch); py=sinf(head_yaw); pz=cosf(head_yaw)*sinf(pitch);
++        expected_forward=(real_vector3d){cosf(yaw)*px-sinf(yaw)*py,sinf(yaw)*px+cosf(yaw)*py,pz};
++        direction_equal(forward,expected_forward);
++        px=0.1f*cosf(pitch)-0.3f*sinf(pitch); py=0.2f; pz=0.1f*sinf(pitch)+0.3f*cosf(pitch);
++        expected_position=(real_point3d){fixture_observer.position.x+2*(cosf(yaw)*px-sinf(yaw)*py),
++            fixture_observer.position.y+2*(sinf(yaw)*px+cosf(yaw)*py),fixture_observer.position.z+2*pz};
++        point_equal(origin,expected_position);
++        CHECK(memcmp(&units[0],&simulation,sizeof(simulation))==0);
++        CHECK(memcmp(&vr_render.view,&cached_view,sizeof(cached_view))==0 && !vr_render.active);
++        CHECK(aim_calls==0 && collision_calls==0 && marker_object==NONE && time_calls==0);
++    }
++    /* Without current VR aiming, the rendered camera supplies the base yaw. */
++    reset(); fixture_vr_aiming=FALSE; fixture_live_view.body_yaw=-2;
++    fixture_observer.forward=(real_vector3d){0,1,0};
++    CHECK(vr_render_player_gaze(0,&origin,&forward)); direction_equal(forward,(real_vector3d){0,1,0});
++    /* Vehicle first-person uses the same seated head origin as rendering. */
++    reset(); units[0].object.parent_object_index=1; units[1].object.type=_object_type_vehicle;
++    fixture_live_view.vehicle_first_person=TRUE; fixture_live_view.head_position[0]=0.2f;
++    CHECK(vr_render_player_gaze(0,&origin,&forward));
++    point_equal(origin,(real_point3d){3.4f,4,5});
++    fixture_live_view.vehicle_first_person=FALSE; CHECK(vr_render_player_gaze(0,&origin,&forward));
++    point_equal(origin,(real_point3d){0.4f,0,0.5f});
++    reset(); CHECK(!vr_render_player_gaze(NONE,&origin,&forward));
++    CHECK(!vr_render_player_gaze(1,&origin,&forward));
++    CHECK(!vr_render_player_gaze(0,NULL,&forward)); CHECK(!vr_render_player_gaze(0,&origin,NULL));
++    reset(); fixture_local_player=NONE; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); units[0].unit.player_index=1; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); unit_valid[0]=FALSE; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); units[0].object.damage_flags=1u<<_object_dead_bit; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); units[0].object.type=_object_type_vehicle; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); fixture_cinematic=TRUE; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); fixture_scripted_camera=TRUE; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); fixture_perspective=_director_perspective_scripted; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); fixture_perspective=_director_perspective_neutral; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); fixture_inhibited=TRUE; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); fixture_tracking_valid=FALSE; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); fixture_live_view_valid=FALSE; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); fixture_observer_valid=FALSE; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); fixture_observer.position.x=NAN; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); fixture_live_view.body_yaw=NAN; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); fixture_live_view.world_units_per_metre=0; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); fixture_live_view.head_position[0]=INFINITY; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); fixture_live_view.head_forward[0]=0; CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    reset(); fixture_live_view.gamepad_pitch=TRUE; fixture_facing_angles.pitch=NAN;
++    origin=(real_point3d){7,8,9}; forward=(real_vector3d){3,4,5};
++    CHECK(!vr_render_player_gaze(0,&origin,&forward));
++    point_equal(origin,(real_point3d){7,8,9}); direction_equal(forward,(real_vector3d){3,4,5});
++}
 +static void check_pose_limits_and_fallbacks(void) {
 +    struct projectile_preview_pose pose;
 +    real_point3d origin,baseline_origin; real_vector3d direction,baseline_direction; long ignore;
@@ -3644,6 +4378,9 @@ index 0000000..dae6462
 +}
 +int main(void) {
 +    check_render_pose_anchors(); check_render_frame_refresh(); check_pose_limits_and_fallbacks();
++    check_unarmed_refresh_and_transition(); check_unarmed_guards();
++    check_script_pointing_ray();
++    check_script_hmd_gaze();
 +    check_ray_equivalence(); check_vehicles_and_guards(); check_collision_and_projection();
 +    printf("PASS: %d production projectile/reticle assertions\n",checks); return 0;
 +}
@@ -3668,7 +4405,7 @@ index 0000000..dae6462
 +        '@@UNIT@@': (units, ['unit_adjust_projectile_ray_internal', 'unit_adjust_projectile_ray', 'unit_preview_projectile_ray']),
 +        '@@WEAPON_HELPERS@@': (weapons, ['weapon_get_effect_object_index', 'weapon_get_owner_object_index', 'weapon_get_projectile_owner_object_index', 'trigger_adjust_projectile_ray']),
 +        '@@PREVIEW@@': (weapons, ['weapon_preview_projectile_ray']),
-+        '@@RENDER@@': (render, ['frustum_clip_transform', 'yaw_rotate', 'vr_render_hud_camera', 'vr_render_projectile_pose', 'vr_render_projectile_ray', 'vr_render_projectile_point', 'vr_render_crosshairs']),
++        '@@RENDER@@': (render, ['frustum_clip_transform', 'yaw_rotate', 'view_rotate', 'seated_unit', 'vr_render_player_gaze', 'vr_render_hud_camera', 'vr_render_pointing_pose', 'vr_render_projectile_pose', 'vr_render_unarmed_ray', 'vr_render_player_pointing_ray', 'vr_render_projectile_ray', 'vr_render_projectile_point', 'vr_render_crosshairs']),
 +    }
 +    for placeholder, (text, names) in groups.items():
 +        harness = harness.replace(placeholder, '\n\n'.join(function(text, name) for name in names))
@@ -3697,7 +4434,10 @@ index 0000000..dae6462
 +                                 subprocess.list2cmdline(command) + '\n')
 +                command = ['cmd.exe', '/d', '/c', str(batch)]
 +        else:
-+            command = [compiler, '-std=c11', '-Wall', '-Wextra', '-Werror', '-DHALO_VR', str(source), '-lm', '-o', str(executable)]
++            command = [compiler, '-std=c11', '-Wall', '-Wextra', '-Werror', '-DHALO_VR', str(source)]
++            if os.name != 'nt':
++                command.append('-lm')
++            command.extend(['-o', str(executable)])
 +        subprocess.run(command, cwd=temp, check=True)
 +        subprocess.run([str(executable)], cwd=temp, check=True)
 +
@@ -3706,7 +4446,7 @@ index 0000000..dae6462
 +    main()
 diff --git a/tools/test_vr_sun_glow.py b/tools/test_vr_sun_glow.py
 new file mode 100644
-index 0000000..ea4b89d
+index 0000000000000000000000000000000000000000..ea4b89d6b015c5fb63083ee0b4b51cdb7b8e407b
 --- /dev/null
 +++ b/tools/test_vr_sun_glow.py
 @@ -0,0 +1,331 @@
@@ -4037,6 +4777,1045 @@ index 0000000..ea4b89d
 +        subprocess.run(command, cwd=temp, check=True)
 +        subprocess.run([str(executable)], cwd=temp, check=True)
 +    print('PASS: original glow/depth pipeline preserved; stereo source and screen-space binding contracts')
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/tools/test_vr_tracking.py b/tools/test_vr_tracking.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff5c227a1bc9fe89e517753befbc12759ded8011
+--- /dev/null
++++ b/tools/test_vr_tracking.py
+@@ -0,0 +1,220 @@
++#!/usr/bin/env python3
++"""Compile the production OpenXR locate functions against deterministic failures.
++
++Uses the checked-in Khronos and guest/host ABI headers. No runtime or headset
++is loaded. Verifies fresh-query validity after prior successful tracking.
++"""
++import argparse
++import os
++from pathlib import Path
++import shutil
++import subprocess
++import sys
++import tempfile
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT))
++from tools.test_vr_projectile_reticle import function
++
++
++HARNESS = r'''
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <math.h>
++#include <openxr/openxr.h>
++#include "vr_host.h"
++static unsigned checks;
++#define CHECK(c) do { checks++; if(!(c)) { fprintf(stderr,"failed line %d: %s\n",__LINE__,#c); exit(1); } } while(0)
++static struct {
++    int frame_begun;
++    XrFrameState frame;
++    XrSession session;
++    XrSpace play_space,view_space,aim_spaces[2],grip_spaces[2];
++} vr;
++static XrResult views_result,space_result[5];
++static uint32_t view_count;
++static XrViewStateFlags view_flags;
++static XrSpaceLocationFlags space_flags[5];
++static int view_calls,space_calls,generation;
++XRAPI_ATTR XrResult XRAPI_CALL xrLocateViews(XrSession session,
++    const XrViewLocateInfo *info,XrViewState *state,uint32_t capacity,
++    uint32_t *count,XrView *views) {
++    int eye;
++    CHECK(session==vr.session && capacity==2);
++    CHECK(info->type==XR_TYPE_VIEW_LOCATE_INFO && info->next==NULL);
++    CHECK(info->displayTime==vr.frame.predictedDisplayTime && info->space==vr.play_space);
++    CHECK(state->type==XR_TYPE_VIEW_STATE && state->next==NULL);
++    view_calls++;
++    if(views_result!=XR_SUCCESS) return views_result;
++    *count=view_count; state->viewStateFlags=view_flags;
++    for(eye=0;eye<2;eye++) {
++        CHECK(views[eye].type==XR_TYPE_VIEW && views[eye].next==NULL);
++        views[eye].pose.position=(XrVector3f){(float)(10*generation+eye),2,3};
++        views[eye].pose.orientation=(XrQuaternionf){0,0,0,1};
++        views[eye].fov=(XrFovf){-0.5f,0.5f,0.5f,-0.5f};
++    }
++    return XR_SUCCESS;
++}
++XRAPI_ATTR XrResult XRAPI_CALL xrLocateSpace(XrSpace space,XrSpace base,
++    XrTime time,XrSpaceLocation *location) {
++    int slot=(int)(uintptr_t)space-2;
++    CHECK(slot>=0 && slot<5 && base==vr.play_space && time==vr.frame.predictedDisplayTime);
++    CHECK(location->type==XR_TYPE_SPACE_LOCATION && location->next==NULL);
++    space_calls++;
++    if(space_result[slot]!=XR_SUCCESS) return space_result[slot];
++    location->locationFlags=space_flags[slot];
++    location->pose.position=(XrVector3f){(float)(100*generation+slot),4,5};
++    location->pose.orientation=(XrQuaternionf){0,0,0,1};
++    return XR_SUCCESS;
++}
++/* OpenXR's standard { TYPE } initializer intentionally zeroes every other
++   member. Suppress only Clang's warning about this established API idiom. */
++#ifdef __clang__
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wmissing-field-initializers"
++#endif
++@@PRODUCTION@@
++#ifdef __clang__
++#pragma clang diagnostic pop
++#endif
++static void fixture(void) {
++    int slot;
++    memset(&vr,0,sizeof(vr)); vr.frame_begun=1;
++    vr.frame.predictedDisplayTime=123456;
++    vr.session=(XrSession)(uintptr_t)1; vr.play_space=(XrSpace)(uintptr_t)1;
++    vr.view_space=(XrSpace)(uintptr_t)2;
++    vr.aim_spaces[0]=(XrSpace)(uintptr_t)3; vr.grip_spaces[0]=(XrSpace)(uintptr_t)4;
++    vr.aim_spaces[1]=(XrSpace)(uintptr_t)5; vr.grip_spaces[1]=(XrSpace)(uintptr_t)6;
++    views_result=XR_SUCCESS; view_count=2;
++    view_flags=XR_VIEW_STATE_ORIENTATION_VALID_BIT|XR_VIEW_STATE_POSITION_VALID_BIT;
++    for(slot=0;slot<5;slot++) {
++        space_result[slot]=XR_SUCCESS;
++        space_flags[slot]=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT|XR_SPACE_LOCATION_POSITION_VALID_BIT;
++    }
++    view_calls=space_calls=0; generation=1;
++}
++static struct vr_host_pose *space_pose(struct vr_host_views *views,int slot) {
++    switch(slot) {
++    case 0: return &views->head;
++    case 1: return &views->aim[0];
++    case 2: return &views->grip[0];
++    case 3: return &views->aim[1];
++    default: return &views->grip[1];
++    }
++}
++static void all_valid(struct vr_host_views *views,int expected) {
++    int eye,slot;
++    for(eye=0;eye<2;eye++) CHECK(views->eye[eye].valid==expected);
++    for(slot=0;slot<5;slot++) CHECK(space_pose(views,slot)->valid==expected);
++    CHECK(views->should_render==1 && views->focused==1 && views->display_elapsed==0.01f);
++}
++static void success(struct vr_host_views *views) {
++    int eye,slot;
++    CHECK(host_vr_locate(views)); all_valid(views,1);
++    for(eye=0;eye<2;eye++) CHECK(views->eye[eye].position[0]==(float)(10*generation+eye));
++    for(slot=0;slot<5;slot++) CHECK(space_pose(views,slot)->position[0]==(float)(100*generation+slot));
++}
++int main(void) {
++    struct vr_host_views views;
++    unsigned mask; int slot,eye;
++    memset(&views,0,sizeof(views)); views.should_render=1; views.focused=1; views.display_elapsed=0.01f;
++    fixture(); success(&views);
++    views_result=XR_ERROR_RUNTIME_FAILURE; generation=2;
++    CHECK(!host_vr_locate(&views)); all_valid(&views,0);
++    CHECK(space_calls==5); /* A view failure must not query individual spaces. */
++    views_result=XR_SUCCESS; success(&views);
++    view_count=1; CHECK(!host_vr_locate(&views)); all_valid(&views,0);
++    view_count=2; success(&views);
++    vr.frame_begun=0; view_calls=space_calls=0;
++    CHECK(!host_vr_locate(&views)); all_valid(&views,0); CHECK(view_calls==0 && space_calls==0);
++    vr.frame_begun=1; success(&views);
++    for(mask=1;mask<32;mask++) {
++        fixture(); success(&views); generation=2;
++        for(slot=0;slot<5;slot++) if(mask&(1u<<slot)) space_result[slot]=XR_ERROR_RUNTIME_FAILURE;
++        CHECK(host_vr_locate(&views));
++        for(eye=0;eye<2;eye++) CHECK(views.eye[eye].valid==1 && views.eye[eye].position[0]==(float)(20+eye));
++        for(slot=0;slot<5;slot++) {
++            struct vr_host_pose *pose=space_pose(&views,slot);
++            CHECK(pose->valid==((mask&(1u<<slot)) ? 0 : 1));
++            CHECK(pose->position[0]==(float)(((mask&(1u<<slot)) ? 100 : 200)+slot));
++        }
++        for(slot=0;slot<5;slot++) space_result[slot]=XR_SUCCESS;
++        generation=3; success(&views);
++    }
++    fixture(); success(&views); view_flags=XR_VIEW_STATE_POSITION_VALID_BIT;
++    for(slot=0;slot<5;slot++) space_flags[slot]=XR_SPACE_LOCATION_POSITION_VALID_BIT;
++    CHECK(host_vr_locate(&views)); all_valid(&views,0);
++    view_flags=XR_VIEW_STATE_ORIENTATION_VALID_BIT;
++    for(slot=0;slot<5;slot++) space_flags[slot]=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
++    CHECK(host_vr_locate(&views)); all_valid(&views,0);
++    view_flags|=XR_VIEW_STATE_ORIENTATION_VALID_BIT;
++    view_flags|=XR_VIEW_STATE_POSITION_VALID_BIT;
++    for(slot=0;slot<5;slot++) space_flags[slot]|=XR_SPACE_LOCATION_POSITION_VALID_BIT;
++    generation=2; success(&views);
++    for(slot=0;slot<5;slot++) {
++        int other;
++        space_flags[slot]=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
++        CHECK(host_vr_locate(&views));
++        CHECK(views.eye[0].valid && views.eye[1].valid);
++        for(other=0;other<5;other++) CHECK(space_pose(&views,other)->valid==(other!=slot));
++        space_flags[slot]|=XR_SPACE_LOCATION_POSITION_VALID_BIT;
++        success(&views);
++    }
++    printf("PASS: %u production OpenXR tracking assertions\n",checks); return 0;
++}
++'''
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('--cc')
++    parser.add_argument('--vcvarsall', type=Path)
++    args = parser.parse_args()
++    source_text = (ROOT / 'port/linux/arm64/host_vr.c').read_text()
++    harness = HARNESS.replace('@@PRODUCTION@@', '\n\n'.join(
++        function(source_text, name) for name in ('pose_from_xr', 'host_vr_locate')))
++    compiler = args.cc or os.environ.get('CC')
++    vcvars = args.vcvarsall
++    if not compiler and os.name == 'nt':
++        installations = Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'Microsoft Visual Studio'
++        candidates = sorted(installations.glob('*/**/VC/Tools/MSVC/*/bin/Hostx64/x64/cl.exe'))
++        if candidates:
++            compiler = str(candidates[-1])
++            vcvars = vcvars or candidates[-1].parents[6] / 'Auxiliary/Build/vcvarsall.bat'
++    compiler = compiler or shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
++    if not compiler:
++        raise SystemExit('No C11 host compiler found; select one with --cc.')
++    include_paths = [ROOT / 'port/third_party/openxr', ROOT / 'port/linux/src']
++    with tempfile.TemporaryDirectory(prefix='halo-vr-tracking-check-', ignore_cleanup_errors=True) as directory:
++        temp = Path(directory)
++        source = temp / 'test.c'
++        executable = temp / ('test.exe' if os.name == 'nt' else 'test')
++        source.write_text(harness)
++        if Path(compiler).name.lower() in ('cl', 'cl.exe'):
++            command = [compiler, '/nologo', '/std:c11', '/W4', '/WX', '/D_CRT_SECURE_NO_WARNINGS',
++                       '/Fe:' + str(executable), '/Fo:' + str(temp / 'test.obj')]
++            command.extend('/I' + str(path) for path in include_paths)
++            command.append(str(source))
++            if vcvars:
++                for path in (vcvars, Path(compiler), temp):
++                    if any(character in str(path) for character in '\r\n"&|<>^%!'):
++                        raise SystemExit('Unsupported shell metacharacter in compiler/temp path.')
++                batch = temp / 'compile.cmd'
++                batch.write_text('@echo off\ncall "' + str(vcvars) + '" x64 >nul\nif errorlevel 1 exit /b 1\n' +
++                                 subprocess.list2cmdline(command) + '\n')
++                command = ['cmd.exe', '/d', '/c', str(batch)]
++        else:
++            command = [compiler, '-std=c11', '-Wall', '-Wextra', '-Werror']
++            command.extend('-I' + str(path) for path in include_paths)
++            command.append(str(source))
++            if os.name != 'nt':
++                command.append('-lm')
++            command.extend(['-o', str(executable)])
++        subprocess.run(command, cwd=temp, check=True)
++        subprocess.run([str(executable)], cwd=temp, check=True)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/tools/test_vr_tutorial.py b/tools/test_vr_tutorial.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d1bbd2b2a0b367bad3c51b3ff2b96a647ccc6b6b
+--- /dev/null
++++ b/tools/test_vr_tutorial.py
+@@ -0,0 +1,536 @@
++#!/usr/bin/env python3
++"""Host regressions for production VR tutorial gates; no headset or map required.
++
++An optional --xbox-a10 reads an authorized local Xbox map passively to verify
++the actual tutorial predicates. Its bytes and scripts are never saved or copied.
++"""
++import argparse
++import os
++from pathlib import Path
++import re
++import shutil
++import struct
++import subprocess
++import tempfile
++import zlib
++
++import test_vr_locomotion as walking
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def function(source, name):
++    match = re.search(r'(?:static\s+)?(?:void|float|int|boolean)\s+' + re.escape(name) +
++                      r'\s*\([^;]*?\)\s*\{', source)
++    assert match, f'Missing production function {name}'
++    code = walking.masked(source)
++    end = code.index('{', match.start()) + 1
++    depth = 1
++    while depth:
++        depth += (code[end] == '{') - (code[end] == '}')
++        end += 1
++    return source[match.start():end]
++
++
++TURN_CHECKS = r'''
++static int camera_enabled = 1, paused;
++enum { _object_dead_bit = 0 };
++static struct unit_fixture { struct { unsigned long damage_flags; } object; } living;
++static struct unit_fixture *unit_get(long index) { CHECK(index != NONE); return &living; }
++static int player_control_camera_control_is_active(void) { return camera_enabled && !paused; }
++static void turn_control_dispatch(void) { @@TURN_CONTROL@@ }
++
++static void note_idle(void) {
++    const real_euler_angles2d still = { 0.f, 0.f };
++    const real_vector2d idle = { 0.f, 0.f };
++    player_control_action_test_note(0, &still, &idle, 0.f);
++}
++static void tutorial_reset(void) {
++    reset_state(); settings.snap_angle = (float)M_PI / 4.f;
++    vr.snap_latched = 0; camera_enabled = 1; paused = inhibited = cinematic = 0;
++    living.object.damage_flags = 0; player->unit_index = 7; local_player_index = 0;
++    player_control_action_test_reset();
++}
++static void check_snap_and_reset(void) {
++    float yaw, pitch, before;
++    tutorial_reset();
++    /* Reproduce input-disabled cryopod: the script freezes game-facing,
++       but free look and the displayed body-yaw turn remain permitted. */
++    turn_control_dispatch(); CHECK(vr.turn_control_allowed);
++    tutorial_turn_input(0.9f, 0.016f); CHECK(close_float(vr.body_yaw, -(float)M_PI / 4.f));
++    note_idle(); CHECK(TEST_FLAG(tutorial.action_flags, _player_control_look_relative_right_bit));
++    CHECK(!TEST_FLAG(tutorial.action_flags, _player_control_look_relative_left_bit));
++    player_control_action_test_reset(); before = vr.body_yaw;
++    tutorial_turn_input(0.9f, 0.016f); note_idle();
++    CHECK(close_float(vr.body_yaw, before)); CHECK(tutorial.action_flags == 0); /* held stick */
++    tutorial_turn_input(0.f, 0.016f); tutorial_turn_input(-0.9f, 0.016f); note_idle();
++    CHECK(close_float(vr.body_yaw, 0.f));
++    CHECK(TEST_FLAG(tutorial.action_flags, _player_control_look_relative_left_bit));
++    /* Multiple render frames between game ticks must retain both directions. */
++    player_control_action_test_reset(); tutorial_turn_input(0.f, 0.016f);
++    tutorial_turn_input(0.9f, 0.016f); tutorial_turn_input(0.f, 0.016f);
++    tutorial_turn_input(-0.9f, 0.016f); note_idle();
++    CHECK(TEST_FLAG(tutorial.action_flags, _player_control_look_relative_left_bit));
++    CHECK(TEST_FLAG(tutorial.action_flags, _player_control_look_relative_right_bit));
++    head_pose(0.f, 0.04f); note_idle(); head_pose(0.f, -0.04f); note_idle();
++    CHECK(TEST_FLAG(tutorial.action_flags, _player_control_look_relative_up_bit));
++    CHECK(TEST_FLAG(tutorial.action_flags, _player_control_look_relative_down_bit));
++    /* The actual a10 gate requires all four accumulated flags. */
++    CHECK(TEST_FLAG(tutorial.action_flags, _player_control_look_relative_left_bit) &&
++          TEST_FLAG(tutorial.action_flags, _player_control_look_relative_right_bit) &&
++          TEST_FLAG(tutorial.action_flags, _player_control_look_relative_up_bit) &&
++          TEST_FLAG(tutorial.action_flags, _player_control_look_relative_down_bit));
++    tutorial_reset(); head_pose(0.8f, 0.4f); vr.tutorial_turn_flags = 3;
++    tutorial.action_flags = tutorial.action_test_flags = ~0UL;
++    player_control_action_test_reset(); note_idle();
++    CHECK(tutorial.action_flags == 0 && tutorial.action_test_flags == 0);
++    CHECK(vr.tutorial_head_valid && vr.tutorial_turn_flags == 0);
++    CHECK(close_float(vr.tutorial_head_yaw, 0.8f) && close_float(vr.tutorial_head_pitch, 0.4f));
++    head_pose(0.805f, 0.405f); note_idle(); CHECK(tutorial.action_flags == 0);
++    head_pose(0.83f, 0.44f); note_idle();
++    CHECK(TEST_FLAG(tutorial.action_flags, _player_control_look_relative_left_bit));
++    CHECK(TEST_FLAG(tutorial.action_flags, _player_control_look_relative_up_bit));
++    tutorial_reset(); head_pose(0.6f, 0.2f); player_control_action_test_reset(); recentre(); note_idle();
++    CHECK(tutorial.action_flags == 0); /* rebasing origin is not deliberate looking */
++    tutorial_reset(); halo_vr_turn_control(0); head_pose(0.9f, 0.4f);
++    CHECK(!halo_vr_tutorial_look(&yaw, &pitch) && yaw == 0.f && pitch == 0.f);
++}
++static void check_smooth_and_controls(void) {
++    int exclusion;
++    float before;
++    tutorial_reset(); settings.smooth_turn = 1; settings.smooth_speed = 2.f;
++    tutorial_turn_input(0.6f, 0.25f); CHECK(close_float(vr.body_yaw, -0.25f));
++    note_idle(); CHECK(TEST_FLAG(tutorial.action_flags, _player_control_look_relative_right_bit));
++    player_control_action_test_reset(); tutorial_turn_input(-0.6f, 0.25f); note_idle();
++    CHECK(close_float(vr.body_yaw, 0.f));
++    CHECK(TEST_FLAG(tutorial.action_flags, _player_control_look_relative_left_bit));
++    for (exclusion = 0; exclusion < 6; exclusion++) {
++        tutorial_reset();
++        switch (exclusion) {
++            case 0: camera_enabled = 0; break;
++            case 1: paused = 1; break;
++            case 2: inhibited = 1; break;
++            case 3: cinematic = 1; break;
++            case 4: player->unit_index = NONE; break;
++            case 5: living.object.damage_flags = FLAG(_object_dead_bit); break;
++        }
++        turn_control_dispatch(); CHECK(!vr.turn_control_allowed);
++        before = vr.body_yaw; tutorial_turn_input(0.9f, 0.016f);
++        head_pose(0.9f, 0.4f); note_idle();
++        CHECK(vr.body_yaw == before && tutorial.action_flags == 0 && !vr.tutorial_head_valid);
++    }
++    tutorial_reset(); settings.gamepad_aim = 1;
++    tutorial_turn_input(0.9f, 0.016f); note_idle();
++    CHECK(vr.body_yaw == 0.f && tutorial.action_flags == 0); /* gamepad owns ordinary turn */
++    tutorial_reset(); tutorial_turn_input(NAN, 0.016f); tutorial_turn_input(0.9f, INFINITY);
++    tutorial_turn_input(0.9f, -0.01f); note_idle(); CHECK(vr.body_yaw == 0.f && tutorial.action_flags == 0);
++}
++static void check_pose_masks(void) {
++    int corruption;
++    for (corruption = 0; corruption < 16; corruption++) {
++        tutorial_reset();
++        switch (corruption) {
++            case 0: vr.initialized = 0; break;
++            case 1: vr.frame = vr.pending = 0; break;
++            case 2: vr.views.should_render = 0; break;
++            case 3: vr.views.focused = 0; break;
++            case 4: vr.views.head.valid = 0; break;
++            case 5: vr.menus = 1; break;
++            case 6: vr.origin_valid = 0; break;
++            case 7: vr.aim_synced = 0; break;
++            case 8: vr.origin_yaw = NAN; break;
++            case 9: vr.body_yaw = INFINITY; break;
++            case 10: vr.views.head.orientation[0] = NAN; break;
++            case 11: vr.views.eye[0].valid = 0; break;
++            case 12: vr.views.eye[1].orientation[3] = 0.f; break;
++            case 13: vr.views.eye[0].position[2] = INFINITY; break;
++            case 14: vr.origin_position[1] = NAN; break;
++            case 15: vr.views.eye[1].orientation[0] = NAN; break;
++        }
++        CHECK(!halo_vr_gaze_tracking_valid());
++        tutorial_turn_input(0.9f, 0.016f); note_idle();
++        CHECK(tutorial.action_flags == 0 && !vr.tutorial_head_valid && vr.tutorial_turn_flags == 0);
++    }
++    tutorial_reset(); vr.frame = 0; vr.pending = 1; CHECK(halo_vr_gaze_tracking_valid());
++    vr.views.focused = 0; tutorial_turn_input(0.9f, 0.016f);
++    vr.views.focused = 1; tutorial_turn_input(0.9f, 0.016f); note_idle();
++    CHECK(vr.body_yaw == 0.f && tutorial.action_flags == 0); /* recovery requires release */
++    tutorial_turn_input(0.f, 0.016f); tutorial_turn_input(0.9f, 0.016f); note_idle();
++    CHECK(TEST_FLAG(tutorial.action_flags, _player_control_look_relative_right_bit));
++    tutorial_reset(); tutorial_turn_input(0.9f, 0.016f); vr.views.focused = 0; note_idle();
++    CHECK(tutorial.action_flags == 0 && vr.tutorial_turn_flags == 0); /* queued event invalidated */
++    tutorial_reset(); vr.views.focused = 0; tutorial_turn_input(0.f, 0.016f);
++    head_pose(0.9f, 0.4f); vr.views.focused = 1; note_idle();
++    CHECK(tutorial.action_flags == 0 && vr.tutorial_head_valid); /* no game tick during loss */
++    tutorial_reset(); tutorial_turn_input(0.9f, 0.016f); halo_vr_menus(1);
++    CHECK(vr.tutorial_turn_flags == 0 && !vr.tutorial_head_valid);
++    head_pose(0.9f, 0.4f); halo_vr_menus(0); note_idle(); CHECK(tutorial.action_flags == 0);
++}
++'''
++
++
++GAZE_HARNESS = r'''
++#define _USE_MATH_DEFINES
++#include <math.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#define NONE (-1)
++#define TRUE 1
++#define FALSE 0
++#define FLAG(bit) (1UL << (bit))
++#define TEST_FLAG(value, bit) (((value) & FLAG(bit)) != 0)
++#define VALID_INDEX(index, count) ((index) >= 0 && (index) < (count))
++#define NUMBEROF(array) ((short)(sizeof(array) / sizeof((array)[0])))
++#define DEGREES_TO_RADIANS(value) ((value) * 0.01745329251994329577f)
++#define cosine cosf
++#define TAG_BLOCK_GET_ELEMENT(block, index, type) (&((type *)(block)->address)[index])
++typedef int boolean;
++typedef float real;
++typedef struct { float x, y, z; } real_point3d;
++typedef struct { float i, j, k; } real_vector3d;
++enum { _object_dead_bit = 0, _object_type_scenery = 6 };
++struct object_fields { unsigned long damage_flags; short type, name_index; real_point3d bounding_sphere_center; };
++struct unit_datum { struct object_fields object; struct { long player_index; real_vector3d looking_vector; } unit; };
++struct object_datum { struct object_fields object; };
++struct player_fixture { long unit_index; short local_player_index; };
++struct object_marker { struct { real_point3d position; } matrix; };
++struct scenario_object_name { char name[32]; short runtime_object_type, runtime_scenario_datum_index; };
++struct scenario { struct { long count; void *address; } object_names; };
++static struct unit_datum units[3];
++static struct object_datum target;
++static struct player_fixture players[2];
++static struct scenario_object_name fixture_names[6];
++static struct scenario scenario_fixture;
++static long global_scenario_index;
++static const char *scenario_path;
++static real_point3d sim_origin, head_origin, hand_origin;
++static real_vector3d head_forward, hand_forward;
++static int gaze_valid, pointing_valid, gaze_calls, pointing_calls, checks;
++#define CHECK(condition) do { checks++; if (!(condition)) { \
++    fprintf(stderr, "failed gaze line %d: %s\n", __LINE__, #condition); exit(1); } } while (0)
++static struct unit_datum *unit_get(long index) { CHECK(index >= 0 && index < 3); return &units[index]; }
++static struct unit_datum *unit_try_and_get(long index) { return index >= 0 && index < 3 ? &units[index] : NULL; }
++static struct object_datum *object_get(long index) { CHECK(index == 5); return &target; }
++static struct player_fixture *player_get(long index) { CHECK(index >= 0 && index < 2); return &players[index]; }
++static struct scenario *global_scenario_get(void) { return &scenario_fixture; }
++static const char *tag_get_name(long index) { CHECK(index == 9); return scenario_path; }
++static void object_get_marker_by_name(long index, const char *name, struct object_marker *marker, int count) {
++    (void)index; CHECK(!strcmp(name, "head") && count == 1); marker->matrix.position = sim_origin;
++}
++static void unit_get_head_position(long index, real_point3d *point) { (void)index; *point = target.object.bounding_sphere_center; }
++static void vector_from_points3d(const real_point3d *from, const real_point3d *to, real_vector3d *vector) {
++    vector->i = to->x - from->x; vector->j = to->y - from->y; vector->k = to->z - from->z;
++}
++static float normalize3d(real_vector3d *v) {
++    float length = sqrtf(v->i*v->i + v->j*v->j + v->k*v->k);
++    if (length > 0.f) { v->i /= length; v->j /= length; v->k /= length; }
++    return length;
++}
++static float dot_product3d(const real_vector3d *a, const real_vector3d *b) {
++    return a->i*b->i + a->j*b->j + a->k*b->k;
++}
++/* Presentation math/freshness is independently tested in the production
++   reticle harness. These boundary stubs preserve its unchanged-output and
++   living-owned-unarmed eligibility contract while testing the real callers. */
++boolean vr_render_player_gaze(long index, real_point3d *origin, real_vector3d *forward) {
++    gaze_calls++;
++    if (!gaze_valid) return FALSE;
++    CHECK(index == 0); *origin = head_origin; *forward = head_forward; return TRUE;
++}
++boolean vr_render_player_pointing_ray(long index, real_point3d *origin, real_vector3d *forward) {
++    pointing_calls++;
++    if (!pointing_valid || index != 0 || units[index].unit.player_index != 0 ||
++        players[0].local_player_index != 0 || players[0].unit_index != index ||
++        TEST_FLAG(units[index].object.damage_flags, _object_dead_bit)) return FALSE;
++    *origin = hand_origin; *forward = hand_forward; return TRUE;
++}
++@@FUNCTIONS@@
++static void reset_gaze(void) {
++    int index;
++    memset(units, 0, sizeof(units)); memset(players, 0, sizeof(players));
++    memset(&target, 0, sizeof(target)); memset(fixture_names, 0, sizeof(fixture_names));
++    for (index = 0; index < 3; index++) {
++        units[index].unit.player_index = NONE; units[index].unit.looking_vector.i = 1.f;
++    }
++    units[0].unit.player_index = 0; players[0].unit_index = 0; players[0].local_player_index = 0;
++    units[1].unit.player_index = 1; players[1].unit_index = 1; players[1].local_player_index = NONE;
++    sim_origin = (real_point3d){0.f, 0.f, 0.f}; head_origin = (real_point3d){0.4f, -0.3f, 1.7f};
++    hand_origin = (real_point3d){0.6f, -0.5f, 1.1f};
++    head_forward = (real_vector3d){0.f, 1.f, 0.f}; hand_forward = (real_vector3d){1.f, 0.f, 0.f};
++    target.object.type = _object_type_scenery; target.object.name_index = 0;
++    target.object.bounding_sphere_center = (real_point3d){5.6f, -0.5f, 1.1f};
++    snprintf(fixture_names[0].name, sizeof(fixture_names[0].name), "%s", "looking_panel_center"); scenario_fixture.object_names.count = 6;
++    scenario_fixture.object_names.address = fixture_names; global_scenario_index = 9; scenario_path = "levels\\a10\\a10";
++    gaze_valid = pointing_valid = 1; gaze_calls = pointing_calls = 0;
++}
++static void check_technician_gaze(void) {
++    real_point3d point;
++    int exclusion, angle;
++    reset_gaze(); point = (real_point3d){0.4f, 4.7f, 1.7f};
++    CHECK(unit_can_see_point(0, &point, DEGREES_TO_RADIANS(15.f))); /* HMD vs frozen sim */
++    CHECK(!unit_can_see_point(1, &point, DEGREES_TO_RADIANS(15.f))); /* remote */
++    CHECK(!unit_can_see_point(2, &point, DEGREES_TO_RADIANS(15.f))); /* AI */
++    CHECK(!unit_can_see_point(NONE, &point, DEGREES_TO_RADIANS(15.f)));
++    for (angle = 0; angle < 2; angle++) {
++        float gate = angle ? 20.f : 15.f;
++        point = (real_point3d){head_origin.x + 5.f*sinf(DEGREES_TO_RADIANS(gate - 0.1f)),
++                              head_origin.y + 5.f*cosf(DEGREES_TO_RADIANS(gate - 0.1f)), head_origin.z};
++        CHECK(unit_can_see_point(0, &point, DEGREES_TO_RADIANS(gate)));
++        point.x = head_origin.x + 5.f*sinf(DEGREES_TO_RADIANS(gate + 0.1f));
++        point.y = head_origin.y + 5.f*cosf(DEGREES_TO_RADIANS(gate + 0.1f));
++        CHECK(!unit_can_see_point(0, &point, DEGREES_TO_RADIANS(gate)));
++    }
++    for (exclusion = 0; exclusion < 5; exclusion++) {
++        reset_gaze(); point = (real_point3d){0.4f, 4.7f, 1.7f};
++        switch (exclusion) {
++            case 0: units[0].unit.player_index = NONE; break;
++            case 1: units[0].object.damage_flags = FLAG(_object_dead_bit); break;
++            case 2: players[0].local_player_index = 1; break;
++            case 3: players[0].unit_index = 2; break;
++            case 4: gaze_valid = 0; break;
++        }
++        CHECK(!unit_can_see_point(0, &point, DEGREES_TO_RADIANS(15.f)));
++        CHECK(gaze_calls == (exclusion == 4));
++        point = (real_point3d){5.f, 0.f, 0.f};
++        CHECK(unit_can_see_point(0, &point, DEGREES_TO_RADIANS(15.f))); /* baseline preserved */
++    }
++}
++static void check_panel_eligibility(void) {
++    int exclusion, index;
++    static const char *const active[] = {"looking_panel_center", "looking_panel_left", "looking_panel_right",
++                                       "looking_panel_up", "looking_panel_down"};
++    for (index = 0; index < 5; index++) {
++        reset_gaze(); snprintf(fixture_names[0].name, sizeof(fixture_names[0].name), "%s", active[index]);
++        CHECK(hs_unit_can_see_object(0, 5, 5.f)); CHECK(pointing_calls == 1);
++    }
++    for (exclusion = 0; exclusion < 13; exclusion++) {
++        reset_gaze();
++        switch (exclusion) {
++            case 0: scenario_path = "levels\\a30\\a30"; break;
++            case 1: global_scenario_index = NONE; break;
++            case 2: target.object.type = 7; break;
++            case 3: target.object.name_index = NONE; break;
++            case 4: target.object.name_index = 6; break;
++            case 5: snprintf(fixture_names[0].name, sizeof(fixture_names[0].name), "%s", "looking_panel_center_success"); break;
++            case 6: snprintf(fixture_names[0].name, sizeof(fixture_names[0].name), "%s", "looking_panel_center_extra"); break;
++            case 7: memset(fixture_names[0].name, 'x', sizeof(fixture_names[0].name)); break;
++            case 8: pointing_valid = 0; break; /* armed, vehicle, cinematic, stale pose */
++            case 9: units[0].object.damage_flags = FLAG(_object_dead_bit); break;
++            case 10: players[0].local_player_index = 1; break;
++            case 11: players[0].unit_index = 2; break;
++            case 12: units[0].unit.player_index = NONE; break;
++        }
++        CHECK(!hs_unit_can_see_object(0, 5, 5.f));
++    }
++    reset_gaze(); CHECK(!hs_unit_can_see_object(0, 5, 6.f)); CHECK(pointing_calls == 0);
++    CHECK(!hs_unit_can_see_object(1, 5, 5.f)); /* remote retains simulation result */
++    CHECK(!hs_unit_can_see_object(NONE, NONE, 5.f));
++    reset_gaze(); head_forward = hand_forward; head_origin = hand_origin;
++    pointing_valid = 0; CHECK(hs_unit_can_see_object(0, 5, 5.f)); CHECK(pointing_calls == 0); /* HMD also accepted */
++}
++static void check_panel_cone_origin_height(void) {
++    int height, distance, outside, axis;
++    for (height = -2; height <= 4; height++) for (distance = 1; distance <= 12; distance++) {
++        for (outside = 0; outside < 2; outside++) for (axis = 0; axis < 2; axis++) {
++            float angle = DEGREES_TO_RADIANS(outside ? 5.1f : 4.9f);
++            reset_gaze(); hand_origin.z = (float)height * 0.6f;
++            target.object.bounding_sphere_center.x = hand_origin.x + distance * cosf(angle);
++            target.object.bounding_sphere_center.y = hand_origin.y + (axis ? 0.f : distance * sinf(angle));
++            target.object.bounding_sphere_center.z = hand_origin.z + (axis ? distance * sinf(angle) : 0.f);
++            CHECK(hs_unit_can_see_object(0, 5, 5.f) == !outside);
++        }
++    }
++    reset_gaze(); target.object.bounding_sphere_center = hand_origin;
++    CHECK(!hs_unit_can_see_object(0, 5, 5.f)); /* degenerate direction */
++}
++int main(void) {
++    check_technician_gaze(); check_panel_eligibility(); check_panel_cone_origin_height();
++    printf("PASS: %d production tutorial HMD / named-panel ray assertions\n", checks);
++    return 0;
++}
++'''
++
++
++def compile_run(harness, compiler, vcvars):
++    with tempfile.TemporaryDirectory(prefix='halo-vr-tutorial-', ignore_cleanup_errors=True) as directory:
++        temp = Path(directory)
++        source = temp / 'test.c'
++        exe = temp / ('test.exe' if os.name == 'nt' else 'test')
++        source.write_text(harness)
++        if Path(compiler).name.lower() in ('cl', 'cl.exe'):
++            command = [compiler, '/nologo', '/std:c11', '/W4', '/WX', '/D_CRT_SECURE_NO_WARNINGS',
++                       '/DHALO_VR', '/I' + str(ROOT / 'port/linux/src'), '/Fe:' + str(exe),
++                       '/Fo:' + str(temp / 'test.obj'), str(source)]
++            if vcvars:
++                for path in (vcvars, Path(compiler), temp):
++                    if any(character in str(path) for character in '\r\n"&|<>^%!'):
++                        raise SystemExit('Unsupported compiler/temp shell metacharacter')
++                batch = temp / 'compile.cmd'
++                batch.write_text('@echo off\ncall "' + str(vcvars) + '" x64 >nul\n'
++                                 'if errorlevel 1 exit /b 1\n' + subprocess.list2cmdline(command) + '\n')
++                command = ['cmd.exe', '/d', '/c', str(batch)]
++        else:
++            command = [compiler, '-std=c11', '-Wall', '-Wextra', '-Werror', '-DHALO_VR',
++                       '-I' + str(ROOT / 'port/linux/src'), str(source),
++                       *([] if os.name == 'nt' else ['-lm']), '-o', str(exe)]
++        subprocess.run(command, cwd=temp, check=True)
++        subprocess.run([str(exe)], cwd=temp, check=True)
++
++
++def verify_xbox_a10(path):
++    """Bounded passive inspection; return facts, never distribute retail scripts."""
++    raw = path.read_bytes()
++    assert 2048 < len(raw) < 600_000_000 and raw[:4] == b'daeh'
++    declared = struct.unpack_from('<I', raw, 8)[0]
++    assert 2048 < declared < 600_000_000
++    stream = zlib.decompressobj()
++    expanded = stream.decompress(raw[2048:], declared - 2048 + 1)
++    assert stream.eof and not stream.unconsumed_tail and len(expanded) == declared - 2048
++    data = raw[:2048] + expanded
++    assert struct.unpack_from('<I', data, 4)[0] == 5
++    def u32(offset):
++        assert 0 <= offset <= len(data) - 4
++        return struct.unpack_from('<I', data, offset)[0]
++    index = u32(16)
++    table = index + 36
++    magic = u32(index) - table
++    tag_count = u32(index + 12)
++    assert 0 < tag_count < 65536 and table + tag_count * 32 <= len(data)
++    scenario_handle = u32(index + 4)
++    scenario = u32(table + (scenario_handle & 65535)*32 + 20) - magic
++    assert 0 <= scenario < len(data) - 1188
++    syntax, strings = u32(scenario + 1152) - magic, u32(scenario + 1172) - magic
++    strings_size, syntax_size = u32(scenario + 1160), u32(scenario + 1140)
++    assert 0 <= strings <= len(data) - strings_size and 0 <= syntax <= len(data) - syntax_size
++    count = struct.unpack_from('<H', data, syntax + 46)[0]
++    assert 56 + count * 20 <= syntax_size
++    nodes = [struct.unpack_from('<4H3I', data, syntax + 56 + n*20) for n in range(count)]
++    def string(offset):
++        assert 0 <= offset < strings_size
++        end = data.index(b'\0', strings + offset, strings + strings_size)
++        return data[strings + offset:end].decode('ascii')
++    def expression(handle, ancestors=frozenset()):
++        n = handle & 65535
++        assert n < count and n not in ancestors
++        node = nodes[n]
++        if node[3] & 1:
++            if node[3] & 4:
++                return string(node[5]) if node[5] < strings_size else node[6]
++            if node[2] == 6:
++                return struct.unpack('<f', struct.pack('<I', node[6]))[0]
++            if node[2] == 5:
++                return bool(node[6] & 1)
++            return string(node[5]) if node[5] < strings_size else node[6]
++        children = []
++        child = node[6]
++        seen = set()
++        while child != 0xffffffff:
++            slot = child & 65535
++            assert slot < count and slot not in seen
++            seen.add(slot)
++            children.append(expression(child, ancestors | {n}))
++            child = nodes[slot][4]
++        return children
++    script_count, script_table = u32(scenario + 1180), u32(scenario + 1184) - magic
++    assert 0 < script_count < 4096 and 0 <= script_table <= len(data) - script_count*92
++    scripts = {}
++    for n in range(script_count):
++        offset = script_table + n*92
++        name = data[offset:offset+32].split(b'\0', 1)[0].decode('ascii')
++        if name in ('tutorial_looking', 'tutorial_setup', 'test_looking_tech', 'mission_a10') or name.startswith('test_looking_cycle_'):
++            scripts[name] = expression(u32(offset + 36))
++    def calls(tree, name):
++        found = []
++        if isinstance(tree, list):
++            if tree and tree[0] == name:
++                found.append(tree)
++            for child in tree:
++                found.extend(calls(child, name))
++        return found
++    look = scripts['tutorial_looking']
++    assert calls(look, 'player_action_test_reset')
++    for direction in ('left', 'right', 'up', 'down'):
++        assert calls(look, 'player_action_test_look_relative_' + direction)
++    assert any(len(call) == 2 and call[1] is False for call in calls(scripts['tutorial_setup'], 'player_enable_input'))
++    for name in ('center', 'left', 'right', 'up', 'down'):
++        gate = calls(scripts['test_looking_cycle_' + name], 'objects_can_see_object')
++        assert any('looking_panel_' + name in call and call[-1] == 5.0 for call in gate)
++    assert any(call[-1] == 15.0 for call in calls(scripts['test_looking_tech'], 'objects_can_see_object'))
++    assert any(call[-1] == 20.0 for call in calls(scripts['test_looking_tech'], 'objects_can_see_object'))
++    # The five actual named targets are scenery; success variants are different names.
++    name_count, name_table = u32(scenario + 516), u32(scenario + 520) - magic
++    assert 5 <= name_count < 65536 and 0 <= name_table <= len(data) - name_count*36
++    for n, suffix in enumerate(('center', 'right', 'left', 'up', 'down')):
++        offset = name_table + n*36
++        assert data[offset:offset+32].split(b'\0', 1)[0].decode('ascii') == 'looking_panel_' + suffix
++        assert struct.unpack_from('<h', data, offset+32)[0] == 6
++    # Check tutorial routing remains authored by the map: co-op and difficulty.
++    mission = scripts['mission_a10']
++    assert calls(mission, 'game_is_cooperative') and calls(mission, 'game_difficulty_get')
++    print('PASS: passive original Xbox a10 predicates: input-disabled look, all four direction flags, '
++          'five named scenery targets at 5 degrees, technician 15/20 degrees, authored difficulty/co-op routing')
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('--cc')
++    parser.add_argument('--vcvarsall', type=Path)
++    parser.add_argument('--xbox-a10', type=Path, help='Authorized original Xbox a10.map, passive read only')
++    args = parser.parse_args()
++    vr = (ROOT / 'port/linux/src/vr.c').read_text()
++    player = (ROOT / 'source/game/player_control.c').read_text()
++    hook, aim_guard = walking.source_checks(vr, player)
++    dispatch_function = function(player, 'handle_one_player_input')
++    start = dispatch_function.index('if (local_player_index == 0)')
++    opening = dispatch_function.index('{', start)
++    # This integration block is deliberately simple and has one nested-free body.
++    gate = dispatch_function[start:dispatch_function.index('}', opening) + 1]
++    assert 'halo_vr_turn_control' in gate and 'player_control_camera_control_is_active()' in gate
++    assert 'player_input_is_enabled' not in walking.masked(gate)
++    assert player.index('halo_vr_turn_control(') < player.index('get_local_player_input_blob(', player.index('static void handle_one_player_input('))
++    harness = walking.HARNESS
++    harness = harness.replace('int tutorial_head_valid, tutorial_turn_flags, turn_control_allowed;',
++                              'int tutorial_head_valid, tutorial_turn_flags, turn_control_allowed, snap_latched;')
++    harness = harness.replace('int head_movement, controller_aim, gamepad_aim, gamepad_snap, standing;',
++                              'int head_movement, controller_aim, gamepad_aim, gamepad_snap, standing, smooth_turn;')
++    harness = harness.replace('float snap_angle, player_height;', 'float snap_angle, player_height, smooth_speed;')
++    harness = harness.replace('real_euler_angles2d desired_angles;', 'long unit_index; real_euler_angles2d desired_angles;')
++    harness = harness.replace('unsigned long action_flags;', 'unsigned long action_flags, action_test_flags;')
++    functions = '\n\n'.join(function(vr, name) for name in (
++        'quaternion_rotate', 'quaternion_yaw', 'game_axes', 'recentre', 'halo_vr_locomotion',
++        'halo_vr_gaze_tracking_valid', 'halo_vr_turn_control', 'halo_vr_tutorial_turn',
++        'tutorial_turn_input', 'halo_vr_tutorial_look', 'halo_vr_tutorial_reset',
++        'halo_vr_aim', 'halo_vr_aim_release', 'halo_vr_menus'))
++    functions = '#define HALO_VR_TUTORIAL_TURN_LEFT 1\n#define HALO_VR_TUTORIAL_TURN_RIGHT 2\n' + functions
++    harness = harness.replace('@@FUNCTIONS@@', functions).replace('@@HOOK@@', hook).replace('@@AIM_GUARD@@', aim_guard)
++    harness = harness.replace('@@TUTORIAL@@', function(player, 'player_control_action_test_note') + '\n\n' +
++                              function(player, 'player_control_action_test_reset'))
++    harness = harness.replace('int main(void) {', TURN_CHECKS.replace('@@TURN_CONTROL@@', gate) + '\nint main(void) {\n'
++                              '    check_snap_and_reset(); check_smooth_and_controls(); check_pose_masks();')
++    gaze = GAZE_HARNESS.replace('@@FUNCTIONS@@', '\n\n'.join((
++        function((ROOT / 'source/units/units.c').read_text(), 'unit_can_see_point'),
++        function((ROOT / 'source/hs/hs_library_external.c').read_text(), 'hs_vr_calibration_panel'),
++        function((ROOT / 'source/hs/hs_library_external.c').read_text(), 'hs_unit_can_see_object'))))
++    compiler = args.cc or os.environ.get('CC')
++    vcvars = args.vcvarsall
++    if not compiler and os.name == 'nt':
++        base = Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'Microsoft Visual Studio'
++        candidates = sorted(base.glob('*/**/VC/Tools/MSVC/*/bin/Hostx64/x64/cl.exe'))
++        if candidates:
++            compiler = str(candidates[-1])
++            vcvars = vcvars or candidates[-1].parents[6] / 'Auxiliary/Build/vcvarsall.bat'
++    compiler = compiler or shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
++    if not compiler:
++        raise SystemExit('No C compiler; select --cc')
++    compile_run(harness, compiler, vcvars)
++    compile_run(gaze, compiler, vcvars)
++    if args.xbox_a10:
++        verify_xbox_a10(args.xbox_a10)
++    else:
++        print('SKIP: optional original Xbox a10 data verification (provide --xbox-a10)')
++    print('PASS: unchanged armed aim / Xbox controls; no tutorial script, difficulty or skip changes')
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/tools/test_vr_tutorial_buttons.py b/tools/test_vr_tutorial_buttons.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d7c4b483d09176336cac4882992c207b8450ce39
+--- /dev/null
++++ b/tools/test_vr_tutorial_buttons.py
+@@ -0,0 +1,265 @@
++#!/usr/bin/env python3
++"""Run production tutorial button consumption and inversion persistence logic.
++
++The same extracted input function is compiled with and without its VR branch,
++so the legacy melee leak and unchanged flat behavior are tested directly. The
++profile setter is also extracted; its disk/HUD boundaries are controlled stubs,
++not a claim that the reported headset crash has been reproduced.
++"""
++import argparse
++import os
++from pathlib import Path
++import re
++import shutil
++import subprocess
++import tempfile
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def function(text, name):
++    hidden = re.sub(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"',
++                    lambda match: re.sub(r'[^\n]', ' ', match.group()), text, flags=re.S)
++    found = re.search(r'(?:static\s+)?(?:boolean|void)\s+' + re.escape(name) +
++                      r'\s*\([^;]*?\)\s*\{', hidden)
++    if not found:
++        raise AssertionError('Missing production function: ' + name)
++    start = found.start()
++    opening = hidden.index('{', start)
++    depth, end = 1, opening + 1
++    while depth:
++        depth += (hidden[end] == '{') - (hidden[end] == '}')
++        end += 1
++    return text[start:end]
++
++
++HARNESS = r'''
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <wchar.h>
++typedef int boolean;
++#define FALSE 0
++#define TRUE 1
++#define NONE (-1)
++#define FLAG(bit) (1u << (bit))
++#define TEST_FLAG(value,bit) ((value) & FLAG(bit))
++#define SET_FLAG(value,bit,on) ((value) = ((value) & ~FLAG(bit)) | ((on) ? FLAG(bit) : 0u))
++#define UNICODE_STRING_LIST_TAG 123
++enum {
++    _player_control_action_bit, _player_control_accept_bit, _player_control_back_bit,
++    _player_control_zoom_bit, _player_control_input_zoom_bit,
++    _player_control_rotate_weapons_bit, _player_control_rotate_grenades_bit
++};
++enum {
++    _unit_control_action_bit, _unit_control_jump_bit, _unit_control_use_equipment_bit,
++    _unit_control_throw_grenade_bit, _unit_control_weapon_secondary_trigger_bit,
++    _unit_control_weapon_primary_trigger_bit
++};
++struct facing { float yaw,pitch; };
++struct throttle { float i,j; };
++struct input_blob {
++    boolean accept,back; unsigned unit_control_flags,player_control_flags;
++    struct facing facing_delta; struct throttle throttle; float primary_trigger;
++};
++struct player_control_globals_data {
++    unsigned action_flags,action_test_flags,suppressed_action_flags;
++};
++static struct player_control_globals_data fixture_globals;
++static struct player_control_globals_data *player_control_globals = &fixture_globals;
++static boolean controls_swapped;
++static int vr_active, cinematic_skip, coop_skip, voted, skipped, votes, notes, checks;
++int halo_vr_active(void) { return vr_active; }
++static int cinematic_can_be_skipped(void) { return cinematic_skip; }
++static int network_coop_skip_offered(void) { return coop_skip; }
++static int network_coop_vote_skip(void) { ++votes; return voted; }
++static void main_skip_cinematic(void) { ++skipped; }
++static void player_control_action_test_note(unsigned flags,const struct facing *f,
++        const struct throttle *t,float trigger) {
++    (void)flags; (void)f; (void)t; (void)trigger; ++notes;
++}
++struct player_profile { struct { boolean invert_look; } controller_settings; };
++static struct {
++    struct { struct player_profile profile; long active_profile_index; } local_players[4];
++} player_ui_globals;
++static int saved, messaged, applied, saved_inversion, applied_inversion;
++static long string_tag = 22;
++static const wchar_t message_text[] = L"Profile saved";
++static long tag_loaded(int group,const char *path) {
++    if (group != UNICODE_STRING_LIST_TAG || strcmp(path,"ui\\shell\\strings\\temp_strings")) abort();
++    return string_tag;
++}
++static const wchar_t *unicode_string_list_get_string(long tag,long index) {
++    if(tag != string_tag || index != 1) abort(); return message_text;
++}
++static void hud_message_to_all(const wchar_t *message) { if(!message) abort(); ++messaged; }
++static void player_profile_save(long index,const struct player_profile *profile) {
++    if(index != 7 || !profile) abort(); ++saved; saved_inversion=profile->controller_settings.invert_look;
++}
++static void set_local_player_controls_from_player_profile(short local) {
++    if(local != 0) abort(); ++applied;
++    applied_inversion=player_ui_globals.local_players[0].profile.controller_settings.invert_look;
++}
++#define CHECK(condition) do { ++checks; if(!(condition)) { \
++    fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#condition); exit(1); } } while(0)
++
++/* Compile the actual legacy branch alongside the VR-enabled production code. */
++#undef HALO_VR
++@@LEGACY@@
++#define HALO_VR 1
++@@INPUT@@
++@@BACK@@
++@@ACCEPT@@
++@@INVERT@@
++
++static struct input_blob button_input(boolean down) {
++    struct input_blob input={0};
++    input.back=down;
++    input.unit_control_flags=FLAG(_unit_control_use_equipment_bit) |
++        FLAG(_unit_control_throw_grenade_bit) | FLAG(_unit_control_weapon_secondary_trigger_bit) |
++        FLAG(_unit_control_weapon_primary_trigger_bit);
++    input.player_control_flags=FLAG(_player_control_rotate_weapons_bit) |
++        FLAG(_player_control_rotate_grenades_bit) | FLAG(_player_control_input_zoom_bit);
++    return input;
++}
++static void consumed(const struct input_blob *input) {
++    CHECK(!TEST_FLAG(input->unit_control_flags,_unit_control_use_equipment_bit));
++    CHECK(!TEST_FLAG(input->unit_control_flags,_unit_control_throw_grenade_bit));
++    CHECK(!TEST_FLAG(input->unit_control_flags,_unit_control_weapon_secondary_trigger_bit));
++    CHECK(!TEST_FLAG(input->player_control_flags,_player_control_rotate_weapons_bit));
++    CHECK(!TEST_FLAG(input->player_control_flags,_player_control_rotate_grenades_bit));
++    CHECK(!TEST_FLAG(input->player_control_flags,_player_control_input_zoom_bit));
++    CHECK(TEST_FLAG(input->unit_control_flags,_unit_control_weapon_primary_trigger_bit));
++}
++static void legacy_leak_and_release(void) {
++    int swapped;
++    for(swapped=0;swapped<2;++swapped) {
++        struct input_blob input;
++        controls_swapped=swapped; vr_active=1; memset(&fixture_globals,0,sizeof(fixture_globals));
++        CHECK(!player_control_action_test_back()); input=button_input(TRUE);
++        original_action_test_input(&input);
++        CHECK(TEST_FLAG(input.unit_control_flags,_unit_control_use_equipment_bit));
++        memset(&fixture_globals,0,sizeof(fixture_globals)); CHECK(!player_control_action_test_back());
++        input=button_input(TRUE); player_control_action_test_check_reset_input_blob(&input);
++        consumed(&input); CHECK(player_control_action_test_back());
++        CHECK(TEST_FLAG(fixture_globals.suppressed_action_flags,_player_control_back_bit));
++        /* Script reset while B remains held must retain suppression. */
++        fixture_globals.action_test_flags=0; fixture_globals.action_flags=0;
++        input=button_input(TRUE); player_control_action_test_check_reset_input_blob(&input);
++        consumed(&input); CHECK(TEST_FLAG(fixture_globals.suppressed_action_flags,_player_control_back_bit));
++        input=button_input(FALSE); player_control_action_test_check_reset_input_blob(&input);
++        consumed(&input); CHECK(!TEST_FLAG(fixture_globals.suppressed_action_flags,_player_control_back_bit));
++        input=button_input(TRUE); player_control_action_test_check_reset_input_blob(&input);
++        CHECK(TEST_FLAG(input.unit_control_flags,_unit_control_use_equipment_bit));
++        CHECK(TEST_FLAG(input.unit_control_flags,_unit_control_throw_grenade_bit));
++        CHECK(TEST_FLAG(input.player_control_flags,_player_control_rotate_weapons_bit));
++        CHECK(TEST_FLAG(input.player_control_flags,_player_control_rotate_grenades_bit));
++    }
++}
++static void flat_equivalence(void) {
++    unsigned requested,suppressed; int swapped,accept,back;
++    vr_active=0;
++    for(requested=0;requested<8;++requested) for(suppressed=0;suppressed<8;++suppressed)
++    for(swapped=0;swapped<2;++swapped) for(accept=0;accept<2;++accept) for(back=0;back<2;++back) {
++        struct player_control_globals_data initial={0}, expected;
++        struct input_blob before=button_input(back), original, current;
++        before.accept=accept; before.unit_control_flags|=FLAG(_unit_control_action_bit)|FLAG(_unit_control_jump_bit);
++        initial.action_test_flags=requested;
++        initial.suppressed_action_flags=suppressed;
++        controls_swapped=swapped; fixture_globals=initial; original=before;
++        original_action_test_input(&original); expected=fixture_globals;
++        fixture_globals=initial; current=before; player_control_action_test_check_reset_input_blob(&current);
++        CHECK(!memcmp(&original,&current,sizeof(current)));
++        CHECK(!memcmp(&expected,&fixture_globals,sizeof(fixture_globals)));
++    }
++}
++static void inversion_and_accept(void) {
++    struct input_blob input={0};
++    vr_active=1; controls_swapped=0; memset(&fixture_globals,0,sizeof(fixture_globals));
++    memset(&player_ui_globals,0,sizeof(player_ui_globals));
++    player_ui_globals.local_players[0].active_profile_index=7;
++    player0_look_invert_pitch(TRUE);
++    CHECK(saved==1 && applied==1 && messaged==1 && saved_inversion && applied_inversion);
++    CHECK(!player_control_action_test_accept()); CHECK(!player_control_action_test_back());
++    input=button_input(TRUE); player_control_action_test_check_reset_input_blob(&input);
++    CHECK(!player_control_action_test_accept() && player_control_action_test_back());
++    consumed(&input);
++    /* This is the tutorial's Back branch; persistence remains the real setter. */
++    player0_look_invert_pitch(FALSE);
++    CHECK(saved==2 && applied==2 && messaged==2 && !saved_inversion && !applied_inversion);
++    CHECK(!player_ui_globals.local_players[0].profile.controller_settings.invert_look);
++    player0_look_invert_pitch(TRUE);
++    CHECK(saved==3 && applied==3 && saved_inversion && applied_inversion);
++    player_ui_globals.local_players[0].active_profile_index=NONE;
++    player0_look_invert_pitch(FALSE);
++    CHECK(saved==3 && messaged==3 && applied==4 && !applied_inversion);
++    player_ui_globals.local_players[0].active_profile_index=7; string_tag=NONE;
++    player0_look_invert_pitch(TRUE); CHECK(saved==4 && messaged==4 && applied==5);
++    memset(&fixture_globals,0,sizeof(fixture_globals)); input=(struct input_blob){0}; input.accept=TRUE;
++    input.unit_control_flags=FLAG(_unit_control_jump_bit)|FLAG(_unit_control_action_bit);
++    CHECK(!player_control_action_test_accept());
++    player_control_action_test_check_reset_input_blob(&input);
++    CHECK(player_control_action_test_accept() && !player_control_action_test_back());
++    CHECK(TEST_FLAG(input.unit_control_flags,_unit_control_jump_bit));
++    cinematic_skip=1; coop_skip=1; voted=0;
++    player_control_action_test_check_reset_input_blob(&input); CHECK(votes==1 && skipped==1);
++    voted=1; player_control_action_test_check_reset_input_blob(&input); CHECK(votes==2 && skipped==1);
++}
++int main(void) {
++    legacy_leak_and_release(); flat_equivalence(); inversion_and_accept();
++    CHECK(notes>0);
++    printf("PASS: %d production tutorial-button/inversion assertions\n",checks);
++    return 0;
++}
++'''
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('--cc')
++    parser.add_argument('--vcvarsall', type=Path)
++    args = parser.parse_args()
++    controls = (ROOT / 'source/game/player_control.c').read_text()
++    profile = (ROOT / 'source/interface/player_ui.c').read_text()
++    assert 'input->back = gamepad->buttons[_gamepad_analog_button_b];' in controls
++    assert 'player_profile_save(' in function(profile, 'player0_look_invert_pitch')
++    actual = function(controls, 'player_control_action_test_check_reset_input_blob')
++    harness = HARNESS.replace('@@INPUT@@', actual).replace('@@LEGACY@@', actual.replace(
++        'player_control_action_test_check_reset_input_blob', 'original_action_test_input'))
++    for placeholder,name in (('@@BACK@@','player_control_action_test_back'),
++                             ('@@ACCEPT@@','player_control_action_test_accept')):
++        harness = harness.replace(placeholder,function(controls,name))
++    harness = harness.replace('@@INVERT@@',function(profile,'player0_look_invert_pitch'))
++    compiler = args.cc or os.environ.get('CC')
++    vcvars = args.vcvarsall
++    if not compiler and os.name == 'nt':
++        installations = Path(os.environ.get('ProgramFiles','C:/Program Files')) / 'Microsoft Visual Studio'
++        candidates = sorted(installations.glob('*/**/VC/Tools/MSVC/*/bin/Hostx64/x64/cl.exe'))
++        if candidates:
++            compiler = str(candidates[-1]); vcvars = vcvars or candidates[-1].parents[6] / 'Auxiliary/Build/vcvarsall.bat'
++    compiler = compiler or shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
++    if not compiler:
++        raise SystemExit('No C11 host compiler found; select one with --cc.')
++    compiler = str(Path(shutil.which(compiler) or compiler).resolve())
++    with tempfile.TemporaryDirectory(prefix='halo-vr-buttons-',ignore_cleanup_errors=True) as directory:
++        temp=Path(directory); source=temp/'test.c'; executable=temp/('test.exe' if os.name=='nt' else 'test')
++        source.write_text(harness)
++        if Path(compiler).name.lower() in ('cl','cl.exe'):
++            command=[compiler,'/nologo','/std:c11','/W4','/WX','/D_CRT_SECURE_NO_WARNINGS',
++                     '/Fe:'+str(executable),'/Fo:'+str(temp/'test.obj'),str(source)]
++        else:
++            command=[compiler,'-std=c11','-Wall','-Wextra','-Werror',str(source),'-o',str(executable)]
++        if vcvars:
++            for path in (vcvars,Path(compiler),temp):
++                if any(character in str(path) for character in '\r\n"&|<>^%!'):
++                    raise SystemExit('Unsupported shell metacharacter in compiler/temp path.')
++            batch=temp/'compile.cmd'
++            batch.write_text('@echo off\ncall "'+str(vcvars)+'" x64 >nul\nif errorlevel 1 exit /b 1\n'+
++                             subprocess.list2cmdline(command)+'\n')
++            command=['cmd.exe','/d','/c',str(batch)]
++        subprocess.run(command,cwd=temp,check=True)
++        subprocess.run([str(executable)],cwd=temp,check=True)
 +
 +
 +if __name__ == '__main__':

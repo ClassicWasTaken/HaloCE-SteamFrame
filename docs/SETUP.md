@@ -1,12 +1,12 @@
-# Halo CE Steam Frame VR mod — setup 1.4.0
+# Halo CE Steam Frame VR mod — setup 1.4.1
 
 [Back to the project README](../README.md)
 
-1.4.0 replaces an existing verified 1.3.5 installation at `~/Games/HaloCENativeVR`, keeping the Steam title **Halo: Combat Evolved VR (Native)**. Old saves are retained; the new engine starts with `save-v1.4` and a new profile/campaign.
+1.4.1 updates the native installation at `~/Games/HaloCENativeVR`, keeping the Steam title **Halo: Combat Evolved VR (Native)**. Existing 1.4.0 profiles and saves remain in `save-v1.4`. When upgrading from 1.3.5, its old saves are retained but you need a new profile/campaign for the 1.4 save format.
 
 ## Before you begin
 
-Download and run the single [**Halo-Steam-Frame-Mod-Setup-1.4.0.exe**](https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/v1.4.0/Halo-Steam-Frame-Mod-Setup-1.4.0.exe) for Windows 10/11 x64. It includes its runtime and USB transfer tools; no administrator rights, Python installation, installer ZIP, or separate Platform Tools download is needed. Verify its SHA256 against the checksum shown on the [release page](https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/tag/v1.4.0).
+Download and run the single [**Halo-Steam-Frame-Mod-Setup-1.4.1.exe**](https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/v1.4.1/Halo-Steam-Frame-Mod-Setup-1.4.1.exe) for Windows 10/11 x64. It includes its runtime and USB transfer tools; no administrator rights, Python installation, installer ZIP, or separate Platform Tools download is needed. Verify its SHA256 against the checksum shown on the [release page](https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/tag/v1.4.1).
 
 Use your own authorized original Xbox Halo CE ISO/XISO or extracted maps. USA Rev 2 was validated with the stable installer; the supported-build table below explains other retail revisions. Halo PC, Xbox 360 Anniversary, MCC, and Quest packages are unsupported. No retail game executable, disc image, maps, product keys, or soundtrack is bundled or downloaded. The project provides no game-download sources.
 
@@ -14,7 +14,7 @@ Halo artwork and trademarks remain copyrighted to their respective owners, and t
 
 The Frame needs ARM64 SteamOS, SteamVR/OpenXR, rootless Podman, internet access, and **12 GiB of free internal storage**. Setup checks these before installing. Your Windows computer needs about 2.5 GB of temporary space for maps. The SteamOS root filesystem stays read-only. Podman runs as the ordinary `steamos` host user; dependency installation uses root only inside the rootless container, with `no-new-privileges` retained.
 
-The headset tester confirmed the engine and controls used by this release, including reticle motion and LAN/online campaign co-op. The earlier 1.4.0a4 test confirmed shot/reticle alignment but identified visible reticle stepping, which the current render-rate preview addresses. No measured FPS, frame timing, peer-distance details, or complete uninstall test was supplied. Earlier white flashes and stuttering have not been separately diagnosed.
+The headset tester confirmed the 1.4.0 baseline's reticle motion and LAN/online campaign co-op. The tutorial changes in 1.4.1 need their own headset verification; the earlier report does not validate them. No measured FPS, frame timing, peer-distance details, or complete uninstall test was supplied. Earlier white flashes and stuttering have not been separately diagnosed.
 
 The executable uses the classic Halo PC Master Chief helmet-and-shoulders icon. Its [source and hashes](../resources/ui/README.md) are documented separately from the installer's code license. The Steam library's project-drawn helmet icon is unchanged.
 
@@ -22,9 +22,9 @@ The executable uses the classic Halo PC Master Chief helmet-and-shoulders icon. 
 
 The source is pinned to `2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4`. It includes upstream network campaign co-op, delayed texture-stage binding, and vertex clip-position handling changes. These renderer changes are a candidate improvement; they do not establish the cause or resolution of reported white flashes or frame drops.
 
-1.4.0 uses **`~/Games/HaloCENativeVR`** and the Steam title **Halo: Combat Evolved VR (Native)**, replacing 1.3.5's program in place. Old 1.3.5 saves remain unchanged in their original `save` folder or configured location. The original config and program files are backed up in the owned installer run's `previous-program-files` folder. The new engine's larger game-state capacity makes old checkpoints incompatible, so setup selects **`~/Games/HaloCENativeVR/save-v1.4`** for new saves. Create a new profile and campaign; setup does not automatically migrate checkpoints or profiles.
+1.4.1 uses **`~/Games/HaloCENativeVR`** and the Steam title **Halo: Combat Evolved VR (Native)**. It keeps the 1.4.0 save format and **`~/Games/HaloCENativeVR/save-v1.4`**; existing 1.4.0 profiles and checkpoints do not require migration. Old 1.3.5 saves remain unchanged in their original `save` folder or configured location. The original config and program files are backed up in the owned installer run's `previous-program-files` folder. The 1.4 engine's larger game-state capacity makes 1.3.5 checkpoints incompatible. When upgrading from 1.3.5, create a new profile and campaign; setup does not automatically migrate those checkpoints or profiles.
 
-Existing 1.4.0a2–a5 installations at `~/Games/HaloCENativeVRExperimental`, with the Steam title **Halo: Combat Evolved VR (Experimental)**, remain untouched. You can keep that tested copy for reference. The public 1.4.0 installer targets the normal native installation.
+Existing 1.4.0a2–a5 installations at `~/Games/HaloCENativeVRExperimental`, with the Steam title **Halo: Combat Evolved VR (Experimental)**, remain untouched. You can keep that tested copy for reference. The public 1.4.1 installer targets the normal native installation.
 
 With `vr.aim = "controller"`, **`vr.movement = "head"`** makes the left stick follow the headset's horizontal facing on foot. The right controller still aims the weapon. `vr.movement = "aim"` restores the previous aim-directed movement; `HALO_VR_MOVEMENT=aim` is the equivalent environment override. The movement patch excludes menus, flat mode, gamepad aiming, cinematics, remote players, and vehicle steering. Invalid tracking pauses head-directed movement rather than using an untrusted direction. The Xbox bumper layout and physical-head tutorial tests remain included.
 
@@ -34,7 +34,7 @@ The build stages `brokers.txt` for internet invite/server discovery. The relativ
 
 ## Online campaign co-op with a friend
 
-Both players should use **the same 1.4.0 build** and supply their own supported original Xbox game data. Each player runs the game on their own headset or computer; campaign has one local player per machine. Use the left d-pad to navigate rows and change left/right choices, **A** to accept, and **B** to go back.
+Both players should use **the same 1.4.1 build** and supply their own supported original Xbox game data. Each player runs the game on their own headset or computer; campaign has one local player per machine. Use the left d-pad to navigate rows and change left/right choices, **A** to accept, and **B** to go back.
 
 1. **Host:** open **Multiplayer > CO-OP CAMPAIGN**. On the same network choose **HOST LOCAL (LAN)**; across different networks choose **HOST ONLINE (INTERNET)**. The Map screen starts on **SINGLEPLAYER**. Choose a campaign level and difficulty.
 2. In **Server Setup**, set **MAXIMUM PLAYERS** to 2 for two players, then select **START GAME**. For online browser discovery, change **LISTING** to **PUBLIC**. **PUBLIC lets anyone see and join the game.** Online co-op starts **PRIVATE** by default; setup does not force public listing.
@@ -76,7 +76,7 @@ After you select valid local Xbox game data, the installer automatically loops t
 
 ### Supported Xbox ISO revisions
 
-Use **Halo: Combat Evolved for the original Xbox**. **USA Rev 2 was validated with the stable installer.** 1.4.0 retains its map-header checks. Other retail revisions, including an original USA release or an image labeled **USA Rev 1**, and PAL releases are accepted when their actual map headers match one of these supported builds:
+Use **Halo: Combat Evolved for the original Xbox**. **USA Rev 2 was validated with the stable installer.** 1.4.1 retains its map-header checks. Other retail revisions, including an original USA release or an image labeled **USA Rev 1**, and PAL releases are accepted when their actual map headers match one of these supported builds:
 
 | Map-header build | Upstream region |
 | --- | --- |
@@ -88,9 +88,9 @@ These builds come from the [pinned port's compatibility table](https://github.co
 
 ### Already have Halo installed?
 
-To replace 1.3.5, close **Halo: Combat Evolved VR (Native)** and choose **Install** or **Repair**. Install recognizes a verified 1.3.5 installation in `~/Games/HaloCENativeVR` and rebuilds it with 1.4.0. Setup replaces the native program, SDL library, broker list, patch, and notices, reusing verified Xbox maps without another ISO. If maps are missing or damaged, select valid local data and retry. An unknown folder can be adopted only through explicit Repair after its native executable and Xbox maps validate; other locations are left alone.
+To update an existing installation, close **Halo: Combat Evolved VR (Native)** and choose **Repair**. Setup rebuilds the native program and applies the 1.4.1 patch, reusing verified Xbox maps without another ISO. Install also recognizes a verified 1.3.5 installation and upgrades its program in place. Setup replaces the native program, SDL library, broker list, patch, and notices. If maps are missing or damaged, select valid local data and retry. An unknown folder can be adopted only through explicit Repair after its native executable and Xbox maps validate; other locations are left alone.
 
-The upgrade retains old saves at their original location and backs up the original config and program in the owned build run's `previous-program-files` folder. It points the new engine to `save-v1.4`, leaving the old game-state data untouched. Start a new profile/campaign; there is no automatic checkpoint or profile migration. Later repairs retain 1.4.0 saves and unrelated settings. A failed replacement rolls back the affected program/config files. The separate 1.4.0a2–a5 Experimental copy is not removed or upgraded by this installer.
+The update keeps existing 1.4.0 profiles/checkpoints in `save-v1.4` and backs up the original config and program in the owned build run's `previous-program-files` folder. Upgrading from 1.3.5 retains its old saves at their original location and selects `save-v1.4` for a new profile/campaign; there is no automatic migration of 1.3.5 checkpoints or profiles. Repairs keep unrelated settings. A failed replacement rolls back the affected program/config files. The separate 1.4.0a2–a5 Experimental copy is not removed or upgraded by this installer.
 
 The old PC installation at `~/Games/HaloCEVR` is detected and explained separately. Its PC maps cannot be used for this native Xbox build. Setup installs the native version separately and does not automatically remove the PC version. Close the native game before repair. Program-file backups are retained in the owned build workspace, and a failed repair rolls back the affected files. **Add to Steam again** repairs library registration and adds missing library artwork; it does not rebuild the game.
 
@@ -127,7 +127,7 @@ With the client running, Steam controls artwork cleanup for the removed entry; s
 | Menu / View | Pause / scoreboard |
 | Both grips held | Recenter |
 
-Motion aiming stays enabled. Smooth turning defaults to 90 degrees/second, refresh rate to 72 Hz, and render scale to 1.0. Repairs refresh the VR/control defaults and keep unrelated settings and saves. Head movement also satisfies the first-level look tutorial. The patch does not skip the campaign or increase combat difficulty.
+Install and Repair apply motion aiming, standing mode and snap turning. Fresh installs use 30-degree snap turns, 72 Hz and render scale 1.0. Repairs keep your other settings and saves. Head movement and deliberate stick turns satisfy the first-level look tutorial; the calibration dots also accept pointing with the unarmed hand reticle. The patch does not skip the campaign or increase combat difficulty.
 
 The native shortcut uses this **per-game** launch option to prevent the same physical controller from being read through both OpenXR and Steam's virtual gamepad:
 
@@ -195,7 +195,7 @@ python -m venv .venv
 .\.venv\Scripts\python scripts/build_release.py
 ```
 
-The build writes a matching installer source bundle and `SHA256SUMS.txt` to `dist/` alongside the EXE. These remain local build outputs. The public release uploads one EXE and lists its SHA256 in the release notes; matching installer source is available in the [v1.4.0 Git tag](https://github.com/ClassicWasTaken/HaloSteamFrameMod/tree/v1.4.0), with GitHub's automatic source downloads available for developers. Applicable third-party source/notices are included for rebuilding, including the LGPL Paramiko dependency. ADB binaries are not checked into Git; [bundle_usb_tools.py](../scripts/bundle_usb_tools.py) downloads the pinned official archive during the executable build and verifies its archive and selected-file checksums before packaging. [resources/usb/manifest.json](../resources/usb/manifest.json) records those hashes and provenance. The package contains installer code/resources and verified tools with their notices; no retail executable, ISO, maps, SSH password, or private key is included.
+The build writes a matching installer source bundle and `SHA256SUMS.txt` to `dist/` alongside the EXE. These remain local build outputs. The public release uploads one EXE and lists its SHA256 in the release notes; matching installer source is available in the [v1.4.1 Git tag](https://github.com/ClassicWasTaken/HaloSteamFrameMod/tree/v1.4.1), with GitHub's automatic source downloads available for developers. Applicable third-party source/notices are included for rebuilding, including the LGPL Paramiko dependency. ADB binaries are not checked into Git; [bundle_usb_tools.py](../scripts/bundle_usb_tools.py) downloads the pinned official archive during the executable build and verifies its archive and selected-file checksums before packaging. [resources/usb/manifest.json](../resources/usb/manifest.json) records those hashes and provenance. The package contains installer code/resources and verified tools with their notices; no retail executable, ISO, maps, SSH password, or private key is included.
 
 To check an exact local engine checkout without connecting a headset or downloading data, run `python scripts/check-experimental-engine.py PATH_TO_ENGINE_CHECKOUT`. The checker accepts a clean or fully patched checkout at the pinned revision, checks patch applicability in a private temporary projection, and verifies renderer/co-op/protocol/control integration. It generates the ARM64 Ninja graph offline with external downloads disabled; this is a source/configuration check, not an ARM64 compilation or headset test.
 

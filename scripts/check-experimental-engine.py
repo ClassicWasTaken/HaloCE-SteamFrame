@@ -31,6 +31,8 @@ PATCH_FILES = frozenset((
     "tools/test_vr_projectile_reticle.py",
     "port/assets/menus/ce/main_menu.multiplayer_type_select.coop.xml", "tools/port_settings.py",
     "source/units/units.c", "source/units/units.h",
+    "source/hs/hs_library_external.c", "port/linux/arm64/host_vr.c",
+    "tools/test_vr_tutorial.py", "tools/test_vr_tracking.py", "tools/test_vr_tutorial_buttons.py",
 ))
 
 
@@ -271,17 +273,25 @@ def check_nominal_projectile_reticle(source):
             "Reticle depth must not lag behind its current collision hit.")
     require((source / "tools/test_vr_projectile_reticle.py").is_file(),
             "The production projectile-reticle regression is missing.")
-    pose = c_function(renderer, "vr_render_projectile_pose")
+    pose = c_function(renderer, "vr_render_pointing_pose")
     for guard in ("local_player_get_player_index(0)", "_object_type_biped", "parent_object_index != NONE",
                   "gunner_object_index != NONE", "_director_perspective_first_person", "director_inhibited_facing(0)",
                   "aiming_velocity_maximum != 0.0f", "aiming_acceleration_maximum != 0.0f"):
         require(guard in pose, "Missing guarded render-rate preview state: " + guard)
-    for integration in ("vr_render.view.hand_forward", "player_control_get_facing_direction(0",
+    for integration in ("view->hand_forward", "player_control_get_facing_direction(0",
                         "DEGREES_TO_RADIANS(85.0f)", "unit_clip_to_aiming_bounds(",
                         "render_interpolation_camera(0, observer_get_camera(0))"):
         require(integration in pose, "Missing current-frame preview input: " + integration)
     require("hand_position" not in pose and "camera_effects" not in pose,
             "Preview origin must not add hand translation or apply camera effects again.")
+    require("vr_render_pointing_pose(player_index, unit, &vr_render.view, vr_render.base_yaw, pose)"
+            in c_function(renderer, "vr_render_projectile_pose"),
+            "The equipped reticle must retain the current render pose and yaw.")
+    unarmed = c_function(renderer, "vr_render_unarmed_ray")
+    require("unit_get_weapon_count(unit_index) != 0" in unarmed
+            and "_object_dead_bit" in unarmed and "unit->unit.player_index != player_index" in unarmed
+            and "unit_inventory_get_weapon" in unarmed and "vr_render_pointing_pose(" in unarmed,
+            "An unarmed reticle must be limited to a living owned player without an equipped weapon.")
     ray = c_function(renderer, "vr_render_projectile_ray")
     require("vr_render_projectile_pose(player_index, unit, &pose) ? &pose : NULL" in ray,
             "The current-frame pose is not integrated into the primary reticle preview.")
@@ -290,6 +300,37 @@ def check_nominal_projectile_reticle(source):
             "Actual unit shots must not use presentation overrides.")
     require("unit_adjust_projectile_ray_internal(" in c_function(units, "unit_preview_projectile_ray"),
             "Unit preview must share the original camera/muzzle projection math.")
+
+
+def check_tutorial(source):
+    read = lambda path: (source / path).read_text(encoding="utf-8")
+    player = read("source/game/player_control.c")
+    require("halo_vr_turn_control(" in c_function(player, "handle_one_player_input")
+            and "halo_vr_tutorial_reset(" in c_function(player, "player_control_action_test_reset")
+            and "halo_vr_tutorial_turn(" in c_function(player, "player_control_action_test_note"),
+            "The script action tests must share actual VR turns and reset their head anchor.")
+    require("vr_controls" in c_function(player, "player_control_action_test_check_reset_input_blob")
+            and "_unit_control_use_equipment_bit, FALSE" in c_function(player, "player_control_action_test_check_reset_input_blob"),
+            "A consumed VR tutorial Back button must suppress its mapped melee action.")
+    units = c_function(read("source/units/units.c"), "unit_can_see_point")
+    require("vr_render_player_gaze(" in units and "local_player_index == 0" in units
+            and "_object_dead_bit" in units,
+            "Headset gaze must be limited to the living local primary player.")
+    hs = read("source/hs/hs_library_external.c")
+    panel = c_function(hs, "hs_vr_calibration_panel")
+    require("degrees != 5.f" in panel and "levels\\\\a10\\\\a10" in panel
+            and "_object_type_scenery" in panel,
+            "Hand-reticle acceptance must retain the original named a10 panel gate.")
+    require("hs_vr_calibration_panel(" in c_function(hs, "hs_unit_can_see_object")
+            and "vr_render_player_pointing_ray(" in c_function(hs, "hs_unit_can_see_object"),
+            "The unarmed presentation ray must be integrated into the panel check.")
+    locate = c_function(read("port/linux/arm64/host_vr.c"), "host_vr_locate")
+    require(0 <= locate.find("views->head.valid = 0") < locate.find("if (!vr.frame_begun)")
+            and "XR_VIEW_STATE_POSITION_VALID_BIT" in locate
+            and "XR_SPACE_LOCATION_POSITION_VALID_BIT" in locate,
+            "Fresh full-pose queries must invalidate stale data before any failure return.")
+    for script in ("tools/test_vr_tutorial.py", "tools/test_vr_tracking.py", "tools/test_vr_tutorial_buttons.py"):
+        require((source / script).is_file(), "Missing tutorial production C regression: " + script)
 
 
 GRAPH_SMOKE = r'''
@@ -374,6 +415,7 @@ def check_source(source: Path):
         check_controls(projection)
         check_stereo_glow_and_online_menu(projection)
         check_nominal_projectile_reticle(projection)
+        check_tutorial(projection)
         result = subprocess.run([sys.executable, "-I", "-c", GRAPH_SMOKE], cwd=projection,
                                 capture_output=True, text=True, timeout=30)
         require(result.returncode == 0, "Offline ARM64 configuration generation failed: " + result.stderr[-2000:])
@@ -384,6 +426,8 @@ def check_source(source: Path):
             "nominalProjectileReticleIntegration": True,
             "renderRateProjectilePreviewIntegration": True,
             "networkCampaignOnlyIntegration": True,
+            "vrTutorialIntegration": True,
+            "freshFullPoseTrackingIntegration": True,
             "offlineArm64NinjaGraph": True, "arm64LinkedBuild": False, "hardwareValidated": False}
 
 

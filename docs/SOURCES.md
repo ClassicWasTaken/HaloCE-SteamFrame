@@ -2,13 +2,13 @@
 
 This community VR mod installer builds the experimental native ARM64 Linux VR port of **Halo: Combat Evolved** from the revision below. It provides a guided installation; the decompilation, renderer, OpenXR implementation and networking are the work of the credited upstream contributors. No retail game executable, disc image, maps, product keys, or soundtrack is bundled or downloaded; users provide authorized original Xbox game data.
 
-Sources were checked on 2026-10-06 against a local checkout at the exact engine revision. Release 1.4.0 uses the headset-tested 1.4.0a5 engine patch: the tester confirmed reticle motion and LAN/online campaign co-op work. The earlier 1.4.0a4 test confirmed shot/reticle alignment but identified visible stepping. The current build adds render-rate reticle presentation and explicit network campaign routes. The report contains no measured FPS, frame timings, or peer-distance details; source and production C checks provide additional software coverage.
+Sources were checked on 2026-10-06 against a local checkout at the exact engine revision. Release 1.4.1 adds tutorial fixes to the 1.4.0 baseline. The earlier headset report confirmed the baseline's reticle motion and LAN/online campaign co-op; it does not verify the new tutorial fixes. That report contains no measured FPS, frame timings, or peer-distance details. Source and production C checks provide additional software coverage.
 
 ## Installer contributions
 
 [dime-online](https://github.com/dime-online) contributed the fixes for [interrupted uninstalls (#7)](https://github.com/ClassicWasTaken/HaloSteamFrameMod/pull/7), [renamed native Steam shortcuts (#8)](https://github.com/ClassicWasTaken/HaloSteamFrameMod/pull/8), and [SSH cancellation/error handling (#9)](https://github.com/ClassicWasTaken/HaloSteamFrameMod/pull/9), addressing issues [#1](https://github.com/ClassicWasTaken/HaloSteamFrameMod/issues/1), [#2](https://github.com/ClassicWasTaken/HaloSteamFrameMod/issues/2), and [#3](https://github.com/ClassicWasTaken/HaloSteamFrameMod/issues/3). Release 1.3.5 builds on those contributions with operation-record and directory-identity checks before resuming file removal, explicit pending-removal and cleanup results, refusal of malformed native shortcut IDs before writes, and one bounded cancellation recovery connection using the already-approved host key.
 
-Those contributions remain in 1.4.0. This release separately changes the engine pin and movement patch; automated regression coverage does not replace physical Frame verification of interruption, cancellation, and full uninstall.
+Those contributions remain in 1.4.1. The 1.4.0 release changed the engine pin and movement patch; 1.4.1 retains that pin. Automated regression coverage does not replace physical Frame verification of the tutorial, interruption, cancellation, and full uninstall.
 
 ## Native game and VR
 
@@ -22,9 +22,15 @@ Those contributions remain in 1.4.0. This release separately changes the engine 
 | [bnunu/halo-1](https://github.com/bnunu/halo-1) and [punpckhdq/halo](https://github.com/punpckhdq/halo) | Decompilation lineage identified by the upstream README. |
 | [Upstream XDK declarations](https://github.com/startupfoundry/halo-ce-universal/blob/2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4/port/include/xdk/README.md) | The port supplies its own declarations; installing the proprietary Xbox SDK is unnecessary. |
 
-The installer applies [its documented controls, reticle and campaign-menu patch](../resources/frame-controls.patch) to that pinned revision. Its SHA256 is `639f2694cf9574eefca6204e74193b95a72b642128884189ad398c86f7c1b30e`. [Controls and defaults](CONTROLS.md) distinguish these changes from upstream behavior. Performance depends on game scene, headset software and settings; native ARM64 does not imply unlimited performance.
+The installer applies [its documented controls, reticle, tutorial and campaign-menu patch](../resources/frame-controls.patch) to that pinned revision. The 1.4.1 patch's SHA256 is `039c79ee898868b1b10f6194f47e3160df21920a4f27a7b790523ac0b8e98b16`. The 1.4.0 baseline patch's SHA256 was `639f2694cf9574eefca6204e74193b95a72b642128884189ad398c86f7c1b30e`. [Controls and defaults](CONTROLS.md) distinguish these changes from upstream behavior. Performance depends on game scene, headset software and settings; native ARM64 does not imply unlimited performance.
 
-### 1.4.0 engine changes
+### 1.4.1 tutorial changes
+
+The local patch adds a controller-directed unarmed/default reticle without replacing the equipped weapon's nominal firing preview. It uses local headset gaze for look-at-person checks. Only the five named first-mission calibration panels also accept the unarmed hand-reticle ray within their original five-degree cone. Cryopod look calibration resets across tracking/test transitions and accepts headset movement and legitimate snap or smooth view turns, while preserving recenter, menu, cinematic, AI and remote-player guards. Install and Repair apply standing mode and snap turning while keeping other preferences. These changes require their own headset validation; the 1.4.0 report does not cover them.
+
+Tutorial Back consumes the gameplay actions mapped to B until the physical button is released, while keeping the original inversion-setting and profile-save logic. Production C checks reproduce the prior melee leak; the reported headset crash has not been reproduced locally. OpenXR pose queries clear old validity before querying and require both position and orientation validity, so failed or partial tracking cannot complete a gaze/hand target with an old pose. Focused tests cover those failure and recovery paths using the checked-in Khronos headers.
+
+### Retained 1.4.0 engine changes
 
 - [Two-pass texture-stage resolution and binding](https://github.com/startupfoundry/halo-ce-universal/blob/2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4/port/linux/src/d3d8_gl.c#L2669-L2743) resolves/uploads all textures before binding each sampler stage, avoiding an upload overwriting a previous stage's binding.
 - [Vertex clip-position handling](https://github.com/startupfoundry/halo-ce-universal/blob/2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4/port/linux/src/nv2a_vsh.c#L309-L402) retains the pre-reciprocal clip position and moves zero/NaN clip `w` behind the camera. These changes are upstream renderer candidates; they do not diagnose the user's white flashes or prove improved Frame performance.

@@ -949,12 +949,13 @@ def merge_config(original, migrate=False):
         configured_save_path(settings)
     else:
         validate_save_paths(settings)
-    required = {"vr": {"enabled": True, "aim": "controller", "movement": "head", "melee_gesture": False},
+    required = {"vr": {"enabled": True, "aim": "controller", "movement": "head", "melee_gesture": False,
+                       "turn": "snap", "height": "standing"},
                 "update": {"auto": False}, "paths": {"data": str(GAME), "saves": str(save_root())}}
     if "coop_enemies_mode" not in settings.get("network", {}):
         required["network"] = {"coop_enemies_mode": "none"}
-    defaults = {"refresh_rate": 72.0, "resolution_scale": 1.0, "sun_glow_strength": 0.5, "turn": "smooth",
-                "smooth_turn_speed": 90.0, "two_handed": True, "height": "seated", "depth": False}
+    defaults = {"refresh_rate": 72.0, "resolution_scale": 1.0, "sun_glow_strength": 0.5,
+                "smooth_turn_speed": 90.0, "two_handed": True, "depth": False}
     vr = settings.get("vr", {})
     for key, default in defaults.items():
         if key not in vr:
@@ -1099,8 +1100,8 @@ def finalize(value, repair=False, adopt=False):
     config = ('[paths]\ndata = ' + json.dumps(str(GAME)) + '\nsaves = ' + json.dumps(str(save_root())) + '\n\n'
               '[update]\nauto = false\n\n[network]\nonline = true\ncoop_enemies_mode = "none"\n\n'
               '[vr]\nenabled = true\nrefresh_rate = 72.0\nresolution_scale = 1.0\nsun_glow_strength = 0.5\n'
-              'aim = "controller"\nmovement = "head"\nturn = "smooth"\nsmooth_turn_speed = 90.0\n'
-              'melee_gesture = false\ntwo_handed = true\nheight = "seated"\ndepth = false\n')
+              'aim = "controller"\nmovement = "head"\nturn = "snap"\nsmooth_turn_speed = 90.0\n'
+              'melee_gesture = false\ntwo_handed = true\nheight = "standing"\ndepth = false\n')
     if existing:
         original = ordinary(GAME / "config.toml").read_text() if (GAME / "config.toml").exists() else ""
         config = merge_config(original, migrate=existing["sourceCommit"] != SOURCE_COMMIT)
@@ -1133,7 +1134,7 @@ def finalize(value, repair=False, adopt=False):
                 "files": {name: digest(stage / name) for name in ("halo", "libSDL3.so.0", "brokers.txt", "frame-controls.patch")},
                 "maps": {"files": 24, "bytes": manifest["totalBytes"]},
                 "controls": "Head-directed walking, Xbox buttons, motion aim, LB grenade change, RB flashlight",
-                "installerVersion": "1.4.0", "networkProtocol": 17, "saveRoot": str(save_root()),
+                "installerVersion": "1.4.1", "networkProtocol": 17, "saveRoot": str(save_root()),
                 "previousSavePaths": existing.get("previousSavePaths", []) if existing else [],
                 "buildLog": str(directory / "native-build.log")}
     (stage / MARKER).write_text(json.dumps(metadata, indent=2) + "\n")

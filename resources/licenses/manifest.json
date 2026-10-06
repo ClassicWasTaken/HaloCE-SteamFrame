@@ -106,13 +106,13 @@
     },
     {
       "name": "halo-steam-frame-installer",
-      "version": "1.4.0",
+      "version": "1.4.1",
       "license_expression": "MIT",
       "declared_license": null,
       "project_urls": [],
       "notices": [
         {
-          "path": "packages/halo-steam-frame-installer/halo_steam_frame_installer-1.4.0.dist-info/licenses/LICENSE",
+          "path": "packages/halo-steam-frame-installer/halo_steam_frame_installer-1.4.1.dist-info/licenses/LICENSE",
           "sha256": "04a51df2edd89917e3099e2f6f171c36891f1d6ac234015867b57a1d10f928d5",
           "bytes": 1343
         }

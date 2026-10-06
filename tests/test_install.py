@@ -550,6 +550,14 @@ def test_remote_detects_changed_original_xbox_header(remote, tmp_path):
         remote.verify_maps(directory, manifest)
 
 
+def test_repair_applies_standing_snap_without_resetting_other_vr_preferences(remote):
+    old = '[vr]\nheight="seated"\nturn="smooth"\nsnap_turn_angle=45.0\nrefresh_rate=90.0\nplayer_height=1.8\n'
+    updated = remote.tomllib.loads(remote.merge_config(old))
+    assert updated['vr']['height'] == 'standing' and updated['vr']['turn'] == 'snap'
+    assert updated['vr']['snap_turn_angle'] == 45.0
+    assert updated['vr']['refresh_rate'] == 90.0 and updated['vr']['player_height'] == 1.8
+
+
 def test_config_repair_preserves_isolated_save_location_and_user_preferences(remote):
     old = '[paths]\nsaves = ' + json.dumps(str(remote.save_root())) + '\n\n[audio]\nvolume = 0.4\n\n[vr]\naim="head"\nturn="snap"\nrefresh_rate=90.0\n\n[[plugins]]\nname="custom"\n'
     result = remote.tomllib.loads(remote.merge_config(old))
@@ -579,6 +587,7 @@ def test_new_config_missing_paths_gets_versioned_defaults(remote):
     assert updated['audio']['volume'] == 0.4
     assert updated['vr']['aim'] == 'controller' and updated['vr']['movement'] == 'head'
     assert updated['vr']['sun_glow_strength'] == 0.5
+    assert updated['vr']['turn'] == 'snap' and updated['vr']['height'] == 'standing'
     assert updated['network']['coop_enemies_mode'] == 'none'
 
 
@@ -829,7 +838,7 @@ def test_verified_stable_upgrade_keeps_old_checkpoints_and_backs_up_config(remot
     assert settings["audio"]["volume"] == 0.3 and settings["vr"]["turn"] == "snap"
     assert remote.save_root().is_dir() and not any(remote.save_root().iterdir())
     marker = remote.read_marker(remote.GAME / remote.MARKER)
-    assert marker["installerVersion"] == "1.4.0" and marker["networkProtocol"] == 17
+    assert marker["installerVersion"] == "1.4.1" and marker["networkProtocol"] == 17
     assert marker["saveRoot"] == str(remote.save_root()) and "experimental" not in marker
     assert not remote.existing_install()["needsUpgrade"]
     # A later Repair preserves both generations and the former custom location.
