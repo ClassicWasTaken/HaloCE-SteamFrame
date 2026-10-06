@@ -4,4 +4,5 @@
 *.py text eol=lf
 *.yml text eol=lf
 resources/licenses/** -text -whitespace
+resources/usb/NOTICE.txt -text -whitespace
 *.tar.gz binary
