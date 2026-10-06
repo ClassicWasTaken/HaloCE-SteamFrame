@@ -4,7 +4,7 @@ Download only **[DOWNLOAD THIS FILE — Halo-Steam-Frame-Setup-1.3.2.exe](https:
 
 This small visual patch replaces the Windows setup executable and window icon with the classic Halo PC Master Chief helmet-and-shoulders icon. It uses the exact original ICO artwork matching the requested reference, including all 12 native image entries: 16, 24, 32, and 48 pixels at 4, 8, and 32-bit color. The clean asset has no desktop background, shortcut arrow, or filename label.
 
-The GitHub README now shows just the Halo CE banner and title logo as artwork, with the prominent single-EXE download link and setup guide retained.
+The GitHub README is shorter, with just the Halo CE banner and title logo as artwork, a prominent single-EXE download link, and the essential setup steps. Detailed instructions and troubleshooting are in the [setup guide](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/blob/v1.3.2/docs/SETUP.md).
 
 The source ICO was downloaded from [HaloNet](https://halonet.net/favicon.ico) and verified byte-for-byte against the locally installed retail Halo PC executable's icon group 102. Only icon artwork is included, with [exact hashes and attribution](https://github.com/ClassicWasTaken/HaloCE-SteamFrame/blob/v1.3.2/resources/ui/README.md). Halo artwork rights remain separate from the installer's MIT code license.
 
