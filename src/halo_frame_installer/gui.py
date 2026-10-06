@@ -47,6 +47,10 @@ CONTROLS = (
     "Left stick  Move by head direction / click to crouch     Right stick  Turn / click to zoom\n"
     "Menu  Pause     View  Scoreboard     Both grips  Recenter"
 )
+# A device can stream build details for the whole 7200-second window; the
+# activity log and the pending-event backlog must stay bounded.
+LOG_LINE_LIMIT = 5000
+EVENT_QUEUE_DETAIL_LIMIT = 5000
 
 
 class App(tk.Tk):
@@ -1188,7 +1192,7 @@ class App(tk.Tk):
                 return
             if stage != "detail":
                 last_progress[:] = [stage, now]
-            self.events.put(("progress", stage, str(message), percent))
+            self._post_event(("progress", stage, str(message), percent))
         def worker():
             from .install import run
             try:
@@ -1248,7 +1252,7 @@ class App(tk.Tk):
             from .install import Installer
             try:
                 result = Installer().add_to_steam(settings,
-                    lambda s,m,p=None:self.events.put(("progress",s,str(m),p)), self.cancel)
+                    lambda s,m,p=None:self._post_event(("progress",s,str(m),p)), self.cancel)
                 self.events.put(("complete",result))
             except Exception as exc:
                 self.events.put(("error",str(exc), isinstance(exc, CancelledError) and not exc.requires_attention))
@@ -1290,7 +1294,7 @@ class App(tk.Tk):
             from .install import Installer
             try:
                 result = Installer().uninstall(settings,
-                    lambda s,m,p=None:self.events.put(("progress",s,str(m),p)),
+                    lambda s,m,p=None:self._post_event(("progress",s,str(m),p)),
                     self.cancel, keep_saves=keep_saves)
                 self.events.put(("uninstall_complete", result))
             except Exception as exc:
@@ -1301,11 +1305,23 @@ class App(tk.Tk):
                 self.events.put(("idle",))
         threading.Thread(target=worker, daemon=True).start()
 
+    def _post_event(self, event):
+        # Detail lines are high-volume and disposable; when the UI pump falls
+        # behind, drop them so the backlog cannot outgrow the drain loop.
+        if event[:2] == ("progress", "detail") and self.events.qsize() > EVENT_QUEUE_DETAIL_LIMIT:
+            return
+        self.events.put(event)
+
     def _append(self, text):
         text = self._redact(text)
         self.log_lines.append(text)
+        del self.log_lines[:-LOG_LINE_LIMIT]
         self.log.configure(state="normal")
         self.log.insert("end", text + "\n")
+        # Tk always keeps one trailing display line past the content.
+        lines = int(self.log.index("end-1c").split(".")[0]) - 1
+        if lines > LOG_LINE_LIMIT:
+            self.log.delete("1.0", f"{lines - LOG_LINE_LIMIT + 1}.0")
         self.log.see("end")
         self.log.configure(state="disabled")
 
