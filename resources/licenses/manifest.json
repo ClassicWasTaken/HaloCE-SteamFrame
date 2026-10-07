@@ -106,13 +106,13 @@
     },
     {
       "name": "halo-steam-frame-installer",
-      "version": "1.4.1",
+      "version": "1.4.3",
       "license_expression": "MIT",
       "declared_license": null,
       "project_urls": [],
       "notices": [
         {
-          "path": "packages/halo-steam-frame-installer/halo_steam_frame_installer-1.4.1.dist-info/licenses/LICENSE",
+          "path": "packages/halo-steam-frame-installer/halo_steam_frame_installer-1.4.3.dist-info/licenses/LICENSE",
           "sha256": "04a51df2edd89917e3099e2f6f171c36891f1d6ac234015867b57a1d10f928d5",
           "bytes": 1343
         }
@@ -502,7 +502,7 @@
       "sha256": "6a25f07b380cc9c9a88d2b920ad37167ac4667f8d9886ccebd8f90f654b5d69f",
       "bytes": 1630743,
       "source": "https://files.pythonhosted.org/packages/1f/e7/81fdcbc7f190cdb058cffc9431587eb289833bdd633e2002455ca9bb13d4/paramiko-4.0.0.tar.gz",
-      "metadata_source": "https://pypi.org/pypi/paramiko/4.0.0/json"
+      "checksum_source": "repository-pinned scripts/gather_notices.py"
     },
     {
       "path": "runtime/openssl-3.5.8-LICENSE.txt",

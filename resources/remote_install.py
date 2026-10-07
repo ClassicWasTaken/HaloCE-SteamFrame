@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import contextlib
 import ctypes
 import hashlib
 import importlib.util
@@ -12,6 +13,7 @@ import os
 import pathlib
 import platform
 import pwd
+import queue
 import re
 import signal
 import shutil
@@ -19,6 +21,7 @@ import stat
 import struct
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 
@@ -1079,10 +1082,120 @@ class BuildLogMonitor:
             tail.finish()
 
 
+SLEEP_INHIBITOR_READY = b"HFI_SLEEP_INHIBITOR_READY\n"
+SLEEP_INHIBITOR_START_SECONDS = 5
+
+
+def sleep_inhibitor_ready(process, check_cancelled):
+    """Wait for our child, which systemd starts only after acquiring its lock."""
+    response = queue.Queue(maxsize=1)
+    read_done = threading.Event()
+    close_stdout = threading.Event()
+    process._hfi_sleep_read_done = read_done
+    process._hfi_sleep_close_stdout = close_stdout
+    def read_ready():
+        try:
+            encoded = process.stdout.readline(len(SLEEP_INHIBITOR_READY) + 1)
+        except (OSError, ValueError):
+            encoded = None
+        finally:
+            read_done.set()
+            if close_stdout.is_set():
+                try:
+                    process.stdout.close()
+                except (OSError, ValueError):
+                    pass
+        response.put(encoded)
+    # This reader never writes installer activity. Releasing/terminating the
+    # owned process closes its pipe, including on a bounded startup timeout.
+    threading.Thread(target=read_ready, daemon=True).start()
+    deadline = time.monotonic() + SLEEP_INHIBITOR_START_SECONDS
+    while True:
+        check_cancelled()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            encoded = response.get(timeout=min(0.1, remaining))
+        except queue.Empty:
+            if process.poll() is not None:
+                return False
+            continue
+        return encoded == SLEEP_INHIBITOR_READY and process.poll() is None
+
+
+def release_sleep_inhibitor(process):
+    """EOF releases the holder normally; only its owned group may be forced."""
+    try:
+        try:
+            process.stdin.close()
+        except (OSError, ValueError):
+            pass
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            stop_build_process(process)
+    finally:
+        close_stdout = getattr(process, "_hfi_sleep_close_stdout", None)
+        read_done = getattr(process, "_hfi_sleep_read_done", None)
+        if close_stdout is None:
+            process.stdout.close()
+        else:
+            # Closing a pipe while a thread reads it can itself block. On a
+            # failed group cleanup, let the daemon reader close its own pipe
+            # when the service exits; it cannot delay this helper's exit.
+            close_stdout.set()
+            if read_done.is_set():
+                process.stdout.close()
+
+
+@contextlib.contextmanager
+def build_sleep_inhibitor(check_cancelled):
+    """Temporarily inhibit host idle/sleep; never change power configuration."""
+    process = None
+    acquired = False
+    try:
+        executable = shutil.which("systemd-inhibit")
+        if executable:
+            try:
+                # A private stdin pipe ties the lock's lifetime to this helper.
+                # If the helper dies, EOF makes the holder exit and releases the
+                # lock; the build container never inherits or owns this lock.
+                holder = ("import sys\nsys.stdout.buffer.write(" + repr(SLEEP_INHIBITOR_READY) +
+                          ")\nsys.stdout.flush()\nwhile sys.stdin.buffer.read(1): pass\n")
+                process = subprocess.Popen(
+                    [executable, "--what=idle:sleep", "--mode=block", "--who=Halo Frame Installer",
+                     "--why=Building the native Halo VR game", "--no-ask-password",
+                     sys.executable, "-u", "-c", holder],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    start_new_session=True, bufsize=0)
+                acquired = sleep_inhibitor_ready(process, check_cancelled)
+            except (OSError, subprocess.SubprocessError):
+                acquired = False
+        if not acquired and process is not None:
+            release_sleep_inhibitor(process)
+            process = None
+        progress("build", "Automatic sleep is temporarily blocked during the native build." if acquired else
+                 "Automatic sleep prevention is unavailable. Keep the Frame awake until the native build finishes.")
+        yield process if acquired else None
+    finally:
+        if process is not None:
+            active_error = sys.exc_info()[1]
+            try:
+                release_sleep_inhibitor(process)
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+                message = "Releasing the temporary sleep lock could not be confirmed: " + str(error)[:500]
+                if active_error is not None:
+                    active_error.add_note(message)
+                else:
+                    raise RuntimeError(message) from error
+
+
 def build(value, repair=False, adopt=False):
     directory = run_dir(value)
     metadata = read_marker(directory / MARKER)
     check_storage_record(metadata, active_run=True)
+    no_active_build()
     existing = existing_install(repair, adopt)
     if existing and not repair:
         if existing.get("needsUpgrade"):
@@ -1121,13 +1234,17 @@ def build(value, repair=False, adopt=False):
     progress("build", "Starting the isolated ARM64 build container; downloading its image if needed...")
     log = directory / "native-build.log"
     args = build_container_args(value, directory)
-    with log.open("wb") as output:
+    with build_sleep_inhibitor(check_cancelled) as sleep_lock, log.open("wb") as output:
         check_cancelled()
+        no_active_build()
         process = subprocess.Popen(args, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
         monitor = BuildLogMonitor(directory)
         try:
             while process.poll() is None:
                 check_cancelled()
+                if sleep_lock is not None and sleep_lock.poll() is not None:
+                    progress(monitor.stage, "The temporary sleep lock ended unexpectedly. Keep the Frame awake until the native build finishes.", monitor.percent)
+                    sleep_lock = None
                 monitor.poll()
                 monitor.heartbeat()
                 time.sleep(0.25)
@@ -1201,8 +1318,16 @@ def stop_owned_container(value):
     """Stop this installer's labeled run without depending on its filesystem."""
     run_id(value)
     container = "halo-frame-installer-" + value
+    exists = subprocess.run(["podman", "container", "exists", container],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+    if exists.returncode == 1:
+        return {"cancelled": True}
+    if exists.returncode != 0:
+        raise RuntimeError("The build container's presence could not be verified; stopping was not confirmed.")
     check = subprocess.run(["podman", "container", "inspect", container],
                            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15)
+    if check.returncode != 0:
+        raise RuntimeError("The build container could not be inspected; stopping was not confirmed.")
     if check.returncode == 0:
         if len(check.stdout) > 64 * 1024:
             raise ValueError("The container ownership response exceeds supported bounds.")
@@ -1243,8 +1368,8 @@ def merge_config(original, migrate=False):
         configured_save_path(settings)
     else:
         validate_save_paths(settings)
-    required = {"vr": {"enabled": True, "aim": "controller", "movement": "head", "melee_gesture": False,
-                       "turn": "snap", "height": "standing"},
+    required = {"vr": {"enabled": True, "aim": "controller", "movement": "head", "melee_gesture": True,
+                       "turn": "snap", "height": "standing", "scope": False, "zoom_stabilization": False},
                 "update": {"auto": False}, "paths": {"data": str(GAME), "saves": str(save_root())}}
     if "coop_enemies_mode" not in settings.get("network", {}):
         required["network"] = {"coop_enemies_mode": "none"}
@@ -1437,7 +1562,8 @@ def finalize(value, repair=False, adopt=False):
               '[update]\nauto = false\n\n[network]\nonline = true\ncoop_enemies_mode = "none"\n\n'
               '[vr]\nenabled = true\nrefresh_rate = 72.0\nresolution_scale = 1.0\nsun_glow_strength = 0.5\n'
               'aim = "controller"\nmovement = "head"\nturn = "snap"\nsmooth_turn_speed = 90.0\n'
-              'melee_gesture = false\ntwo_handed = true\nheight = "standing"\ndepth = false\n')
+              'melee_gesture = true\ntwo_handed = true\nheight = "standing"\ndepth = false\n'
+              'scope = false\nzoom_stabilization = false\n')
     if existing:
         original = ordinary(GAME / "config.toml").read_text() if (GAME / "config.toml").exists() else ""
         config = merge_config(original, migrate=existing["sourceCommit"] != SOURCE_COMMIT)
@@ -1470,7 +1596,7 @@ def finalize(value, repair=False, adopt=False):
                 "files": {name: digest(stage / name) for name in ("halo", "libSDL3.so.0", "brokers.txt", "frame-controls.patch")},
                 "maps": {"files": 24, "bytes": manifest["totalBytes"]},
                 "controls": "Head-directed walking, Xbox buttons, motion aim, LB grenade change, RB flashlight",
-                "installerVersion": "1.4.2", "networkProtocol": 17, "saveRoot": str(save_root()),
+                "installerVersion": "1.4.3", "networkProtocol": 17, "saveRoot": str(save_root()),
                 "previousSavePaths": existing.get("previousSavePaths", []) if existing else [],
                 "buildLog": str(directory / "native-build.log")}
     (stage / MARKER).write_text(json.dumps(metadata, indent=2) + "\n")
@@ -1542,7 +1668,7 @@ def no_active_build():
     if not isinstance(containers, list):
         raise ValueError("Podman returned unsupported build status. The game was kept.")
     if containers:
-        raise ValueError("An installer build is still running on the Frame. Finish or cancel that build before uninstalling Halo.")
+        raise ValueError("An installer build is still running on the Frame. Wake the Frame, then let that build finish or stop it using Cancel before trying Install, Repair or Uninstall again. No second build was started.")
 
 
 def uninstall_identity():

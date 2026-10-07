@@ -7,10 +7,12 @@ compiling a game, using retail data, or connecting a headset.
 from __future__ import annotations
 
 import argparse
+import ast
 import io
 import json
 from pathlib import Path, PurePosixPath
 import re
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -35,6 +37,29 @@ PATCH_FILES = frozenset((
     "tools/test_vr_tutorial.py", "tools/test_vr_tracking.py", "tools/test_vr_tutorial_buttons.py",
     "source/objects/object_lights.c", "tools/test_vr_flashlight.py", "tools/test_vr_menu.py",
     "tools/android_build.py", "tools/test_build_sources.py",
+    "port/android/guest/runtime/guest_host.h", "port/android/host/host_gl.c",
+    "port/linux/arm64/host_imports.list", "port/linux/src/vr_vehicle.h",
+    "source/interface/ui_widget.c", "source/interface/motion_sensor.c",
+    "source/rasterizer/rasterizer_transparent_geometry.c",
+    "port/linux/game/menu_tags.c", "tools/ce_menus.py",
+    "port/assets/menus/ce/bitmaps.xml", "port/assets/menus/menus.json",
+    "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.vr_display.xml",
+    "port/assets/menus/ce/port/pause/pausebox_left__2.png",
+    "port/assets/menus/ce/port/pause/pausebox_center__2.png",
+    "port/assets/menus/ce/port/pause/pausebox_right__2.png",
+    "port/assets/menus/port_svg/pause/pausebox_left__2.svg",
+    "port/assets/menus/port_svg/pause/pausebox_center__2.svg",
+    "port/assets/menus/port_svg/pause/pausebox_right__2.svg",
+    "tools/test_vr_pause_menu.py", "tools/test_vr_pointer_radar.py",
+    "tools/test_persistent_stream_buffers.py", "tools/test_vr_vehicle.py",
+    "tools/test_vr_cinematic_hands.py",
+    "port/linux/src/vr_host.h", "source/render/render.c",
+    "tools/test_vr_zoom_aim.py", "tools/test_vr_stock_zoom_hud.py",
+    "port/linux/src/gl.h", "tools/test_vr_renderer_link.py",
+    "port/linux/src/vr_driving.h", "tools/test_vr_driving.py", "tools/test_vr_driving_game.py",
+    "port/linux/game/vr_hands.c", "port/linux/game/vr_hands.h",
+    "tools/test_vr_framebuffer.py", "tools/test_vr_vehicle_pose.py",
+    "source/interface/first_person_weapons.c", "source/interface/hud_weapon.c",
 ))
 
 
@@ -396,6 +421,151 @@ def check_tutorial(source):
         require((source / script).is_file(), "Missing tutorial production C regression: " + script)
 
 
+def check_private_menu_and_vehicle_integration(source):
+    read = lambda path: (source / path).read_text(encoding="utf-8")
+    config = read("port/linux/src/port_config.c")
+    for key, default in (("vr.menu_pointer", "true"), ("vr.radar_head_heading", "true"),
+                         ("vr.vehicle_seat_calibration", "true"), ("vr.vehicle_clear_windshield", "true"),
+                         ("display.persistent_stream_buffers", "false")):
+        require(re.search(re.escape('"' + key + '"') + r',\s*_config_boolean,\s*"' + default + r'"', config),
+                "Missing reviewed private option/default: " + key)
+    tags = read("port/linux/game/menu_tags.c")
+    loaded = c_function(tags, "menu_tags_loaded")
+    require("halo_vr_running() && tag_loaded(UI_WIDGET_DEFINITION_TAG, SOLO_PAUSE_SCREEN) != NONE" in loaded
+            and "build.multiplayer_map = game_map && multiplayer_map" in loaded,
+            "Pause VR Setup must use the exact campaign root and distinguish network-map pause flags.")
+    require("if (build.multiplayer_map)" in c_function(tags, "widget_build")
+            and "pause_vr_widget()" in c_function(tags, "pause_patch")
+            and '"VR SETUP", NONE' in c_function(tags, "pause_list_patch"),
+            "Pause VR Setup must reuse existing widgets without a profile-edit or network function.")
+    ui = read("source/interface/ui_widget.c")
+    require("!network_coop_active()" in c_function(ui, "widget_instance_initialize")
+            and "vr_render_menu_pointer_draw()" in c_function(ui, "render_ui_widgets"),
+            "Pause settings must retain co-op clock policy and render the native UI pointer.")
+    vr = read("port/linux/src/vr.c")
+    pointer = c_function(vr, "halo_vr_menu_pointer")
+    require("menu_pointer_intersection(" in pointer and "menu_pointer_button(" in pointer
+            and "!vr.pending_layers.hud_head_locked" in pointer,
+            "The tracked pointer must intersect the fixed rendered menu panel.")
+    backend = read("port/linux/src/d3d8_gl.c")
+    desktop_pointer = c_function(backend[backend.rfind("int halo_ui_pointer_update"):], "halo_ui_pointer_update")
+    require("halo_vr_menu_pointer(menus_active, pointer)" in desktop_pointer,
+            "VR pointing must feed the existing native widget input path.")
+    renderer = read("port/linux/game/vr_render.c")
+    require("vr_render_player_gaze(" in c_function(renderer, "vr_render_motion_sensor_yaw"),
+            "Optional head-heading radar must use the current rendered HMD gaze.")
+    radar = c_function(read("source/interface/motion_sensor.c"), "render_motion_sensor")
+    require("vr_render_motion_sensor_yaw(" in radar and "draw_sensor = *sensor" in radar
+            and "render_sensor = &draw_sensor" in radar,
+            "Radar head heading must alter a draw copy, preserving tick/history data.")
+    display = ET.parse(source / "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.vr_display.xml")
+    require(any(node.get("setting") == "display.persistent_stream_buffers"
+                and node.get("values") == "true|false" for node in display.getroot()),
+            "The existing VR Display screen must expose the optional buffer-streaming setting.")
+    require("halo_vr_vehicle_reference(" in c_function(renderer, "vr_render_vehicle_reference")
+            and "vr_render_vehicle_reference(" in c_function(renderer, "vr_render_camera")
+            and "vr_render_vehicle_reference(" in c_function(read("source/game/player_control.c"), "handle_one_player_input"),
+            "Seated reference calibration must be integrated into both current view and player input.")
+    require("halo_vr_vehicle_update(" in c_function(vr, "halo_vr_vehicle_reference")
+            and "vehicle_capture()" in c_function(vr, "recentre")
+            and (source / "port/linux/src/vr_vehicle.h").is_file(),
+            "Vehicle entry/recenter must use its separate production tracking reference.")
+    require("menu_level_orientation(" in c_function(vr, "menu_place"),
+            "Menu placement must remove head roll while preserving the gaze direction.")
+    seat_camera = c_function(renderer, "vr_render_vehicle_camera_position")
+    require("object_get_marker_by_name(" in seat_camera and "isfinite(" in seat_camera
+            and "vr_render_vehicle_camera_position(" in c_function(renderer, "vr_render_player_gaze")
+            and "vr_render_vehicle_camera_position(" in c_function(renderer, "vr_render_camera"),
+            "The local vehicle view and gaze must share a checked seat anchor.")
+    presentation = c_function(renderer, "vr_render_controller_presentation")
+    require("halo_vr_presentation_tracking_valid()" in presentation
+            and "_director_perspective_first_person" in presentation
+            and "_object_dead_bit" in presentation
+            and "vr_render_controller_presentation()" in c_function(renderer, "vr_render_weapon_camera"),
+            "Controller presentation must remain available in a visible first-person arrival rig.")
+    tracking = c_function(vr, "halo_vr_presentation_tracking_valid")
+    require("vr.views.focused" in tracking and "vr.views.head.valid" in tracking
+            and "isfinite(" in tracking and "vr.aim_synced" not in tracking,
+            "Presentation must require current finite tracking without enabling gameplay aim.")
+    glass = c_function(renderer, "vr_render_hides_vehicle_glass")
+    require('"vehicles\\\\warthog\\\\warthog"' in glass and "seated_unit()" in glass
+            and "object_index != unit->object.parent_object_index" in glass,
+            "The windshield override must be limited to the occupied stock Warthog.")
+    transparent = c_function(read("source/rasterizer/rasterizer_transparent_geometry.c"),
+                             "rasterizer_transparent_geometry_draw")
+    require("_shader_type_transparent_glass" in transparent and "vr_render_hides_vehicle_glass(" in transparent
+            and re.search(r"transparent_geometry_group_index\+\+;\s*continue;", transparent),
+            "The local glass override must advance the existing draw queue without changing retail tags.")
+    for script in ("tools/test_vr_pause_menu.py", "tools/test_vr_pointer_radar.py", "tools/test_vr_vehicle.py",
+                   "tools/test_vr_cinematic_hands.py"):
+        require((source / script).is_file(), "Missing private production C regression: " + script)
+
+
+def check_menu_controller_visibility(source):
+    """Verify the shipped menu/tracking fix reaches the actual draw paths."""
+    read = lambda path: (source / path).read_text(encoding="utf-8")
+    vr = read("port/linux/src/vr.c")
+    view = c_function(vr, "halo_vr_view")
+    require("int controller_aim_requested;" in read("port/linux/src/vr.h")
+            and "view->controller_aim_requested = settings.controller_aim" in view,
+            "Controller aim mode must remain distinct from current pose validity.")
+    require(view.find("view->controller_aim_requested = settings.controller_aim") < view.find("host_vr_locate("),
+            "Late tracking failure must retain the selected controller aim mode.")
+    renderer = read("port/linux/game/vr_render.c")
+    visible = c_function(renderer, "vr_render_first_person_visible")
+    crosshairs = c_function(renderer, "vr_render_hud_crosshairs_visible")
+    for body in (visible, crosshairs):
+        require("halo_vr_frame_active()" in body and "controller_aim_requested" in body,
+                "Controller visibility must distinguish native VR mode from flat/gamepad/head paths.")
+        require("ui_widgets_active_for_local_player(" in body or "vr_render_gameplay_hud_visible(" in body,
+                "Controller visibility must read current menu state before a stale input flag.")
+    update = c_function(read("source/interface/first_person_weapons.c"), "first_person_weapon_render_update")
+    require("vr_render_first_person_visible(render.local_player_index)" in update
+            and update.find("vr_render_first_person_visible(") < update.find("first_person_weapon_set_visibility("),
+            "The first-person rig must apply visibility before building or drawing head-camera nodes.")
+    hud = c_function(read("source/interface/hud_weapon.c"), "crosshairs_draw")
+    require("vr_render_hud_crosshairs_visible(" in hud
+            and hud.find("vr_render_hud_crosshairs_visible(") < hud.find("TEST_FLAG(weapon_hud_globals->script_flags"),
+            "The ordinary HUD crosshair fallback must share the controller-mode visibility guard.")
+
+
+def check_optional_native_buffer_streaming(source):
+    read = lambda path: (source / path).read_text(encoding="utf-8")
+    backend = read("port/linux/src/d3d8_gl.c")
+    require("#if defined(HALO_ARM64_GUEST) && !defined(HALO_GLES)\n#define XGPU_PERSISTENT_STREAMS" in backend,
+            "Persistent streaming must remain limited to the native desktop-GL guest.")
+    initialize = c_function(backend, "stream_buffers_initialize")
+    require('config_boolean("display.persistent_stream_buffers")' in initialize
+            and "host_gl_buffer_create_persistent(" in initialize
+            and "host_gl_buffer_destroy_persistent(" in initialize,
+            "Optional streaming must initialize transactionally and retain the ordinary-buffer fallback.")
+    frame = c_function(backend, "frame_end_buffers")
+    require("host_gl_wait_frame_checked(" in frame and "stream_ring_reset(ring_ready)" in frame,
+            "Mapped ring reuse must be gated by a completed host fence.")
+    reset = c_function(backend, "stream_ring_reset")
+    require("if (!ready)" in reset and "device.persistent_ring[ring] = FALSE" in reset
+            and "glGenBuffers(" in reset,
+            "An unfinished mapped slot must retire its mappings before mutable reuse.")
+    host = read("port/android/host/host_gl.c")
+    functions = ("host_gl_buffer_create_persistent", "host_gl_buffer_destroy_persistent",
+                 "host_gl_buffer_write_persistent", "host_gl_wait_frame_checked")
+    imports = set(read("port/linux/arm64/host_imports.list").splitlines())
+    declarations = read("port/android/guest/runtime/guest_host.h") + read("port/linux/src/xgpu.h")
+    for function in functions:
+        c_function(host, function)
+        require(function in imports and function + "(" in declarations,
+                "Missing real host definition/import/declaration: " + function)
+    create = c_function(host, "host_gl_buffer_create_persistent")
+    write = c_function(host, "host_gl_buffer_write_persistent")
+    require("#ifdef HALO_DESKTOP_GL" in create and "GL_ARB_buffer_storage" in create
+            and "glBufferStorage" in create and "glDeleteBuffers(" in create,
+            "Persistent allocation must check desktop capability and delete a failed immutable allocation.")
+    require("size > persistent_buffers[slot].size - offset" in write and "size && !data" in write,
+            "Host-owned mapped writes must enforce the buffer's recorded range and non-null data.")
+    require((source / "tools/test_persistent_stream_buffers.py").is_file(),
+            "Missing production host/guest buffer-streaming regression.")
+
+
 GRAPH_SMOKE = r'''
 import io
 from pathlib import Path
@@ -418,7 +588,7 @@ graph = output.getvalue()
 # pathlib follows the checker host even though this is a Linux build graph.
 # Normalize only the inspected text; retain the actual generated graph below.
 inspected_graph = re.sub(r"\$\r?\n[ \t]*", "", graph).replace("\\", "/")
-for required in ("port/linux/game/network_coop.c", "port/linux/game/coop_scripts.c", "port/linux/game/coop_enemies.c", "port/linux/src/vr.c", "port/linux/arm64/host_vr.c", "-DHALO_VR=1", "-iquote port/linux/game", "build/linux_arm64/brokers.txt", "port/assets/network/brokers.txt"):
+for required in ("port/linux/game/network_coop.c", "port/linux/game/coop_scripts.c", "port/linux/game/coop_enemies.c", "port/linux/src/vr.c", "port/linux/arm64/host_vr.c", "port/linux/game/menu_tags.c", "source/interface/ui_widget.c", "source/interface/motion_sensor.c", "source/rasterizer/rasterizer_transparent_geometry.c", "port/android/host/host_gl.c", "-DHALO_VR=1", "-iquote port/linux/game", "build/linux_arm64/brokers.txt", "port/assets/network/brokers.txt"):
     if required not in inspected_graph:
         raise RuntimeError("The ARM64 graph omitted " + required)
 if "-DHALO_GLES=1" in graph:
@@ -443,6 +613,80 @@ def project_source(source, destination):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with entries.extractfile(entry) as incoming, target.open("wb") as outgoing:
                     outgoing.write(incoming.read())
+
+
+def build_recipe_cli_options(candidate: Path, visited=None):
+    """Read declared options, including a local test's delegated main parser."""
+    visited = set() if visited is None else visited
+    if candidate in visited:
+        return set()
+    require(len(visited) < 32, "Native test CLI delegation exceeds the source check limit.")
+    visited.add(candidate)
+    try:
+        tree = ast.parse(candidate.read_text(encoding="utf-8"), filename=str(candidate))
+    except SyntaxError as error:
+        raise EngineCheckError("A native build test has invalid Python syntax: " + candidate.name) from error
+    options = {argument.value for node in ast.walk(tree) if isinstance(node, ast.Call)
+               and isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument"
+               for argument in node.args if isinstance(argument, ast.Constant)
+               and isinstance(argument.value, str) and argument.value.startswith("--")}
+    called_main = {node.func.value.id for node in ast.walk(tree) if isinstance(node, ast.Call)
+                   and isinstance(node.func, ast.Attribute) and node.func.attr == "main"
+                   and isinstance(node.func.value, ast.Name)}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Import):
+            continue
+        for imported in node.names:
+            if (imported.asname or imported.name) not in called_main:
+                continue
+            delegate = candidate.parent / (imported.name + ".py")
+            if delegate.is_file() and not delegate.is_symlink():
+                options.update(build_recipe_cli_options(delegate, visited))
+    return options
+
+
+def check_build_recipe(source: Path, recipe: str | None = None):
+    """Check the actual container commands against the canonical patched tree."""
+    recipe = recipe if recipe is not None else (ROOT / "resources/build-native.sh").read_text(encoding="utf-8")
+    require("set -euo pipefail" in recipe, "The native build recipe must stop on failed checks.")
+    commands = []
+    for line in recipe.splitlines():
+        if re.match(r"^\s*python3\s", line):
+            try:
+                argv = shlex.split(line, comments=True)
+            except ValueError as error:
+                raise EngineCheckError("An invalid Python command appears in the native build recipe.") from error
+            require(len(argv) >= 2 and all(token not in (";", "||", "&&", "|") for token in argv),
+                    "The native build recipe contains an unsupported Python command.")
+            commands.append(argv)
+    tests = [argv for argv in commands if argv[1].startswith("tools/test_")]
+    expected = {path for path in PATCH_FILES if path.startswith("tools/test_") and path.endswith(".py")}
+    actual = [argv[1] for argv in tests]
+    require(len(actual) == len(set(actual)), "The native build recipe repeats a regression test.")
+    require(set(actual) == expected,
+            "The native build recipe does not match the shipped engine tests: " +
+            ", ".join(sorted(set(actual) ^ expected)))
+    for argv in commands:
+        path = PurePosixPath(argv[1])
+        require(not path.is_absolute() and ".." not in path.parts and path.suffix == ".py",
+                "The native build recipe references an unsafe script path.")
+        candidate = source.joinpath(*path.parts)
+        require(candidate.is_file() and not candidate.is_symlink() and candidate.resolve().is_relative_to(source.resolve()),
+                "The native build recipe references a missing script: " + argv[1])
+        if argv in tests:
+            options = build_recipe_cli_options(candidate)
+            require(all(argument in options for argument in argv[2:] if argument.startswith("--")),
+                    "The native build recipe passes an unsupported option to " + argv[1])
+            if argv[1] != "tools/test_build_sources.py":
+                require("--cc" in argv and argv[argv.index("--cc") + 1:argv.index("--cc") + 2] == ["clang"],
+                        "The native build recipe must use the installed compiler for " + argv[1])
+    configure = [argv for argv in commands if argv[1] == "configure.py"]
+    require(configure == [["python3", "configure.py", "--release", "--vr", "--linux-arm64-cc", "clang"]],
+            "The native build recipe must configure the release ARM64 VR target exactly once.")
+    require(commands[-1] == configure[0], "Native regression checks must complete before configuration.")
+    require(re.search(r"^ninja\s+-j4\s+linux_arm64\s*$", recipe, re.M),
+            "The native build recipe must build the configured ARM64 target.")
+    return actual
 
 
 def check_source(source: Path):
@@ -472,14 +716,20 @@ def check_source(source: Path):
             require(result.returncode == 0, "The local patch does not apply to the canonical pinned engine source.")
         if patched:
             for path in changed:
-                require((source / path).read_bytes().replace(b"\r\n", b"\n")
-                        == (projection / path).read_bytes().replace(b"\r\n", b"\n"),
+                actual, expected = (source / path).read_bytes(), (projection / path).read_bytes()
+                if not path.endswith(".png"):
+                    actual, expected = actual.replace(b"\r\n", b"\n"), expected.replace(b"\r\n", b"\n")
+                require(actual == expected,
                         "The patched input contains an extra change beyond the shipped local patch: " + path)
         check_controls(projection)
         check_stereo_glow_and_online_menu(projection)
         check_nominal_projectile_reticle(projection)
         check_tutorial(projection)
         check_unarmed_flashlight(projection)
+        check_private_menu_and_vehicle_integration(projection)
+        check_menu_controller_visibility(projection)
+        check_optional_native_buffer_streaming(projection)
+        check_build_recipe(projection)
         result = subprocess.run([sys.executable, "-I", "-c", GRAPH_SMOKE], cwd=projection,
                                 capture_output=True, text=True, timeout=30)
         require(result.returncode == 0, "Offline ARM64 configuration generation failed: " + result.stderr[-2000:])
@@ -492,6 +742,11 @@ def check_source(source: Path):
             "networkCampaignOnlyIntegration": True,
             "vrTutorialIntegration": True,
             "freshFullPoseTrackingIntegration": True,
+            "pauseVRSetupIntegration": True, "trackedVRMenuPointerIntegration": True,
+            "menuControllerRigVisibility": True, "controllerReticleFallbackSuppressed": True,
+            "renderOnlyHeadRadarIntegration": True, "seatedVehicleReferenceIntegration": True,
+            "localWarthogGlassIntegration": True, "optionalNativePersistentBuffersIntegration": True,
+            "buildRecipeIntegration": True,
             "offlineArm64NinjaGraph": True, "arm64LinkedBuild": False, "hardwareValidated": False}
 
 

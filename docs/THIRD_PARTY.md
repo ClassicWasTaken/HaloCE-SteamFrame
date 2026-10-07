@@ -54,7 +54,8 @@ The Windows download contains the mod installer and build instructions; no retai
 | Upstream component | Notice/reference |
 | --- | --- |
 | [Halo native port / decompilation](https://github.com/startupfoundry/halo-ce-universal/blob/2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4/LICENSE.md) | CC0-1.0 for the upstream source. This does not grant rights in the commercial game data or third parties' rights. |
-| [Local controller/tutorial patch](../resources/frame-controls.patch) | A documented modification of the pinned upstream source; see [CONTROLS.md](CONTROLS.md). |
+| [Local VR integration patch](../resources/frame-controls.patch) | Documented controller, tutorial, vehicle, menu, tracking and renderer changes to the pinned upstream source; see [CONTROLS.md](CONTROLS.md). |
+| [astromaddie/HaloCE-VR, reviewed revision](https://github.com/astromaddie/HaloCE-VR/tree/cff675537d961051d4aaf016c1e437542420b7df) | Menu, radar and optional buffer-streaming adaptation reference. Its [published source license](https://github.com/astromaddie/HaloCE-VR/blob/cff675537d961051d4aaf016c1e437542420b7df/LICENSE.md) is CC0-1.0; component notices and rights in retail game data remain separate. |
 | [SDL 3.4.16](https://github.com/libsdl-org/SDL/blob/release-3.4.16/LICENSE.txt) | zlib license; retain the original notice with the native library. |
 | [musl 1.2.5](https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT?h=v1.2.5) | MIT and notices identified in its COPYRIGHT file. Used for the upstream ILP32 guest. |
 | [Khronos OpenXR SDK headers](https://github.com/startupfoundry/halo-ce-universal/blob/2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4/port/third_party/openxr/README.md) | OpenXR SDK 1.1.63, Apache-2.0 OR MIT. Header provenance is documented upstream. |

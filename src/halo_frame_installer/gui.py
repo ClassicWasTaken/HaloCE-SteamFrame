@@ -1521,8 +1521,16 @@ class App(tk.Tk):
                 self.connection_status.set("Connection check cancelled.")
             self._append(text)
             return
-        self.status.set("Setup stopped. See the message below; you can retry.")
-        self.phase.set("Let's try that again")
+        remote_unverified = "may still be running" in text.lower()
+        if "an installer build is still running" in text.lower():
+            self.status.set("An earlier build is still running. Wake the Frame and finish or cancel that build first.")
+            self.phase.set("Earlier build active")
+        elif remote_unverified:
+            self.status.set("Setup status is unverified. Wake the Frame and check setup activity before retrying.")
+            self.phase.set("Connection needs attention")
+        else:
+            self.status.set("Setup stopped. See the message below; you can retry.")
+            self.phase.set("Let's try that again")
         if getattr(self, "operation", None) == "connection":
             self.connection_status.set("Connection check needs attention. See setup activity, then retry.")
         elif getattr(self, "operation", None) == "data":

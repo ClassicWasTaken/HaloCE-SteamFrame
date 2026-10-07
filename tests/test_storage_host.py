@@ -3,6 +3,7 @@ import json
 import threading
 import contextlib
 import io
+import types
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,7 @@ class StorageConnection:
         self.settings, self.existing = settings, existing
         self.host_fingerprint = "SHA256:public"
         self.commands, self.uploads = [], []
+        self.command_inputs = []
         self.closed = False
         self.failure = None
         self.bad_history = False
@@ -53,6 +55,7 @@ class StorageConnection:
 
     def run(self, argv, **kwargs):
         self.commands.append(argv)
+        self.command_inputs.append(kwargs.get("input_data"))
         selected = destination(self.settings.storage_id)
         if argv[1] == "-c" and len(argv) == 3:
             response = {"home": "/home/steamos", "destinations": [destination("internal"), destination()]}
@@ -266,10 +269,13 @@ def test_sd_each_put_has_independent_bundled_before_and_after_checks(tmp_path):
     checks = storage_checks(connection)
     assert len(checks) == len(connection.uploads) * 2
     assert all(command[-2:] == ["--storage-id", SD_ID] for command in checks)
-    assert all("types.ModuleType" in command[2] and "resolve_storage(sys.argv[-1])" in command[2]
-               and "def _sd_identity(" in command[2] for command in checks)
-    assert all("synthetic Xbox map" not in command[2] and "xbox-data-manifest" not in command[2]
-               for command in checks)
+    payloads = [payload.decode("utf-8") for command, payload in zip(connection.commands, connection.command_inputs)
+                if command[1] == "-c" and len(command) > 3 and command[3] == "--storage-id"]
+    assert len(payloads) == len(checks)
+    assert all("types.ModuleType" in source and "resolve_storage(sys.argv[-1])" in source
+               and "def _sd_identity(" in source for source in payloads)
+    assert all("synthetic Xbox map" not in source and "xbox-data-manifest" not in source
+               for source in payloads)
 
 
 @pytest.mark.parametrize("field,value", [
@@ -437,6 +443,7 @@ def test_missing_card_inline_check_emits_bounded_error_without_traceback(tmp_pat
     def run(argv, **kwargs):
         output = io.StringIO()
         monkeypatch.setattr("sys.argv", ["-c", *argv[3:]])
+        monkeypatch.setattr("sys.stdin", types.SimpleNamespace(buffer=io.BytesIO(kwargs["input_data"])))
         with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as stopped:
             exec(compile(argv[2], "<inline SD check>", "exec"), {})
         assert stopped.value.code == 1

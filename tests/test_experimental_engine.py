@@ -77,6 +77,63 @@ def test_protocol_11_engine_cannot_be_mislabeled_as_matching_experimental_coop(t
         engine.check_upstream(tmp_path)
 
 
+@pytest.fixture
+def recipe_projection(tmp_path):
+    declaration = "import argparse\np = argparse.ArgumentParser()\n"
+    declaration += "\n".join("p.add_argument('" + option + "')" for option in ("--cc", "--ld", "--sdk"))
+    for path in engine.PATCH_FILES:
+        if path.startswith("tools/test_") and path.endswith(".py"):
+            candidate = tmp_path / path
+            candidate.parent.mkdir(exist_ok=True)
+            candidate.write_text(declaration, encoding="utf-8")
+    (tmp_path / "configure.py").write_text("# configure boundary\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_native_recipe_checks_every_shipped_test_in_the_projection(recipe_projection):
+    actual = engine.check_build_recipe(recipe_projection)
+    expected = {path for path in engine.PATCH_FILES if path.startswith("tools/test_") and path.endswith(".py")}
+    assert set(actual) == expected and len(actual) == len(expected)
+
+
+@pytest.mark.parametrize("name", ["test_vr_scope.py", "test_vr_scope_render.py", "test_vr_scope_backend.py",
+                                 "test_vr_scope_hud.py", "test_vr_scope_link.py"])
+def test_recipe_rejects_each_removed_scope_command(recipe_projection, name):
+    text = (ROOT / "resources/build-native.sh").read_text(encoding="utf-8")
+    text = text.replace("python3 configure.py", "python3 tools/" + name + " --cc clang\npython3 configure.py")
+    with pytest.raises(engine.EngineCheckError, match="does not match the shipped"):
+        engine.check_build_recipe(recipe_projection, text)
+
+
+def test_recipe_rejects_missing_actual_test_file(recipe_projection):
+    (recipe_projection / "tools/test_vr_framebuffer.py").unlink()
+    with pytest.raises(engine.EngineCheckError, match="missing script: tools/test_vr_framebuffer.py"):
+        engine.check_build_recipe(recipe_projection)
+
+
+@pytest.mark.parametrize("before,after,diagnostic", [
+    ("--sdk /usr/include", "--missing-sdk /usr/include", "unsupported option"),
+    ("python3 tools/test_vr_tracking.py --cc clang", "python3 tools/test_vr_tracking.py --cc clang\npython3 tools/test_vr_tracking.py --cc clang", "repeats a regression"),
+    ("--release --vr --linux-arm64-cc clang", "--release --linux-arm64-cc clang", "release ARM64 VR target"),
+    ("ninja -j4 linux_arm64", "ninja -j4 linux", "configured ARM64 target"),
+    ("set -euo pipefail", "set -u", "stop on failed checks"),
+])
+def test_recipe_rejects_invalid_commands_and_failure_masking(recipe_projection, before, after, diagnostic):
+    text = (ROOT / "resources/build-native.sh").read_text(encoding="utf-8")
+    assert before in text
+    with pytest.raises(engine.EngineCheckError, match=diagnostic):
+        engine.check_build_recipe(recipe_projection, text.replace(before, after))
+
+
+def test_recipe_accepts_and_checks_local_delegated_cli_options(recipe_projection):
+    (recipe_projection / "tools/test_vr_flashlight.py").write_text(
+        "import test_vr_projectile_reticle as reticle\nreticle.main()\n", encoding="utf-8")
+    assert "tools/test_vr_flashlight.py" in engine.check_build_recipe(recipe_projection)
+    (recipe_projection / "tools/test_vr_projectile_reticle.py").write_text("def main(): pass\n", encoding="utf-8")
+    with pytest.raises(engine.EngineCheckError, match="unsupported option"):
+        engine.check_build_recipe(recipe_projection)
+
+
 def test_public_release_documentation_names_the_single_installer_download():
     for name in ("README.md", "docs/SETUP.md", "docs/RELEASE_NOTES.md"):
         text = (ROOT / name).read_text(encoding="utf-8")
@@ -99,6 +156,8 @@ def test_actual_exact_pinned_engine_and_shipped_patch_when_checkout_is_supplied(
     result = engine.check_source(Path(source))
     assert result["ok"] and result["protocolVersion"] == 17
     assert result["offlineArm64NinjaGraph"] and result["headDirectedMovementIntegration"]
+    assert result["buildRecipeIntegration"]
+    assert result["menuControllerRigVisibility"] and result["controllerReticleFallbackSuppressed"]
     assert result["stereoSunGlowIntegration"] and result["vrInternetCampaignMenu"]
     assert result["boundedSunGlowStrength"]
     assert result["nominalProjectileReticleIntegration"]

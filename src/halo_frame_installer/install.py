@@ -34,6 +34,26 @@ def storage_arguments(settings: Settings) -> list[str]:
     return [] if settings.storage_id == "internal" else ["--storage-id", settings.storage_id]
 
 
+def run_remote_source(connection, source: str, arguments=(), **kwargs) -> str:
+    """Send bundled Python through stdin, keeping the SSH command bounded.
+
+    Linux limits each argument, including SSH's shell command, to roughly
+    128 KiB. The combined installer helper can exceed that limit. Check the
+    complete payload before executing it so a dropped connection cannot run
+    a syntactically valid but truncated source file.
+    """
+    payload = source.encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    bootstrap = (
+        "import sys,hashlib\n"
+        f"_hfi_source=sys.stdin.buffer.read({len(payload) + 1})\n"
+        f"if len(_hfi_source)!={len(payload)} or hashlib.sha256(_hfi_source).hexdigest()!={digest!r}:\n"
+        " raise SystemExit('HFI_ERROR Setup helper transfer was incomplete. Reconnect and retry.')\n"
+        "exec(compile(_hfi_source,'<bundled setup helper>','exec'),globals())\n")
+    return connection.run(["python3", "-c", bootstrap, *arguments],
+                          input_data=payload, **kwargs)
+
+
 def validate_sd_identity(value: dict, mount: str) -> dict:
     """Require the card, filesystem and live kernel mount checked by preflight."""
     if (not isinstance(value, dict) or value.get("kind") != "sd" or value.get("mountPath") != mount
@@ -290,7 +310,7 @@ class Installer:
         self.resource_dir = resource_dir or resources_path()
 
     def remote_source(self) -> str:
-        """Bootstrap the same bundled storage validator before the inline helper."""
+        """Bootstrap the bundled storage validator before the installer helper."""
         storage = (self.resource_dir / "frame_storage.py").read_text(encoding="utf-8")
         helper = (self.resource_dir / "remote_install.py").read_text(encoding="utf-8")
         # exec handles future-import declarations in each source independently.
@@ -324,13 +344,13 @@ class Installer:
                   "except (OSError,ValueError,UnicodeError,subprocess.SubprocessError) as error:\n"
                   " print('HFI_ERROR '+str(error).replace('\\n',' ')[:600],flush=True)\n"
                   " raise SystemExit(1)\n")
-        argv = ["python3", "-c", inline] + storage_arguments(settings)
+        arguments = storage_arguments(settings)
 
         def verify():
             if cancel_event.is_set():
                 raise CancelledError("Installation cancelled. Existing games and saves were kept.")
-            current = validate_storage_destination(parse_result(connection.run(
-                argv, cancel_event=cancel_event, timeout=90)), settings.storage_id)
+            current = validate_storage_destination(parse_result(run_remote_source(
+                connection, inline, arguments, cancel_event=cancel_event, timeout=90)), settings.storage_id)
             if (current["identity"] != original["identity"]
                     or any(current[key] != original[key] for key in ("mountPath", "gamePath", "cachePath"))):
                 raise SSHError("The selected SD card changed during transfer. Setup stopped without updating the Steam library. Refresh storage and choose the card again.")
@@ -367,7 +387,7 @@ class Installer:
                 raise CancelledError("Storage check cancelled.")
             connection.connect()
             source = (self.resource_dir / "frame_storage.py").read_text(encoding="utf-8")
-            inventory = parse_result(connection.run(["python3", "-c", source],
+            inventory = parse_result(run_remote_source(connection, source,
                                     cancel_event=cancel_event, timeout=90))
             values = inventory.get("destinations")
             if (inventory.get("home") != "/home/steamos" or not isinstance(values, list)
@@ -498,13 +518,13 @@ class Installer:
             progress("preflight", "Checking the installed native game and Steam account..." if registration_only
                      else "Checking ARM64 SteamOS, SteamVR, Podman and free space...", None)
             source = self.remote_source()
-            preflight_args = ["python3", "-c", source, "preflight-library" if registration_only else "preflight"]
+            preflight_args = ["preflight-library" if registration_only else "preflight"]
             if repair:
                 preflight_args.append("--repair")
             if repair and settings.adopt_existing_native:
                 preflight_args.append("--adopt-existing")
             preflight_args += storage_arguments(settings)
-            info = parse_result(connection.run(preflight_args,
+            info = parse_result(run_remote_source(connection, source, preflight_args,
                                                progress=remote_progress, cancel_event=cancel_event, timeout=90))
             destination = validate_preflight_location(info, settings)
             upload = self.guarded_upload(connection, settings, destination, cancel_event)
@@ -655,7 +675,7 @@ class Installer:
             check_cancel()
             progress("preflight", "Checking the native game location and safe uninstall support...", None)
             helper_source = self.remote_source()
-            info = parse_result(connection.run(["python3", "-c", helper_source, "preflight-uninstall"] + storage_arguments(settings),
+            info = parse_result(run_remote_source(connection, helper_source, ["preflight-uninstall"] + storage_arguments(settings),
                 progress=remote_progress, cancel_event=cancel_event, timeout=90))
             destination = validate_preflight_location(info, settings)
             upload = self.guarded_upload(connection, settings, destination, cancel_event)

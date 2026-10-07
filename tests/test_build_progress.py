@@ -197,8 +197,13 @@ def setup_build(remote, monkeypatch):
     monkeypatch.setattr(remote, "existing_install", lambda *args: None)
     monkeypatch.setattr(remote, "verify_maps", lambda *args, **kwargs: 0)
     monkeypatch.setattr(remote.time, "sleep", lambda seconds: None)
+    original_which = remote.shutil.which
+    monkeypatch.setattr(remote.shutil, "which", lambda name: (
+        "podman" if name == "podman" else None if name == "systemd-inhibit" else original_which(name)))
 
     def git(argv, **kwargs):
+        if argv[:2] == ["podman", "ps"]:
+            return "[]"
         assert argv[0] == "git"
         if argv[1] == "init":
             Path(argv[2]).mkdir()

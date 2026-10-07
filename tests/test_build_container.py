@@ -52,8 +52,13 @@ def test_build_launches_package_manager_as_container_root_with_host_isolation(tm
     manifest = {"files": files, "totalBytes": len(header) * len(files)}
     (upload / "xbox-data-manifest.json").write_text(json.dumps(manifest))
     monkeypatch.setattr(remote, "existing_install", lambda *args: None)
+    original_which = remote.shutil.which
+    monkeypatch.setattr(remote.shutil, "which", lambda name: (
+        "podman" if name == "podman" else None if name == "systemd-inhibit" else original_which(name)))
 
     def git_command(argv, **kwargs):
+        if argv[:2] == ["podman", "ps"]:
+            return "[]"
         assert argv[0] == "git"
         if argv[1] == "init":
             Path(argv[2]).mkdir()

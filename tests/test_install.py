@@ -608,11 +608,22 @@ def test_remote_detects_changed_original_xbox_header(remote, tmp_path):
 
 
 def test_repair_applies_standing_snap_without_resetting_other_vr_preferences(remote):
-    old = '[vr]\nheight="seated"\nturn="smooth"\nsnap_turn_angle=45.0\nrefresh_rate=90.0\nplayer_height=1.8\n'
+    old = '[vr]\nheight="seated"\nturn="smooth"\nmelee_gesture=false\nsnap_turn_angle=45.0\nrefresh_rate=90.0\nplayer_height=1.8\n'
     updated = remote.tomllib.loads(remote.merge_config(old))
     assert updated['vr']['height'] == 'standing' and updated['vr']['turn'] == 'snap'
+    assert updated['vr']['melee_gesture'] is True
     assert updated['vr']['snap_turn_angle'] == 45.0
     assert updated['vr']['refresh_rate'] == 90.0 and updated['vr']['player_height'] == 1.8
+
+
+@pytest.mark.parametrize('original', ['', '[vr]\nscope=true\nzoom_stabilization=true\nscope_size=0.2\nrefresh_rate=90.0\n'])
+def test_install_and_repair_disable_removed_optics_without_resetting_other_preferences(remote, original):
+    updated = remote.tomllib.loads(remote.merge_config(original))
+    assert updated['vr']['scope'] is False
+    assert updated['vr']['zoom_stabilization'] is False
+    if original:
+        assert updated['vr']['scope_size'] == 0.2
+        assert updated['vr']['refresh_rate'] == 90.0
 
 
 def test_config_repair_preserves_isolated_save_location_and_user_preferences(remote):
@@ -645,6 +656,7 @@ def test_new_config_missing_paths_gets_versioned_defaults(remote):
     assert updated['vr']['aim'] == 'controller' and updated['vr']['movement'] == 'head'
     assert updated['vr']['sun_glow_strength'] == 0.5
     assert updated['vr']['turn'] == 'snap' and updated['vr']['height'] == 'standing'
+    assert updated['vr']['melee_gesture'] is True
     assert updated['network']['coop_enemies_mode'] == 'none'
 
 
@@ -1214,7 +1226,8 @@ def test_verified_stable_upgrade_keeps_old_checkpoints_and_backs_up_config(remot
     assert settings["audio"]["volume"] == 0.3 and settings["vr"]["turn"] == "snap"
     assert remote.save_root().is_dir() and not any(remote.save_root().iterdir())
     marker = remote.read_marker(remote.GAME / remote.MARKER)
-    assert marker["installerVersion"] == "1.4.2" and marker["networkProtocol"] == 17
+    from halo_frame_installer import __version__
+    assert marker["installerVersion"] == __version__ and marker["networkProtocol"] == 17
     assert marker["saveRoot"] == str(remote.save_root()) and "experimental" not in marker
     assert not remote.existing_install()["needsUpgrade"]
     # A later Repair preserves both generations and the former custom location.
@@ -1283,6 +1296,7 @@ def test_automatic_upgrade_refuses_unverified_or_unknown_state(remote, damage):
 
 
 def test_legacy_library_and_finalize_cannot_shortcut_the_upgrade(remote, monkeypatch):
+    monkeypatch.setattr(remote, "no_active_build", lambda: None)
     manifest, _ = native_install(remote)
     monkeypatch.setattr(remote, "preflight_uninstall", lambda: {"home": str(remote.HOME)})
     with pytest.raises(ValueError, match="Use Install"):

@@ -22,6 +22,10 @@ class SSHError(RuntimeError):
     pass
 
 
+class ConnectionLostError(SSHError):
+    """A started command lost its connection before an exit status was verified."""
+
+
 class RemoteTimeoutError(SSHError):
     """A remote operation exceeded its bounded wait before it could be verified."""
 
@@ -277,8 +281,11 @@ class SSHConnection:
     def run(self, argv: list[str], *, progress: Callable[[str], None] | None = None,
             cancel_event: threading.Event | None = None, timeout: float = 3600,
             on_cancel: Callable[[], None] | None = None,
-            timeout_message: str | None = None) -> str:
-        """Run an argument vector; no secrets are put into a remote command."""
+            timeout_message: str | None = None,
+            input_data: bytes | None = None) -> str:
+        """Run arguments, optionally streaming bytes through the SSH stdin channel."""
+        if input_data is not None and not isinstance(input_data, bytes):
+            raise TypeError("SSH command input must be bytes.")
         def notify_cancelled():
             if on_cancel is not None:
                 try:
@@ -305,7 +312,10 @@ class SSHConnection:
         expired = None
         try:
             with self._handshake_watchdog(min(30, timeout) + self.handshake_grace, cancel_event) as expired:
-                _, stdout, _ = self.client.exec_command(command, timeout=min(30, timeout))
+                # Keep stdin alive until the command finishes. Paramiko closes
+                # its write side when ChannelStdinFile is garbage-collected;
+                # discarding this wrapper would send EOF before our payload.
+                stdin, stdout, _ = self.client.exec_command(command, timeout=min(30, timeout))
             if expired.is_set():
                 handshake_timed_out()
         except (paramiko.SSHException, OSError, EOFError):
@@ -317,12 +327,23 @@ class SSHConnection:
             raise SSHError("The remote command could not be started. Check the Frame's connection and retry.") from None
         channel = stdout.channel
         self._command_channels.add(channel)
+        if input_data is None:
+            # Preserve the noninteractive command behavior: callers that did
+            # not supply stdin still send EOF immediately after the handshake.
+            try:
+                stdin.close()
+            except Exception:
+                pass
         # Build output is delivered live to the activity callback. Keep only a
         # bounded response tail for the final result/error, rather than storing
         # the entire compilation a second time in memory.
         chunks: deque[bytes] = deque()
         retained_bytes = 0
+        tail_starts_at_line = True
         pending = bytearray()
+        discarding_line = False
+        sent_bytes = 0
+        input_finished = input_data is None
         try:
             channel.set_combine_stderr(True)
             while True:
@@ -332,6 +353,27 @@ class SSHConnection:
                 if time.monotonic() - started > timeout:
                     notify_cancelled()
                     raise RemoteTimeoutError(timeout_message or "The remote step timed out. You can reconnect and retry; existing games and saves were kept.")
+                if not input_finished:
+                    # A remote helper waits for EOF before it verifies and runs
+                    # this source. Send bounded chunks only when SSH's window
+                    # permits them, while continuing to drain output and check
+                    # cancellation/deadlines if the peer stops reading stdin.
+                    if (sent_bytes < len(input_data) and not channel.exit_status_ready()
+                            and channel.send_ready()):
+                        try:
+                            count = channel.send(input_data[sent_bytes:sent_bytes + 16384])
+                        except (paramiko.SSHException, OSError, EOFError):
+                            if not channel.exit_status_ready():
+                                raise
+                        else:
+                            if count <= 0:
+                                if not channel.exit_status_ready():
+                                    raise EOFError("SSH stdin closed during helper transfer.")
+                            else:
+                                sent_bytes += count
+                    if sent_bytes == len(input_data) and not channel.exit_status_ready():
+                        channel.shutdown_write()
+                        input_finished = True
                 while channel.recv_ready():
                     # These checks live inside the receive loop on purpose: a
                     # device that keeps the channel readable must not make the
@@ -351,27 +393,51 @@ class SSHConnection:
                         overflow = retained_bytes - 256 * 1024
                         first = chunks.popleft()
                         if len(first) > overflow:
+                            tail_starts_at_line = first[overflow - 1:overflow] == b"\n"
                             chunks.appendleft(first[overflow:])
                             retained_bytes -= overflow
                         else:
+                            tail_starts_at_line = first[-1:] == b"\n"
                             retained_bytes -= len(first)
+                    if discarding_line:
+                        _, separator, data = data.partition(b"\n")
+                        if not separator:
+                            continue
+                        discarding_line = False
                     pending.extend(data)
-                    if len(pending) > 1024 * 1024:
-                        # Endless newline-free output must not grow host memory
-                        # without bound; keep only the most recent tail.
-                        del pending[:len(pending) - 64 * 1024]
                     while b"\n" in pending:
                         line, _, rest = pending.partition(b"\n")
                         pending[:] = rest
-                        if progress is not None:
+                        if len(line) <= 1024 * 1024 and progress is not None:
                             progress(line.decode("utf-8", "replace"))
+                    if len(pending) > 1024 * 1024:
+                        # Drop an oversized record through its newline. Emitting
+                        # a suffix could turn truncated JSON or split UTF-8 into
+                        # a false activity/error update. Resume at the next line.
+                        pending.clear()
+                        discarding_line = True
                 if channel.exit_status_ready() and not channel.recv_ready():
                     break
-                time.sleep(0.08)
+                time.sleep(0.01 if not input_finished else 0.08)
+            status = channel.recv_exit_status()
+            if status == -1:
+                # Paramiko also reports readiness when a channel closes without
+                # an exit-status message. This cannot verify success or failure;
+                # do not turn stale build output or a partial final record into
+                # a compiler diagnostic.
+                raise ConnectionLostError("The remote connection closed without reporting an exit status, so this step could not be verified. "
+                                          "Keep the Frame awake and reconnect; the operation may still be running on it. Check its status before retrying.") from None
+            if status == 0 and not input_finished:
+                raise ConnectionLostError("The remote command ended before the setup helper transfer was complete. Reconnect and retry.") from None
             if pending and progress is not None:
                 progress(pending.decode("utf-8", "replace"))
-            result = b"".join(chunks).decode("utf-8", "replace")
-            status = channel.recv_exit_status()
+            response = b"".join(chunks)
+            if not tail_starts_at_line:
+                # The bounded byte tail may begin in the middle of HFI_LOG or
+                # HFI_PROGRESS. Remove that first incomplete record before
+                # returning it or filtering protocol lines from a failure.
+                response = response.partition(b"\n")[2]
+            result = response.decode("utf-8", "replace")
             if status:
                 # Remote helper emits bounded, user-readable diagnostics. Redact defensively.
                 lines = [line for line in result.splitlines()
@@ -397,7 +463,8 @@ class SSHConnection:
             if cancel_event is not None and cancel_event.is_set():
                 notify_cancelled()
                 raise CancelledError("Installation cancelled. Existing games and saves were kept.") from None
-            raise SSHError("The remote connection stopped before this step could be verified. Check the Frame's connection and retry.") from None
+            raise ConnectionLostError("The remote connection stopped before this step could be verified. "
+                                      "Keep the Frame awake and reconnect; the operation may still be running on it. Check its status before retrying.") from None
         finally:
             try:
                 channel.close()
@@ -407,6 +474,10 @@ class SSHConnection:
                 pass
             else:
                 self._command_channels.discard(channel)
+            try:
+                stdin.close()
+            except Exception:
+                pass  # Closing this wrapper cannot erase the command outcome.
 
     def put(self, local: Path, remote: str, *, callback=None,
             cancel_event: threading.Event | None = None) -> None:

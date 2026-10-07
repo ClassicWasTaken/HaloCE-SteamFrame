@@ -5,6 +5,18 @@ cd /build
 export DEBIAN_FRONTEND=noninteractive
 export NINJA_STATUS='[%f/%t] '
 phase() { printf 'HFI_BUILD_PHASE %s %s\n' "$1" "$2"; }
+phase dependencies 'Checking bundled native build tests before downloading packages...'
+# Read the commands from this same script so a removed or unshipped regression
+# fails before package downloads. This needs only Bash, before Python is installed.
+while IFS= read -r _hfi_test_command || [[ -n "$_hfi_test_command" ]]; do
+  if [[ "$_hfi_test_command" =~ ^python3[[:space:]]+(tools/test_[[:alnum:]_]+\.py)([[:space:]]|$) ]]; then
+    _hfi_test_script="${BASH_REMATCH[1]}"
+    if [[ ! -f "/build/src/$_hfi_test_script" ]]; then
+      printf 'Missing native build test: %s\n' "$_hfi_test_script" >&2
+      exit 1
+    fi
+  fi
+done < "${BASH_SOURCE[0]}"
 phase dependencies 'Installing isolated ARM64 build dependencies...'
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl gnupg git python3 \
@@ -35,9 +47,21 @@ clang --version
 cd /build/src
 phase configure 'Verifying pinned build-source download safeguards...'
 python3 tools/test_build_sources.py
-phase configure 'Checking Xbox controls, front-facing VR menus, tutorial, unarmed flashlight, render-rate reticle, stereo sun glow and LAN/online campaign menus...'
+phase configure 'Checking Xbox controls, VR menus and pointer, pause settings, GPU buffer and framebuffer recovery, vehicle view and steering, tracking, stock zoom, tutorial, flashlight, reticle, sun glow and campaign menus...'
 python3 tools/test_vr_locomotion.py --cc clang
 python3 tools/test_vr_menu.py --cc clang
+python3 tools/test_vr_pointer_radar.py --cc clang
+python3 tools/test_vr_pause_menu.py --cc clang
+python3 tools/test_persistent_stream_buffers.py --cc clang
+python3 tools/test_vr_framebuffer.py --cc clang
+python3 tools/test_vr_vehicle.py --cc clang
+python3 tools/test_vr_vehicle_pose.py --cc clang
+python3 tools/test_vr_cinematic_hands.py --cc clang
+python3 tools/test_vr_zoom_aim.py --cc clang
+python3 tools/test_vr_stock_zoom_hud.py --cc clang
+python3 tools/test_vr_renderer_link.py --cc clang --ld ld.lld --sdk /usr/include
+python3 tools/test_vr_driving.py --cc clang
+python3 tools/test_vr_driving_game.py --cc clang
 python3 tools/test_vr_tutorial.py --cc clang
 python3 tools/test_vr_tracking.py --cc clang
 python3 tools/test_vr_tutorial_buttons.py --cc clang

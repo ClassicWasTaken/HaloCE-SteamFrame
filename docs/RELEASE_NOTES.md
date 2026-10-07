@@ -1,4 +1,25 @@
-# Halo CE Steam Frame VR Mod 1.4.2
+# Halo CE Steam Frame VR Mod 1.4.3
+
+[**Download Halo-Steam-Frame-Mod-Setup-1.4.3.exe**](https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/v1.4.3/Halo-Steam-Frame-Mod-Setup-1.4.3.exe) for Windows 10/11 x64. One EXE includes the installer runtime and USB tools. The [release page](https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/tag/v1.4.3) lists its checksum; [verify release provenance](BUILD_PROVENANCE.md).
+
+This release promotes the headset-tested **1.4.3-Test9** gameplay patch without changing its bytes.
+
+- **Menus and tracking:** gameplay hands and weapons hide while a menu is open, while the controller pointer and Xbox navigation remain available. Menus stay upright when your head tilts. Valid offscreen controller poses keep tracked aiming; unavailable poses hide the reticle until recovery rather than producing a centered fallback. Malformed left-hand poses hide only that hand.
+- **Vehicle controls:** in the Warthog driver seat, hold **A for forward**, hold **B to brake**, and steer with the left stick. Backward selects reverse; B takes priority over gas and reverse. Optional two-grip steering works with the same gas/brake buttons. Other vehicles keep their own throttle, steering and turret controls. [Vehicle controls](CONTROLS.md).
+- **Vehicle views:** a separate seated reference uses the authored seat camera and follows the vehicle's full tilt and bounce. Physical head movement remains free, acceleration-animation sway is excluded, and the occupied Warthog windshield is cleared locally.
+- **Aiming and presentation:** first-person scripted arrivals retain controller hands without enabling gameplay inputs. Stock zoom and direct controller aiming replace the experimental gun-mounted scope. Install/Repair disables the old optical settings, enables physical melee, and retains standing and snap-turn defaults.
+- **Rendering:** stereo visibility bounds include both eyes near the camera. Invalid framebuffers are retried, incomplete frames are not submitted, and unfinished GPU buffer slots get fresh storage. The compositor receives the exact eye pose used to render the completed frame.
+- **Setup reliability:** remote source is delivered without an oversized shell argument; cancellation reports unconfirmed remote stopping accurately. A temporary idle/sleep inhibitor covers native compilation when available and is released afterward. Setup prevents concurrent installer builds and runs the current 22 engine checks with compiler/linker names resolved from PATH.
+
+**Updating:** close Halo, select its existing Internal/SD storage location, then choose **Repair** to rebuild with verified maps without another ISO. Existing 1.4.x profiles and saves stay on the selected location. Upgrading from 1.3.5 retains old saves but requires a new profile and campaign. SD installation, Steam artwork/Notes and the earlier tutorial, flashlight, sun-glow and online campaign fixes remain included.
+
+The tester confirmed Test9 worked on their Frame. Local verification passed 1,034 installer tests (14 skipped), all 22 engine checks, ARM64 compilation and partial linking, plus the frozen EXE smoke test. Public publication additionally requires the repository's Windows/Linux, rootless-container, complete native ARM64 link and attested Windows EXE checks. No measured FPS improvement or complete multiplayer/hardware matrix is claimed.
+
+Engine source remains pinned to `2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4`, native peer protocol **17**. Use matching builds and maps for LAN/online co-op. Retail PC and Custom Edition servers remain incompatible; restrictive NAT can prevent Internet connections because there is no gameplay relay.
+
+Supply your own authorized original Xbox Halo CE data. No retail executable, ISO, maps, keys or soundtrack is bundled or downloaded. Halo artwork and licensed components retain their notices. [Sources and credits](SOURCES.md) · [Third-party notices](THIRD_PARTY.md).
+
+## 1.4.2
 
 [**Download Halo-Steam-Frame-Mod-Setup-1.4.2.exe**](https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/v1.4.2/Halo-Steam-Frame-Mod-Setup-1.4.2.exe) for Windows 10/11 x64. This is the release's only installer asset. Its SHA256 is listed on the [release page](https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/tag/v1.4.2); matching installer source is in the [v1.4.2 tag](https://github.com/ClassicWasTaken/HaloSteamFrameMod/tree/v1.4.2). [Verify release provenance](BUILD_PROVENANCE.md).
 

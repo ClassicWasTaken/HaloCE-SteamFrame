@@ -157,6 +157,7 @@ def test_cancellation_during_retained_hashing_is_not_swallowed(remote, monkeypat
 
 
 def test_build_rechecks_retained_hashes_before_fetching_source(remote, monkeypatch):
+    monkeypatch.setattr(remote, "no_active_build", lambda: None)
     older, _, _ = prepare_retry(remote)
     assert remote.reuse_upload(NEW_RUN)["reusedUpload"] is True
     target = older / "upload/maps/a10.map"

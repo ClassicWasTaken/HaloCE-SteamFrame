@@ -373,6 +373,9 @@ def test_interrupted_sd_uninstall_recovers_after_same_card_remount(sd_remote, mo
 
 def test_live_sd_build_detects_remount_and_stops_labeled_container_without_card_writes(sd_remote, monkeypatch):
     remote, state = sd_remote
+    original_which = remote.shutil.which
+    monkeypatch.setattr(remote.shutil, "which", lambda name: (
+        "podman" if name == "podman" else None if name == "systemd-inhibit" else original_which(name)))
     identifier = "4" * 32
     remote.prepare(identifier)
     directory = remote.run_dir(identifier)
@@ -384,6 +387,8 @@ def test_live_sd_build_detects_remount_and_stops_labeled_container_without_card_
     commands, stopped = [], []
     def command(argv, **kwargs):
         commands.append(argv)
+        if argv[:2] == ["podman", "ps"]:
+            return "[]"
         if argv[:2] == ["git", "init"]:
             Path(argv[2]).mkdir()
         return remote.SOURCE_COMMIT if "rev-parse" in argv else ""

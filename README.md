@@ -9,18 +9,18 @@
 <h1 align="center">Halo CE Steam Frame VR Mod</h1>
 
 <h2 align="center">
-  <a href="https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/v1.4.2/Halo-Steam-Frame-Mod-Setup-1.4.2.exe">Download 1.4.2 — Windows installer (.exe)</a>
+  <a href="https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/v1.4.3/Halo-Steam-Frame-Mod-Setup-1.4.3.exe">Download 1.4.3 — Windows installer (.exe)</a>
 </h2>
 
 <p align="center">
-  <strong>Halo-Steam-Frame-Mod-Setup-1.4.2.exe</strong><br>
+  <strong>Halo-Steam-Frame-Mod-Setup-1.4.3.exe</strong><br>
   Windows 10/11 x64 · One file · Runtime and USB tools included<br>
-  <a href="https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/tag/v1.4.2">Release notes &amp; SHA256 checksum</a> · <a href="docs/BUILD_PROVENANCE.md">Verify release provenance</a>
+  <a href="https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/tag/v1.4.3">Release notes &amp; SHA256 checksum</a> · <a href="docs/BUILD_PROVENANCE.md">Verify release provenance</a>
 </p>
 
 Play native ARM64/OpenXR Halo CE on Steam Frame with **LAN and online campaign co-op**, **head-directed walking**, and **Xbox-style buttons**. Tracked controller aiming, a render-rate reticle, half-strength stereo sun glow, and automatic Steam artwork and Notes are included.
 
-**1.4.2 adds SD-card installation and menus that open in front of your current headset view.** It retains the tutorial and unarmed-flashlight fixes, standing mode and snap turning, with improved cancellation, upgrade recovery and USB tool selection.
+**1.4.3 adds refined vehicle controls and seated views, upright menus with a controller pointer, and fixes for hand visibility, reticle tracking and interrupted builds.** SD-card installation, standing mode, snap turning and the earlier tutorial and flashlight fixes are included.
 
 ## Install or upgrade
 
@@ -37,6 +37,6 @@ Internal installs keep **Halo: Combat Evolved VR (Native)**. SD installs use **H
 
 <img src="docs/images/halocevr-steam-frame-example.jpeg" alt="Halo CE VR gameplay example with tracked hands and a plasma rifle beneath Halo's night sky" width="800">
 
-*Community VR example by [u/Sea-Communication760](https://www.reddit.com/r/virtualreality/comments/1wpvi8n/halo_halocevr_working_great_on_steam_frame/): PC HaloCEVR on Steam Frame through Proton ARM. This is not a native 1.4.2 capture.*
+*Community VR example by [u/Sea-Communication760](https://www.reddit.com/r/virtualreality/comments/1wpvi8n/halo_halocevr_working_great_on_steam_frame/): PC HaloCEVR on Steam Frame through Proton ARM. This is not a native build capture.*
 
 No retail executable, disc image, maps, keys or soundtrack is included or downloaded. Halo artwork and third-party components retain their rights and notices.

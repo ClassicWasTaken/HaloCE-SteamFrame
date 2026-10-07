@@ -1,6 +1,6 @@
 # Install Halo VR on an SD card
 
-Version 1.4.2 adds **Internal storage / SD card** selection. [Download the Windows installer](https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/v1.4.2/Halo-Steam-Frame-Mod-Setup-1.4.2.exe) and [verify release provenance](BUILD_PROVENANCE.md).
+Choose **Internal storage / SD card** for your installation. [Download the Windows installer](https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/v1.4.3/Halo-Steam-Frame-Mod-Setup-1.4.3.exe) and [verify release provenance](BUILD_PROVENANCE.md).
 
 1. Insert a card that is already prepared and mounted on your Frame with an executable ext4 or f2fs filesystem and at least 12 GiB free.
 2. Choose your original Xbox Halo CE image for a new SD installation.

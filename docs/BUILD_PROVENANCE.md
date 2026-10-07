@@ -1,11 +1,11 @@
 # Verify the installer and build inputs
 
-The public Windows EXE is built by this repository's `.github/workflows/build.yml` after Windows/Linux tests, rootless-container checks and a complete native ARM64/OpenXR link. Release 1.4.2 adds GitHub's signed build-provenance attestation for that exact executable. It is separate from the downloadable asset and its checksum. Pull-request builds skip the attestation step; the verifier below requires the trusted main-branch source identity and does not accept a pull-request source ref.
+The public Windows EXE is built by this repository's `.github/workflows/build.yml` after Windows/Linux tests, rootless-container checks and a complete native ARM64/OpenXR link. It has GitHub's signed build-provenance attestation for that exact executable, introduced in 1.4.2. It is separate from the downloadable asset and its checksum. Pull-request builds skip the attestation step; the verifier below requires the trusted main-branch source identity and does not accept a pull-request source ref.
 
 Use a trusted installation of [GitHub CLI](https://cli.github.com/) to check the downloaded file:
 
 ```powershell
-gh attestation verify Halo-Steam-Frame-Mod-Setup-1.4.2.exe --repo ClassicWasTaken/HaloSteamFrameMod --signer-workflow ClassicWasTaken/HaloSteamFrameMod/.github/workflows/build.yml --source-ref refs/heads/main --deny-self-hosted-runners
+gh attestation verify Halo-Steam-Frame-Mod-Setup-1.4.3.exe --repo ClassicWasTaken/HaloSteamFrameMod --signer-workflow ClassicWasTaken/HaloSteamFrameMod/.github/workflows/build.yml --source-ref refs/heads/main --deny-self-hosted-runners
 ```
 
 For a stricter check, add `--source-digest` followed by the release's installer commit. Read the command and repository identity from a trusted copy of this project or an independently saved reference. An attestation from a different project is not sufficient. [GitHub's verifier](https://cli.github.com/manual/gh_attestation_verify) checks the artifact digest and signed workflow/source identity; the [attestation documentation](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations) explains the trust model.

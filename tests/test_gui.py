@@ -1734,6 +1734,39 @@ def test_genuine_failure_during_a_set_cancel_still_needs_attention(app):
 
 
 @WINDOWS_GUI
+@pytest.mark.parametrize('message', [
+    'The remote connection closed without reporting an exit status, so this step could not be verified. '
+    'Keep the Frame awake and reconnect; the operation may still be running on it. Check its status before retrying.',
+    'Remote stopping could not be confirmed; the build may still be running on the Frame.',
+])
+def test_unverified_remote_build_does_not_report_completion_or_encourage_immediate_retry(app, message):
+    app._begin_setup_progress()
+    app.operation = 'install'
+    app.events.put(('error', message, False))
+    app.events.put(('idle',))
+    _drain_events(app)
+    assert app.phase.get() == 'Connection needs attention'
+    assert 'status is unverified' in app.status.get()
+    assert 'before retrying' in app.status.get()
+    assert 'you can retry' not in app.status.get()
+    assert float(app.progress['value']) < 100
+    assert app._test_dialogs[-1] == ('Setup needs attention', message)
+
+
+@WINDOWS_GUI
+def test_active_previous_build_instructs_wait_or_cancel(app):
+    app._begin_setup_progress()
+    app.operation = 'install'
+    app.events.put(('error', 'An installer build is still running on the Frame. No second build was started.', False))
+    app.events.put(('idle',))
+    _drain_events(app)
+    assert app.phase.get() == 'Earlier build active'
+    assert 'finish or cancel that build first' in app.status.get()
+    assert 'you can retry' not in app.status.get()
+    assert float(app.progress['value']) < 100
+
+
+@WINDOWS_GUI
 @pytest.mark.parametrize('cleanup_fails', [False, True])
 @pytest.mark.parametrize('primary_failure', [False, True])
 def test_connection_worker_keeps_cleanup_failures_visible_after_cancel(app, monkeypatch, cleanup_fails, primary_failure):
