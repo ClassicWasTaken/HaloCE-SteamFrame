@@ -10,6 +10,7 @@ import socket
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -228,17 +229,41 @@ class SSHConnection:
     """Extra seconds a handshake may take past its step timeout before the
     transport is force-closed; paramiko's internal waits are otherwise
     unbounded on a live-but-silent session."""
+    sftp_timeout = 20.0
 
-    def _abort_stalled_transport(self) -> None:
-        # Called only by the handshake watchdog: closing the transport unblocks
-        # exec_command/open_sftp waits that ignore every timeout. The session is
-        # unusable anyway and the caller reports a retryable connection error.
+    @contextmanager
+    def _handshake_watchdog(self, timeout: float, cancel_event: threading.Event | None):
+        """Interrupt only this handshake, then retire before any recovery work."""
+        transport = self.client.get_transport()
+        finished = threading.Event()
+        deadline = time.monotonic() + timeout
+
+        def watch():
+            while not finished.is_set():
+                remaining = deadline - time.monotonic()
+                if (cancel_event is not None and cancel_event.is_set()) or remaining <= 0:
+                    # Closing the captured session releases Paramiko's exec,
+                    # subsystem and SFTP-version waits, which ignore the channel
+                    # timeout. Never look up a potentially replacement session.
+                    try:
+                        if transport is not None:
+                            transport.close()
+                    except Exception:
+                        pass
+                    return
+                if finished.wait(min(0.05, remaining)):
+                    return
+
+        watchdog = threading.Thread(target=watch, name="ssh-handshake-watchdog", daemon=True)
+        watchdog.start()
         try:
-            transport = self.client.get_transport()
-            if transport is not None:
-                transport.close()
-        except Exception:
-            pass
+            yield
+        finally:
+            finished.set()
+            # cancel() alone cannot stop a timer callback that has already
+            # started. Wait for retirement before a transfer or on_cancel can
+            # start another operation on this connection.
+            watchdog.join()
 
     def run(self, argv: list[str], *, progress: Callable[[str], None] | None = None,
             cancel_event: threading.Event | None = None, timeout: float = 3600,
@@ -257,18 +282,14 @@ class SSHConnection:
             raise CancelledError("Installation cancelled. Existing games and saves were kept.")
         command = shlex.join([str(arg) for arg in argv])
         started = time.monotonic()
-        watchdog = threading.Timer(min(30, timeout) + self.handshake_grace, self._abort_stalled_transport)
-        watchdog.daemon = True
-        watchdog.start()
         try:
-            _, stdout, _ = self.client.exec_command(command, timeout=min(30, timeout))
+            with self._handshake_watchdog(min(30, timeout) + self.handshake_grace, cancel_event):
+                _, stdout, _ = self.client.exec_command(command, timeout=min(30, timeout))
         except (paramiko.SSHException, OSError, EOFError):
             if cancel_event is not None and cancel_event.is_set():
                 notify_cancelled()
                 raise CancelledError("Installation cancelled. Existing games and saves were kept.") from None
             raise SSHError("The remote command could not be started. Check the Frame's connection and retry.") from None
-        finally:
-            watchdog.cancel()
         channel = stdout.channel
         self._command_channels.add(channel)
         # Build output is delivered live to the activity callback. Keep only a
@@ -372,20 +393,19 @@ class SSHConnection:
         if cancel_event is not None and cancel_event.is_set():
             raise CancelledError("Installation cancelled. Existing games and saves were kept.")
         sftp = None
-        watchdog = threading.Timer(20 + self.handshake_grace, self._abort_stalled_transport)
-        watchdog.daemon = True
-        watchdog.start()
         try:
-            sftp = self.client.open_sftp()
+            with self._handshake_watchdog(self.sftp_timeout + self.handshake_grace, cancel_event):
+                sftp = self.client.open_sftp()
             self._sftp_clients.add(sftp)
-            sftp.get_channel().settimeout(20)
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledError("Installation cancelled. Existing games and saves were kept.")
+            sftp.get_channel().settimeout(self.sftp_timeout)
             sftp.put(str(local), remote, callback=update, confirm=True)
         except (OSError, EOFError, paramiko.SSHException):
             if cancel_event is not None and cancel_event.is_set():
                 raise CancelledError("Installation cancelled. Existing games and saves were kept.") from None
             raise SSHError("The encrypted file transfer stopped. Check the Frame's connection and retry.") from None
         finally:
-            watchdog.cancel()
             if sftp is not None:
                 try:
                     sftp.close()
