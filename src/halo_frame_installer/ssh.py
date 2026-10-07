@@ -23,7 +23,7 @@ class SSHError(RuntimeError):
 
 
 class RemoteTimeoutError(SSHError):
-    """A started remote operation exceeded its bounded host wait."""
+    """A remote operation exceeded its bounded wait before it could be verified."""
 
 
 class CancelledError(RuntimeError):
@@ -70,8 +70,12 @@ class Settings:
     adb_path: str | None = None
     usb_serial: str | None = None
     known_host_fingerprints: dict[str, str] = field(default_factory=dict, repr=False)
+    storage_id: str = "internal"
 
     def __post_init__(self) -> None:
+        if (not isinstance(self.storage_id, str)
+                or not re.fullmatch(r"internal|sd:[a-f0-9]{32}", self.storage_id)):
+            raise ValueError("Choose internal storage or a detected SD card.")
         if self.transport not in ("network", "usb"):
             raise ValueError("Choose Wi-Fi / Ethernet or USB-C transfer.")
         self.host = validate_host(self.host) if self.transport == "network" else "frame"
@@ -238,12 +242,15 @@ class SSHConnection:
         """Interrupt only this handshake, then retire before any recovery work."""
         transport = self.client.get_transport()
         finished = threading.Event()
+        expired = threading.Event()
         deadline = time.monotonic() + timeout
 
         def watch():
             while not finished.is_set():
                 remaining = deadline - time.monotonic()
                 if (cancel_event is not None and cancel_event.is_set()) or remaining <= 0:
+                    if remaining <= 0:
+                        expired.set()
                     # Closing the captured session releases Paramiko's exec,
                     # subsystem and SFTP-version waits, which ignore the channel
                     # timeout. Never look up a potentially replacement session.
@@ -259,7 +266,7 @@ class SSHConnection:
         watchdog = threading.Thread(target=watch, name="ssh-handshake-watchdog", daemon=True)
         watchdog.start()
         try:
-            yield
+            yield expired
         finally:
             finished.set()
             # cancel() alone cannot stop a timer callback that has already
@@ -279,18 +286,34 @@ class SSHConnection:
                 except Exception:
                     pass  # The primary cancellation/timeout must always survive.
 
+        def handshake_timed_out():
+            # The request may have reached the device without its acknowledgement.
+            # The watchdog is already retired here; cancellation recovery can
+            # safely open a new pinned session before the timeout is reported.
+            notify_cancelled()
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledError("Installation cancelled. Existing games and saves were kept.") from None
+            raise RemoteTimeoutError(timeout_message or
+                "The remote command handshake timed out before its start could be verified. "
+                "The operation may have started on the Frame; reconnect and check its status before retrying.") from None
+
         if cancel_event is not None and cancel_event.is_set():
             notify_cancelled()
             raise CancelledError("Installation cancelled. Existing games and saves were kept.")
         command = shlex.join([str(arg) for arg in argv])
         started = time.monotonic()
+        expired = None
         try:
-            with self._handshake_watchdog(min(30, timeout) + self.handshake_grace, cancel_event):
+            with self._handshake_watchdog(min(30, timeout) + self.handshake_grace, cancel_event) as expired:
                 _, stdout, _ = self.client.exec_command(command, timeout=min(30, timeout))
+            if expired.is_set():
+                handshake_timed_out()
         except (paramiko.SSHException, OSError, EOFError):
             if cancel_event is not None and cancel_event.is_set():
                 notify_cancelled()
                 raise CancelledError("Installation cancelled. Existing games and saves were kept.") from None
+            if expired is not None and expired.is_set():
+                handshake_timed_out()
             raise SSHError("The remote command could not be started. Check the Frame's connection and retry.") from None
         channel = stdout.channel
         self._command_channels.add(channel)

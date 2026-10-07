@@ -6,7 +6,7 @@ official Steam application. No Steam files or sessions are changed here.
 """
 from __future__ import annotations
 
-from steam_live import Client, GAME, HOME, NAME, expression, native_spec
+from steam_live import Client, GAME, HOME, NAME, SD_NAME, expression, native_spec
 
 NOTE_ID = "haloframeaboutv1"
 NOTE_TITLE = "Halo CE VR — About & controls"
@@ -279,18 +279,38 @@ NOTES = r"""(async () => {
 })()"""
 
 
-def add_notes(home, game, appid, name=NAME):
+def _note_content(name):
+    if name == NAME:
+        return NOTE_CONTENT
+    if name != SD_NAME:
+        raise ValueError("The native Halo Notes name is unsupported.")
+    return (NOTE_CONTENT.replace(NAME, SD_NAME)
+        .replace("the same 1.4.0 release", "matching native protocol-17 builds")
+        .replace("1.4.0 uses protocol 17; 1.3.5", "This native build uses protocol 17; 1.3.5")
+        .replace(
+        "1.4.0 upgrades the existing native game. New profiles and saves use\n"
+        "save-v1.4 inside its game folder. Your old save folder is retained\n"
+        "unchanged; older checkpoints cannot load in the newer engine.",
+        "This SD-card installation stays separate from the internal installation.\n"
+        "Profiles and saves use save-v1.4 inside this game folder. Keep this SD\n"
+        "card inserted and mounted when playing. Internal game files are retained."))
+
+
+def add_notes(home, game, appid, name=None):
     """Return independent notes status without interrupting game registration."""
     result = {"ok": False, "status": "manual",
               "message": "Steam Game Notes is unavailable. Add the supplied text as a note manually.",
               "title": NOTE_TITLE, "content": NOTE_CONTENT}
     try:
         spec = native_spec(home, game, name)
+        content = _note_content(spec["name"])
+        result["content"] = content
         if type(appid) is not int or not 2 ** 31 <= appid < 2 ** 32:
             return result
         spec.update({"appid": appid, "noteId": NOTE_ID, "title": NOTE_TITLE,
-                     "content": NOTE_CONTENT, "maxBytes": MAX_DOCUMENT_BYTES,
-                     "maxNotes": MAX_NOTES, "previousContents": list(PREVIOUS_NOTE_CONTENTS)})
+                     "content": content, "maxBytes": MAX_DOCUMENT_BYTES,
+                     "maxNotes": MAX_NOTES,
+                     "previousContents": list(PREVIOUS_NOTE_CONTENTS) if spec["name"] == NAME else []})
         with Client() as client:
             value = client.evaluate(expression(NOTES, spec))
         status = value.get("status")

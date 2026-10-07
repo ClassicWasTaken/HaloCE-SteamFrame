@@ -18,6 +18,10 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+PARAMIKO_SOURCE_VERSION = "4.0.0"
+PARAMIKO_SOURCE_URL = "https://files.pythonhosted.org/packages/1f/e7/81fdcbc7f190cdb058cffc9431587eb289833bdd633e2002455ca9bb13d4/paramiko-4.0.0.tar.gz"
+PARAMIKO_SOURCE_SHA256 = "6a25f07b380cc9c9a88d2b920ad37167ac4667f8d9886ccebd8f90f654b5d69f"
+
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -110,20 +114,14 @@ def download_sources(output: Path, entries: list[dict]) -> list[dict]:
     paramiko = next((p for p in entries if p["name"].lower() == "paramiko"), None)
     if not paramiko:
         raise RuntimeError("Paramiko is not installed in the build environment")
-    api = f"https://pypi.org/pypi/paramiko/{paramiko['version']}/json"
-    info = json.loads(get_https(api, 4 * 1024 * 1024))
-    files = [p for p in info["urls"] if p["packagetype"] == "sdist"]
-    if len(files) != 1:
-        raise RuntimeError("Expected one official Paramiko source archive")
-    archive = files[0]
-    filename = archive["filename"]
-    if PurePosixPath(filename).name != filename or not filename.endswith(".tar.gz"):
-        raise ValueError("Unsafe Paramiko archive filename")
-    data = get_https(archive["url"])
-    if digest(data) != archive["digests"]["sha256"]:
+    if paramiko["version"] != PARAMIKO_SOURCE_VERSION:
+        raise RuntimeError("Review and update the repository-pinned Paramiko source before building a new dependency version")
+    filename = f"paramiko-{PARAMIKO_SOURCE_VERSION}.tar.gz"
+    data = get_https(PARAMIKO_SOURCE_URL)
+    if digest(data) != PARAMIKO_SOURCE_SHA256:
         raise RuntimeError("Paramiko source checksum mismatch")
-    notices = [write_notice(output, "sources/" + filename, data, archive["url"])]
-    notices[0]["metadata_source"] = api
+    notices = [write_notice(output, "sources/" + filename, data, PARAMIKO_SOURCE_URL)]
+    notices[0]["checksum_source"] = "repository-pinned scripts/gather_notices.py"
     # cryptography statically links its own OpenSSL; Python ssl may use another.
     import ssl
     from cryptography.hazmat.backends.openssl.backend import backend

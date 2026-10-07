@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 NAME = "Halo: Combat Evolved VR (Native)"
+SD_NAME = "Halo: Combat Evolved VR (Native, SD card)"
 LAUNCH_OPTIONS = "SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=0 %command%"
 ARTWORK = (("p", ".jpg", "halo-ce-cover.jpg", "84fee9349f8f00d8ade44c840330ac54ec4b01ef84086d72b8c791d16c8ad248"),
            ("", ".png", "halo-ce-landscape.png", "179ff6b9bd1a6ba610e9c0c4b9b32c76e525719b253856d547f65eaa02d1f33d"),
@@ -243,15 +244,17 @@ def _compatibility_warning(steam: Path, appid: int) -> str | None:
     return None
 
 
-def _added_result(steam: Path, appid: int, **extra) -> dict:
+def _added_result(steam: Path, appid: int, name: str = NAME, **extra) -> dict:
     warning = _compatibility_warning(steam, appid)
     if warning:
-        return {"status": "manual", "libraryAdded": True, "appid": appid, "name": NAME,
+        return {"status": "manual", "libraryAdded": True, "appid": appid, "name": name,
                 "reason": warning, "instructions": warning, **extra}
-    return {"status": "added", "appid": appid, "name": NAME, **extra}
+    return {"status": "added", "appid": appid, "name": name, **extra}
 
 
-def update_shortcut(data: bytes | None, executable: str, directory: str) -> tuple[bytes, int]:
+def update_shortcut(data: bytes | None, executable: str, directory: str, name: str = NAME) -> tuple[bytes, int]:
+    if name not in (NAME, SD_NAME):
+        raise ValueError("The native Halo shortcut name is unsupported.")
     root = loads(data) if data is not None else OrderedDict([("shortcuts", Value(0, OrderedDict()))])
     if set(root) != {"shortcuts"} or root["shortcuts"].kind != 0:
         raise ValueError("Unexpected Steam shortcuts root; no changes were made.")
@@ -265,7 +268,7 @@ def update_shortcut(data: bytes | None, executable: str, directory: str) -> tupl
         fields = entry.value
         title = fields.get("AppName", fields.get("appname"))
         path = fields.get("Exe", fields.get("exe"))
-        if title and title.value == NAME:
+        if title and title.value == name:
             if path is None or str(path.value).strip('"') != executable:
                 raise ValueError("A different game already uses this Steam shortcut name. Add this game manually.")
             matches.append((index, fields))
@@ -278,7 +281,7 @@ def update_shortcut(data: bytes | None, executable: str, directory: str) -> tupl
             raise ValueError("The existing native Halo shortcut has an invalid app ID.")
         appid = app.value
     else:
-        appid = zlib.crc32((exe + NAME).encode("utf-8")) | 0x80000000
+        appid = zlib.crc32((exe + name).encode("utf-8")) | 0x80000000
         used = {entry.value.get("appid").value for entry in shortcuts.values() if entry.value.get("appid")}
         if appid in used:
             raise ValueError("Steam shortcut app ID collision. Add the game manually.")
@@ -288,7 +291,7 @@ def update_shortcut(data: bytes | None, executable: str, directory: str) -> tupl
         shortcuts[key] = Value(0, fields)
         fields["appid"] = Value(2, appid)
     # Preserve tags, artwork, playtime and all other fields on an existing entry.
-    for key, value in {"AppName": NAME, "Exe": exe, "StartDir": start,
+    for key, value in {"AppName": name, "Exe": exe, "StartDir": start,
                        "LaunchOptions": LAUNCH_OPTIONS}.items():
         # Remove only an alternative case spelling of fields we are writing.
         for old in list(fields):
@@ -392,8 +395,10 @@ def add_native_shortcut(home: Path, game: Path, close_steam: bool = False) -> di
     Steam Frame's headset session is managed by SteamOS. This helper never shuts
     down or starts Steam, Steam Home, SteamVR, games or their services.
     """
+    name = _managed_name(home, game)
     return _with_closed_steam(game, close_steam, lambda: _write_native_shortcut(home, game),
-                              _manual, "Add to Steam", lambda: _live_native(home, game, "add"))
+                              lambda target, reason=None: _manual(target, reason, name),
+                              "Add to Steam", lambda: _live_native(home, game, "add"))
 
 
 def _with_closed_steam(game: Path, close_steam: bool, action, manual, button: str, live=None) -> dict:
@@ -410,13 +415,19 @@ def _with_closed_steam(game: Path, close_steam: bool, action, manual, button: st
 
 def _live_native(home: Path, game: Path, operation: str) -> dict:
     from steam_live import add_native, remove_native
-    return add_native(home, game, NAME, LAUNCH_OPTIONS) if operation == "add" else remove_native(home, game, NAME)
+    return add_native(home, game, launch_options=LAUNCH_OPTIONS) if operation == "add" else remove_native(home, game)
 
 
-def _manual(game: Path, reason: str | None = None) -> dict:
-    manual = {"status": "manual", "name": NAME, "executable": str(game / "halo"),
+def _managed_name(home: Path, game: Path) -> str:
+    from frame_storage import validate_game_path
+    destination = validate_game_path(home, game)
+    return SD_NAME if destination["kind"] == "sd" else NAME
+
+
+def _manual(game: Path, reason: str | None = None, name: str = NAME) -> dict:
+    manual = {"status": "manual", "name": name, "executable": str(game / "halo"),
               "directory": str(game), "launchOptions": LAUNCH_OPTIONS,
-              "instructions": "Use Steam > Add a Game > Add a Non-Steam Game and browse to the executable. Set the displayed launch options and leave compatibility tools disabled. Automatic library editing can be retried when Steam is already closed."}
+              "instructions": "Use Steam > Add a Game > Add a Non-Steam Game and browse to the executable. Set the game name to " + name + ". Set the displayed launch options and leave compatibility tools disabled. Automatic library editing can be retried when Steam is already closed."}
     if reason is not None:
         manual["reason"] = reason
     return manual
@@ -663,7 +674,8 @@ def _artwork_result(config: Path, appid: int) -> dict:
 
 
 def _write_native_shortcut(home: Path, game: Path) -> dict:
-    manual = _manual(game)
+    name = _managed_name(home, game)
+    manual = _manual(game, name=name)
     if steam_running():
         return {**manual, "reason": "Steam is still running; its library files were left unchanged."}
     steam = home / ".local/share/Steam"
@@ -679,7 +691,7 @@ def _write_native_shortcut(home: Path, game: Path) -> dict:
         if path.is_symlink() or (path.exists() and (not path.is_file() or path.stat().st_size > 8 * 1024 * 1024)):
             raise ValueError("Steam shortcuts file is not a supported ordinary file.")
         before = path.read_bytes() if path.exists() else None
-        after, appid = update_shortcut(before, str(game / "halo"), str(game))
+        after, appid = update_shortcut(before, str(game / "halo"), str(game), name)
         after, icon = _closed_shortcut_icon(after, game, appid)
         # A second guard prevents overwriting Steam's live view if it opened during work.
         if steam_running():
@@ -689,7 +701,7 @@ def _write_native_shortcut(home: Path, game: Path) -> dict:
         if before == after:
             art = _artwork_result(config, appid)
             art["icon"] = icon
-            return _added_result(steam, appid, unchanged=True, artwork=art)
+            return _added_result(steam, appid, name=name, unchanged=True, artwork=art)
         backup = None
         if before is not None:
             backup = config / ("shortcuts.vdf.halo-frame-installer-" + str(time.time_ns()) + ".bak")
@@ -709,21 +721,23 @@ def _write_native_shortcut(home: Path, game: Path) -> dict:
                 os.unlink(temp)
         art = _artwork_result(config, appid)
         art["icon"] = icon
-        return _added_result(steam, appid, backup=str(backup) if backup else None, artwork=art)
+        return _added_result(steam, appid, name=name, backup=str(backup) if backup else None, artwork=art)
     except (OSError, ValueError, UnicodeError) as error:
         return {**manual, "reason": str(error)}
 
 
-def _remove_manual(game: Path, reason: str | None = None) -> dict:
-    return {"status": "manual", "name": NAME, "executable": str(game / "halo"),
+def _remove_manual(game: Path, reason: str | None = None, name: str = NAME) -> dict:
+    return {"status": "manual", "name": name, "executable": str(game / "halo"),
             "reason": reason or "Steam must be closed before uninstalling.",
             "instructions": "Use Steam's Remove Non-Steam Game option for this native Halo entry. Automatic uninstall can be retried when Steam is already closed. The native game files were kept."}
 
 
 def remove_native_shortcut(home: Path, game: Path, close_steam: bool = False) -> dict:
     """Use Steam's live API or closed library; ignore the legacy close flag."""
+    name = _managed_name(home, game)
     return _with_closed_steam(game, close_steam, lambda: _write_removed_shortcuts(home, game),
-                              _remove_manual, "Uninstall", lambda: _live_native(home, game, "remove"))
+                              lambda target, reason=None: _remove_manual(target, reason, name),
+                              "Uninstall", lambda: _live_native(home, game, "remove"))
 
 
 def _private_steam_directory(path: Path):

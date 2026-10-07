@@ -796,7 +796,7 @@ def test_uninstall_preflight_needs_no_game_maps_space_vr_or_compiler(installatio
     monkeypatch.setattr(remote, "command", forbidden)
     result = remote.preflight_uninstall()
     assert result == {"home": str(remote.HOME), "cachePath": str(remote.CACHE),
-                      "gamePath": str(remote.GAME), "uninstallSupported": True}
+                      "gamePath": str(remote.GAME), "uninstallSupported": True, "storage": None}
 
 
 @pytest.mark.parametrize("failure", ["space", "config"])

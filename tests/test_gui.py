@@ -8,6 +8,195 @@ import pytest
 WINDOWS_GUI = pytest.mark.skipif(sys.platform != 'win32', reason='Windows Tk packaging smoke test')
 
 
+def _storage_destination(card=None, *, label='Frame SD card', installed=False):
+    mount = '/home/steamos' if card is None else '/run/media/steamos/card-' + card
+    return {'id': 'internal' if card is None else 'sd:' + card * 32,
+            'kind': 'internal' if card is None else 'sd', 'label': 'Internal storage' if card is None else label,
+            'mountPath': mount, 'gamePath': mount + '/Games/HaloCENativeVR',
+            'cachePath': mount + ('/.cache/halo-frame-installer' if card is None else '/.halo-frame-installer'), 'freeBytes': 24 * 1024**3,
+            'installed': installed}
+
+
+@WINDOWS_GUI
+def test_internal_storage_remains_default_without_discovery(app):
+    app.password.set('offline-secret')
+    assert {choice.value for choice in app.storage_choices} == {'internal', 'sd'}
+    assert app._settings().storage_id == 'internal'
+    assert '~/Games/HaloCENativeVR' in app.summary_storage.get()
+
+
+@WINDOWS_GUI
+def test_no_sd_card_requires_refresh_and_never_falls_back_to_internal(app):
+    app.password.set('offline-secret')
+    app.storage_kind.set('sd')
+    with pytest.raises(ValueError, match='Refresh storage'):
+        app._settings()
+    assert app._settings(storage_id='internal').storage_id == 'internal'
+    app._apply_storage_inventory((_storage_destination(),), app._storage_identity())
+    assert 'No eligible mounted SD card' in app.storage_note.get()
+    assert 'Steam Settings → Storage' in app.storage_note.get()
+    assert app.storage_id.get() == '' and _disabled(app.storage_picker)
+    with pytest.raises(ValueError, match='select a mounted SD card'):
+        app._settings()
+
+
+@WINDOWS_GUI
+def test_multiple_sd_cards_need_explicit_selection_and_show_exact_destination(app):
+    app.password.set('offline-secret')
+    cards = (_storage_destination(), _storage_destination('a', installed=True), _storage_destination('b'))
+    app._apply_storage_inventory(cards, app._storage_identity())
+    app.storage_kind.set('sd')
+    assert not app.storage_id.get() and 'Multiple SD cards' in app.storage_note.get()
+    with pytest.raises(ValueError, match='Refresh storage'):
+        app._settings()
+    labels = tuple(app._storage_picker_ids)
+    assert len(labels) == 2 and labels[0] != labels[1] and 'Installed' in labels[0]
+    app.storage_label.set(labels[1])
+    app._select_storage_card()
+    assert app._settings().storage_id == cards[2]['id']
+    assert cards[2]['gamePath'] in app.summary_storage.get()
+    assert cards[2]['gamePath'] in app.storage_note.get()
+    for mode in ('repair', 'uninstall'):
+        app.mode.set(mode)
+        assert cards[2]['gamePath'] in app.summary_storage.get()
+        if mode == 'uninstall':
+            assert app.summary_source.get() == cards[2]['gamePath']
+    app._apply_storage_inventory((_storage_destination(),), app._storage_identity())
+    assert app.storage_id.get() == ''
+    with pytest.raises(ValueError, match='Refresh storage'):
+        app._settings()
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('field,value', [('host', '192.0.2.44'), ('port', '2223'),
+    ('transport', 'usb'), ('usb_serial', 'another-frame'), ('adb_path', 'C:/another/adb.exe')])
+def test_connection_changes_invalidate_sd_selection_without_internal_fallback(app, field, value):
+    app.password.set('offline-secret')
+    app._apply_storage_inventory((_storage_destination(), _storage_destination('a')), app._storage_identity())
+    app.storage_kind.set('sd')
+    assert app._settings().storage_id == 'sd:' + 'a' * 32
+    getattr(app, field).set(value)
+    assert app.storage_kind.get() == 'sd' and app.storage_id.get() == ''
+    assert not app._storage_destinations and not app._storage_picker_ids
+    assert _disabled(app.storage_picker)
+    with pytest.raises(ValueError, match='Refresh storage'):
+        app._settings()
+
+
+@WINDOWS_GUI
+def test_stale_storage_events_and_host_approval_cannot_replace_new_state(app):
+    import threading
+    from halo_frame_installer.install import StorageResult
+    app.password.set('offline-secret')
+    old_generation, old_identity = app._storage_generation, app._storage_identity()
+    app.host.set('192.0.2.45')
+    app.operation = 'connection'
+    app._set_busy(True)
+    ready, answer = threading.Event(), []
+    app.events.put(('storage_result', old_generation, old_identity, 'frame:22',
+                    StorageResult((_storage_destination(), _storage_destination('a')), 'SHA256:old')))
+    app.events.put(('storage_error', old_generation, old_identity, 'Old discovery cancelled.', True))
+    app.events.put(('storage_idle', old_generation, old_identity))
+    app.events.put(('storage_fingerprint', old_generation, old_identity, 'frame', 'ssh-ed25519',
+                    'SHA256:old', 22, ready, answer))
+    _drain_events(app)
+    assert app.busy and not app._storage_destinations and not app.fingerprints
+    assert app.password.get() == 'offline-secret' and not app._test_dialogs
+    assert ready.is_set() and answer == [False]
+    assert 'Old discovery' not in '\n'.join(app.log_lines)
+
+
+@WINDOWS_GUI
+def test_sd_repair_and_uninstall_pass_selected_location_and_confirm_it(app, monkeypatch):
+    from halo_frame_installer import gui, install
+    card = _storage_destination('a', installed=True)
+    app._apply_storage_inventory((_storage_destination(), card), app._storage_identity())
+    app.storage_kind.set('sd')
+    app.password.set('offline-secret')
+    app.authorized.set(True)
+    app.steam_closed.set(True)
+    confirmations, requests = [], []
+    monkeypatch.setattr(gui.messagebox, 'askyesno', lambda title,message,**kwargs: confirmations.append(message) or True)
+    monkeypatch.setattr(gui.threading, 'Thread', _ImmediateThread)
+    def repair(settings, maps, progress, cancel):
+        requests.append(('repair', settings.storage_id, maps))
+        return install.InstallResult(card['gamePath'], True, {'status': 'added'}, None,
+                                     repaired=True, storage_id=settings.storage_id)
+    monkeypatch.setattr(install, 'run', repair)
+    app.mode.set('repair')
+    app._install(repair=True)
+    _drain_events(app)
+    app.password.set('offline-secret')
+    def uninstall(self, settings, progress, cancel, *, keep_saves):
+        requests.append(('uninstall', settings.storage_id, keep_saves))
+        return install.UninstallResult(card['gamePath'], True, False, None, {'status': 'removed'},
+                                       None, storage_id=settings.storage_id)
+    monkeypatch.setattr(install.Installer, 'uninstall', uninstall)
+    app.mode.set('uninstall')
+    app._uninstall()
+    _drain_events(app)
+    assert requests == [('repair', card['id'], None), ('uninstall', card['id'], True)]
+    assert len(confirmations) == 2 and all(card['gamePath'] in text for text in confirmations)
+    assert all('~/Games/HaloCENativeVR' not in text for text in confirmations)
+
+
+@WINDOWS_GUI
+def test_library_retry_uses_last_result_storage_even_when_current_selection_changed(app, monkeypatch):
+    from halo_frame_installer import gui, install
+    card = _storage_destination('a', installed=True)
+    app.last_result = install.InstallResult(card['gamePath'], True, {'status': 'manual'}, 'SHA256:original-frame',
+                                            storage_id=card['id'])
+    app.host.set('192.0.2.55')
+    app.fingerprints = {'192.0.2.55:22': 'SHA256:another-frame'}
+    app.storage_kind.set('internal')
+    app.password.set('offline-secret')
+    app.steam_closed.set(True)
+    requests = []
+    def add(self, settings, progress, cancel):
+        requests.append(settings.storage_id)
+        assert settings.known_host_fingerprint == 'SHA256:original-frame'
+        assert settings.accept_host_key is None
+        return install.InstallResult(card['gamePath'], True,
+            {'status': 'added', 'name': 'Halo: Combat Evolved VR (Native, SD card)'}, None,
+            storage_id=settings.storage_id)
+    monkeypatch.setattr(install.Installer, 'add_to_steam', add)
+    monkeypatch.setattr(gui.threading, 'Thread', _ImmediateThread)
+    app._retry_steam()
+    _drain_events(app)
+    assert requests == [card['id']] and app.last_result.storage_id == card['id']
+    assert app.phase.get() == 'Steam info updated'
+
+
+@WINDOWS_GUI
+def test_sd_storage_card_and_picker_are_visible_after_scrolling_at_minimum_size(app):
+    app._apply_storage_inventory((_storage_destination(), _storage_destination('a')), app._storage_identity())
+    app.storage_kind.set('sd')
+    width, height = app.minsize()
+    app.geometry(f'{width}x{height}')
+    app.deiconify()
+    app._show_page(1)
+    app.update()
+    app.pages[1].canvas.yview_moveto(1)
+    app.update()
+    picker = app.storage_picker
+    canvas = app.pages[1].canvas
+    assert picker.winfo_ismapped() and str(picker.cget('state')) == 'readonly'
+    assert picker.winfo_rooty() >= canvas.winfo_rooty()
+    assert picker.winfo_rooty() + picker.winfo_height() <= canvas.winfo_rooty() + canvas.winfo_height()
+    assert app.storage_label.get() and app.storage_id.get() == 'sd:' + 'a' * 32
+    assert '12 GiB free on the selected drive' in app.install_note.cget('text')
+
+
+@WINDOWS_GUI
+def test_successful_sd_install_uses_actual_library_name(app):
+    from halo_frame_installer.install import InstallResult
+    name = 'Halo: Combat Evolved VR (Native, SD card)'
+    app.events.put(('complete', InstallResult('/run/media/steamos/card/Games/HaloCENativeVR', False,
+        {'status': 'added', 'name': name}, None, storage_id='sd:' + 'a' * 32)))
+    _drain_events(app)
+    assert name in app.status.get() and name in app._test_dialogs[-1][1]
+
+
 def _disabled(widget):
     return str(widget.cget('state')) == 'disabled'
 
@@ -66,6 +255,8 @@ def app(app_window, monkeypatch):
         instance.after_cancel(callback)
     instance.events.queue.clear()
     instance.last_result = None
+    instance.storage_kind.set('internal')
+    instance._invalidate_storage()
     instance.source.set('')
     instance.host.set('frame')
     instance.port.set('22')
@@ -295,32 +486,20 @@ def test_network_settings_keep_address_port_and_existing_trust_identity(app):
 @WINDOWS_GUI
 def test_connection_worker_remembers_resolved_usb_identity_without_opening_network(app, monkeypatch):
     from halo_frame_installer import gui
-    closed = []
-
-    class OfflineConnection:
-        host_fingerprint = 'SHA256:usb'
-
-        def __init__(self, settings):
-            self.settings = settings
-
-        def connect(self):
-            assert self.settings.transport == 'usb'
-            self.settings.usb_serial = 'FRAME-SERIAL'
-
-        def run(self, argv, **kwargs):
-            assert argv == ['uname', '-m']
-            return 'aarch64'
-
-        def close(self):
-            closed.append(True)
-
-    monkeypatch.setattr(gui, 'SSHConnection', OfflineConnection)
+    from halo_frame_installer.install import Installer, StorageResult
+    captured = []
+    def discover(self, settings, *, cancel_event):
+        assert settings.transport == 'usb' and settings.storage_id == 'internal'
+        settings.usb_serial = 'FRAME-SERIAL'
+        captured.append(settings)
+        return StorageResult((_storage_destination(),), 'SHA256:usb', None)
+    monkeypatch.setattr(Installer, 'discover_storage', discover)
     monkeypatch.setattr(gui.threading, 'Thread', _ImmediateThread)
     app.transport.set('usb')
     app.password.set('offline-secret')
     app._test_connection()
     _drain_events(app)
-    assert closed == [True]
+    assert len(captured) == 1 and captured[0].password == ''
     assert app.fingerprints == {'usb:FRAME-SERIAL': 'SHA256:usb'}
     assert not app.busy
     assert 'Connected to your Frame' in app.connection_status.get()
@@ -334,26 +513,16 @@ def test_connection_cleanup_failure_restores_controls_clears_password_and_never_
     captured = []
     actions = []
 
-    class OfflineConnection:
-        host_fingerprint = 'SHA256:usb'
-
-        def __init__(self, settings):
-            self.settings = settings
-            captured.append(settings)
-
-        def connect(self):
-            self.settings.usb_serial = 'FRAME-SERIAL'
-            if connection_fails:
-                raise SSHError('Offline connection failed.')
-
-        def run(self, argv, **kwargs):
-            return 'aarch64'
-
-        def close(self):
-            actions.append('close')
-            raise SSHError('The USB forward could not be removed: offline-secret')
-
-    monkeypatch.setattr(gui, 'SSHConnection', OfflineConnection)
+    from halo_frame_installer.install import Installer, StorageResult
+    def discover(self, settings, *, cancel_event):
+        captured.append(settings)
+        settings.usb_serial = 'FRAME-SERIAL'
+        actions.append('close')
+        if connection_fails:
+            raise SSHError('Offline connection failed.\nThe USB forward could not be removed: offline-secret')
+        return StorageResult((_storage_destination(),), 'SHA256:usb',
+                             'The USB forward could not be removed: offline-secret')
+    monkeypatch.setattr(Installer, 'discover_storage', discover)
     monkeypatch.setattr(gui.threading, 'Thread', _ImmediateThread)
     app.transport.set('usb')
     app.password.set('offline-secret')
@@ -362,7 +531,7 @@ def test_connection_cleanup_failure_restores_controls_clears_password_and_never_
     assert captured[0].password == ''
     queued = list(app.events.queue)
     assert not any(event[0] == 'connected' for event in queued)
-    assert queued[-1] == ('idle',)
+    assert queued[-1][0] == 'storage_idle'
     _drain_events(app)
     assert not app.busy
     assert not app.password.get()
@@ -374,7 +543,8 @@ def test_connection_cleanup_failure_restores_controls_clears_password_and_never_
     log = '\n'.join(app.log_lines)
     assert 'USB forward could not be removed' in log
     assert 'offline-secret' not in log
-    assert 'disconnecting' in log
+    if not connection_fails:
+        assert 'disconnecting' in log
     assert app._test_dialogs
     if connection_fails:
         assert 'Offline connection failed' in log
@@ -1565,8 +1735,9 @@ def test_genuine_failure_during_a_set_cancel_still_needs_attention(app):
 
 @WINDOWS_GUI
 @pytest.mark.parametrize('cleanup_fails', [False, True])
-def test_connection_worker_keeps_cleanup_failures_visible_after_cancel(app, monkeypatch, cleanup_fails):
-    from halo_frame_installer import gui
+@pytest.mark.parametrize('primary_failure', [False, True])
+def test_connection_worker_keeps_cleanup_failures_visible_after_cancel(app, monkeypatch, cleanup_fails, primary_failure):
+    from halo_frame_installer import gui, install
     from halo_frame_installer.ssh import CancelledError, SSHError
     actions, settings_used = [], []
 
@@ -1575,15 +1746,20 @@ def test_connection_worker_keeps_cleanup_failures_visible_after_cancel(app, monk
             settings_used.append(settings)
         def connect(self):
             actions.append('connect')
-        def run(self, argv, *, cancel_event):
+        def run(self, argv, *, cancel_event, **kwargs):
             cancel_event.set()
+            if primary_failure:
+                raise SSHError('Original storage discovery failure.')
             raise CancelledError('Connection check cancelled.')
         def close(self):
             actions.append('close')
             if cleanup_fails:
                 raise SSHError('The USB forward could not be removed: offline-secret')
 
-    monkeypatch.setattr(gui, 'SSHConnection', OfflineConnection)
+    # Use the production discovery and its cleanup path; this injected
+    # connection never creates an SSH client or reaches a device.
+    installer = install.Installer(OfflineConnection)
+    monkeypatch.setattr(install, 'Installer', lambda: installer)
     monkeypatch.setattr(gui.threading, 'Thread', _ImmediateThread)
     app.password.set('offline-secret')
     app._test_connection()
@@ -1591,13 +1767,15 @@ def test_connection_worker_keeps_cleanup_failures_visible_after_cancel(app, monk
     assert actions == ['connect', 'close']
     assert not app.busy and not app.password.get() and not settings_used[0].password
     assert not app.password_to_redact
-    if cleanup_fails:
+    if primary_failure or cleanup_fails:
         assert app.phase.get() == "Let's try that again"
         assert 'needs attention' in app.connection_status.get()
         assert app._test_dialogs[-1][0] == 'Setup needs attention'
-        assert app._test_dialogs[-1][1].startswith('Connection check cancelled.')
+        assert app._test_dialogs[-1][1].startswith('Original storage discovery failure.' if primary_failure
+                                                else 'Connection check cancelled.')
+    if cleanup_fails:
         assert 'USB forward could not be removed' in '\n'.join(app.log_lines)
-    else:
+    if not primary_failure and not cleanup_fails:
         assert app.phase.get() == 'Setup cancelled'
         assert app.connection_status.get() == 'Connection check cancelled.'
         assert not app._test_dialogs

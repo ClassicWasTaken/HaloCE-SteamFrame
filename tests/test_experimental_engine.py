@@ -80,12 +80,16 @@ def test_protocol_11_engine_cannot_be_mislabeled_as_matching_experimental_coop(t
 def test_public_release_documentation_names_the_single_installer_download():
     for name in ("README.md", "docs/SETUP.md", "docs/RELEASE_NOTES.md"):
         text = (ROOT / name).read_text(encoding="utf-8")
-        assert "1.4.1" in text and "Halo-Steam-Frame-Mod-Setup-1.4.1.exe" in text
+        assert "1.4.2" in text and "Halo-Steam-Frame-Mod-Setup-1.4.2.exe" in text
         assert "has not been published" not in text and "local experimental preview" not in text
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/v1.4.1/Halo-Steam-Frame-Mod-Setup-1.4.1.exe" in readme
+    assert "https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/v1.4.2/Halo-Steam-Frame-Mod-Setup-1.4.2.exe" in readme
     notes = (ROOT / "docs/RELEASE_NOTES.md").read_text(encoding="utf-8")
     assert "cannot load old checkpoints" in notes and "save-v1.4" in notes
+    sd_guide = (ROOT / "docs/SD_CARD.md").read_text(encoding="utf-8")
+    assert "Halo: Combat Evolved VR (Native, SD card)" in sd_guide
+    assert "Refresh storage" in readme and "ext4 or f2fs" in sd_guide
+    assert "BUILD_PROVENANCE.md" in readme and "BUILD_PROVENANCE.md" in notes
 
 
 def test_actual_exact_pinned_engine_and_shipped_patch_when_checkout_is_supplied():

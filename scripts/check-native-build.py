@@ -197,6 +197,7 @@ def main(argv=None):
         library = native_elf_proof(source / "build/linux_arm64/libSDL3.so.0", directory)
         proof = {"schemaVersion": 1, "result": "passed", "sourceUrl": helper.SOURCE_URL,
                  "sourceCommit": helper.SOURCE_COMMIT,
+                 "buildContainerImage": helper.BUILD_CONTAINER_IMAGE,
                  "patchSha256": hashlib.sha256(patch_bytes).hexdigest(),
                  "buildScriptSha256": hashlib.sha256(script_bytes).hexdigest(),
                  "remoteHelperSha256": helper_sha, "target": "linux_arm64", "vrEnabled": True,

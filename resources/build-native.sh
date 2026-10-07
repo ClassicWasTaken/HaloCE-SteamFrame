@@ -17,6 +17,11 @@ apt-get install -y --no-install-recommends ca-certificates curl gnupg git python
 phase toolchain 'Downloading and installing the LLVM 22 ARM64 compiler...'
 curl --fail --silent --show-error --location https://apt.llvm.org/llvm-snapshot.gpg.key \
   -o /build/llvm-archive-key.asc
+# Check the primary signing identity published by LLVM before trusting the key.
+# A refreshed self-signature/subkey is allowed; a different primary key is not.
+llvm_primary_fingerprints=$(gpg --batch --with-colons --show-keys --fingerprint /build/llvm-archive-key.asc | \
+  awk -F: '$1 == "pub" { primary = 1; next } primary && $1 == "fpr" { print $10; primary = 0 }')
+test "$llvm_primary_fingerprints" = '6084F3CF814B57C1CF12EFD515CF4D18AF4F7421'
 gpg --batch --yes --dearmor --output /usr/share/keyrings/llvm-archive-keyring.gpg \
   /build/llvm-archive-key.asc
 printf '%s\n' 'deb [arch=arm64 signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] https://apt.llvm.org/jammy/ llvm-toolchain-jammy-22 main' \
@@ -28,8 +33,11 @@ for tool in clang ld.lld llvm-ar; do
 done
 clang --version
 cd /build/src
-phase configure 'Checking Xbox controls, VR tutorial, unarmed flashlight, render-rate reticle, stereo sun glow and LAN/online campaign menus...'
+phase configure 'Verifying pinned build-source download safeguards...'
+python3 tools/test_build_sources.py
+phase configure 'Checking Xbox controls, front-facing VR menus, tutorial, unarmed flashlight, render-rate reticle, stereo sun glow and LAN/online campaign menus...'
 python3 tools/test_vr_locomotion.py --cc clang
+python3 tools/test_vr_menu.py --cc clang
 python3 tools/test_vr_tutorial.py --cc clang
 python3 tools/test_vr_tracking.py --cc clang
 python3 tools/test_vr_tutorial_buttons.py --cc clang
@@ -39,6 +47,9 @@ python3 tools/test_vr_projectile_reticle.py --cc clang
 python3 tools/test_online_coop_menu.py --cc clang
 phase configure 'Configuring the native ARM64 OpenXR game and downloading its build sources...'
 python3 configure.py --release --vr --linux-arm64-cc clang
+# Record signed-package versions. Security/maintenance updates within Ubuntu
+# 22.04 and LLVM22 are intentional; this is not a reproducible-build promise.
+dpkg-query -W -f='${Package} ${Version}\n'
 export CMAKE_BUILD_PARALLEL_LEVEL=4
 export NINJAFLAGS=-j4
 phase sdl 'Configuring and compiling SDL3; the native game build follows...'

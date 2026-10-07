@@ -64,6 +64,10 @@ jobs:
   windows-executable:
     needs: [test, build-container, native-arm64]
     runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -84,6 +88,12 @@ jobs:
           if ($process.ExitCode -ne 0) { throw 'Executable smoke test failed' }
           $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
           if (-not $report.ok) { throw 'Executable did not report success' }
+      - name: Attest the release executable
+        # PR builds run without publishing provenance under the release identity.
+        if: github.event_name != 'pull_request'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: 'dist/Halo-Steam-Frame-Mod-Setup-*.exe'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: HaloFrameSetup-windows

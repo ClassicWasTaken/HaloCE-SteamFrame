@@ -11,7 +11,7 @@ def smoke_test(resources: Path) -> dict:
     from .install import InstallResult, SOURCE_COMMIT
     from . import gui
     from .ssh import Settings
-    names = ('remote_install.py', 'steam_shortcut.py', 'steam_live.py', 'steam_notes.py', 'build-native.sh',
+    names = ('remote_install.py', 'frame_storage.py', 'steam_shortcut.py', 'steam_live.py', 'steam_notes.py', 'build-native.sh',
              'frame-controls.patch', 'ui/app-icon.png', 'ui/app-icon.ico',
              'artwork/halo-ce-cover.jpg', 'artwork/halo-ce-landscape.png',
              'artwork/halo-ce-thumbnail.png', 'artwork/halo-ce-hero.jpg',
@@ -73,6 +73,26 @@ def smoke_test(resources: Path) -> dict:
                 raise RuntimeError('Packaged USB settings did not preserve device identity')
             if settings.close_steam_for_shortcut:
                 raise RuntimeError('Packaged USB setup must keep Steam Home running')
+            if {choice.value for choice in app.storage_choices} != {'internal', 'sd'}:
+                raise RuntimeError('Packaged storage choices are incomplete')
+            card_id = 'sd:' + 'a' * 32
+            card_path = '/run/media/steamos/smoke-card/Games/HaloCENativeVR'
+            card = {'id': card_id, 'kind': 'sd', 'label': 'SD smoke test',
+                    'mountPath': '/run/media/steamos/smoke-card', 'gamePath': card_path,
+                    'cachePath': '/run/media/steamos/smoke-card/.halo-frame-installer',
+                    'freeBytes': 24 * 1024**3, 'installed': True}
+            app._apply_storage_inventory((card,), app._storage_identity())
+            app.storage_kind.set('sd')
+            if app._settings().storage_id != card_id or card_path not in app.summary_storage.get():
+                raise RuntimeError('Packaged SD storage selection was not carried into settings and summary')
+            app.host.set('another-frame')
+            try:
+                app._settings()
+            except ValueError:
+                pass
+            else:
+                raise RuntimeError('Packaged SD selection survived a connection identity change')
+            app.storage_kind.set('internal')
             settings.password = ''
             app.password.set('')
             for mode in ('install', 'repair'):
@@ -120,5 +140,7 @@ def smoke_test(resources: Path) -> dict:
             'steamInfoAutomaticOnInstall': True,
             'steamDescriptionUsesNotes': True,
             'optionalSteamIconNonBlocking': True,
+            'sdCardInstallAvailable': True,
+            'storageDiscoveryRequiredForSD': True,
             'usbToolsBundled': usb_bundled,
             'passwordReprRedacted': True, 'networkConnections': 0}

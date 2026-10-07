@@ -6,6 +6,7 @@ import argparse
 import codecs
 import ctypes
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -24,6 +25,7 @@ import tomllib
 OWNER = "halo-frame-installer"
 SOURCE_URL = "https://github.com/startupfoundry/halo-ce-universal.git"
 SOURCE_COMMIT = "2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4"
+BUILD_CONTAINER_IMAGE = "docker.io/library/ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401"
 LEGACY_SOURCE_COMMIT = "88142798513ebd99fc7c6224023e8b44c05d0106"
 MIN_FREE_BYTES = 12 * 1024 ** 3
 EXPECTED_MAPS = frozenset("maps/" + name + ".map" for name in (
@@ -42,6 +44,71 @@ HOME = pathlib.Path("/home/steamos")
 CACHE = HOME / ".cache/halo-frame-installer"
 GAME = HOME / "Games/HaloCENativeVR"
 MARKER = ".halo-frame-installer.json"
+STORAGE_ID = "internal"
+STORAGE_DESCRIPTOR = None
+_LAST_STORAGE_CHECK = 0.0
+
+
+def storage_module():
+    try:
+        import frame_storage
+        return frame_storage
+    except ModuleNotFoundError as error:
+        if error.name != "frame_storage":
+            raise
+    if "__file__" not in globals():
+        raise ValueError("The storage validation resource must be bootstrapped before remote setup.")
+    spec = importlib.util.spec_from_file_location("frame_storage", pathlib.Path(__file__).with_name("frame_storage.py"))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def storage_root():
+    return pathlib.Path(STORAGE_DESCRIPTOR["mountPath"]) if STORAGE_DESCRIPTOR else HOME
+
+
+def select_storage(identifier="internal"):
+    global STORAGE_ID, STORAGE_DESCRIPTOR, GAME, CACHE, _LAST_STORAGE_CHECK
+    descriptor = storage_module().resolve_storage(identifier, HOME)
+    STORAGE_ID, STORAGE_DESCRIPTOR = identifier, descriptor
+    GAME, CACHE = pathlib.Path(descriptor["gamePath"]), pathlib.Path(descriptor["cachePath"])
+    _LAST_STORAGE_CHECK = time.monotonic()
+    return descriptor
+
+
+def assert_storage_active(force=False):
+    global _LAST_STORAGE_CHECK
+    if STORAGE_ID == "internal" or STORAGE_DESCRIPTOR is None:
+        return
+    if not force and time.monotonic() - _LAST_STORAGE_CHECK < 1:
+        return
+    current = storage_module().resolve_storage(STORAGE_ID, HOME)
+    if (current["identity"] != STORAGE_DESCRIPTOR["identity"] or current["gamePath"] != str(GAME)
+            or current["cachePath"] != str(CACHE)):
+        raise ValueError("The selected SD card changed. Its files were kept; refresh storage before retrying.")
+    _LAST_STORAGE_CHECK = time.monotonic()
+
+
+def check_storage_record(metadata, active_run=False):
+    if STORAGE_DESCRIPTOR is None:
+        return
+    expected = STORAGE_DESCRIPTOR.get("ownershipIdentity", STORAGE_DESCRIPTOR["identity"])
+    recorded = metadata.get("storageOwnership")
+    if ((STORAGE_ID != "internal" and recorded != expected)
+            or (recorded is not None and recorded != expected)
+            or metadata.get("storageId", STORAGE_ID) != STORAGE_ID
+            or metadata.get("gamePath", str(GAME)) != str(GAME)):
+        raise ValueError("The installer ownership record belongs to another storage destination.")
+    if active_run and STORAGE_ID != "internal" and metadata.get("storageIdentity") != STORAGE_DESCRIPTOR["identity"]:
+        raise ValueError("This installation run belongs to an earlier SD mount. Start a fresh run; its uploaded maps were kept.")
+
+
+def storage_fields():
+    return {"storageId": STORAGE_ID, "storageIdentity": STORAGE_DESCRIPTOR["identity"] if STORAGE_DESCRIPTOR else None,
+            "storageOwnership": STORAGE_DESCRIPTOR.get("ownershipIdentity", STORAGE_DESCRIPTOR["identity"]) if STORAGE_DESCRIPTOR else None,
+            "gamePath": str(GAME)}
 
 
 def progress(stage, message, percent=None):
@@ -97,14 +164,17 @@ def read_marker(path, owner=OWNER):
 
 
 def owned(directory):
-    beneath(directory, HOME)
+    assert_storage_active()
+    beneath(directory, storage_root())
     directory.mkdir(parents=True, exist_ok=True)
     marker = directory / MARKER
     if marker.exists():
-        return read_marker(marker)
+        value = read_marker(marker)
+        check_storage_record(value)
+        return value
     if any(directory.iterdir()):
         raise ValueError("The destination is not empty and has no installer ownership marker: " + str(directory))
-    value = {"owner": OWNER, "sourceCommit": SOURCE_COMMIT}
+    value = {"owner": OWNER, "sourceCommit": SOURCE_COMMIT, **storage_fields()}
     marker.write_text(json.dumps(value, indent=2) + "\n")
     return value
 
@@ -116,8 +186,11 @@ def run_id(value):
 
 
 def run_dir(value):
-    read_marker(CACHE / MARKER)
+    assert_storage_active()
+    check_storage_record(read_marker(CACHE / MARKER))
     directory = beneath(CACHE / "runs" / run_id(value), CACHE)
+    if directory.exists():
+        check_storage_record(read_marker(directory / MARKER))
     return directory
 
 
@@ -219,7 +292,7 @@ def validate_save_paths(settings, require_explicit=False):
     if not isinstance(paths, dict):
         raise ValueError("Version 1.4 game and save paths must use their owned installation folder.")
     for key, expected in (("data", GAME), ("saves", save_root())):
-        beneath(expected, HOME)
+        beneath(expected, storage_root())
         if key not in paths and not require_explicit:
             continue
         value = paths.get(key)
@@ -242,32 +315,42 @@ def interrupted_upgrade_record(metadata):
                "Keep the game folder and installer cache; review the original configuration and "
                "program files in the run's previous-program-files backup before retrying.")
     try:
+        assert_storage_active(force=True)
+        check_storage_record(metadata)
         if metadata.get("owner") not in (OWNER, "codex-halo-native-frame-20261005"):
             raise ValueError(failure)
-        cache = private_json(CACHE / MARKER, HOME)
+        cache = private_json(CACHE / MARKER, CACHE)
+        check_storage_record(cache)
         if cache.get("owner") != OWNER:
             raise ValueError(failure)
-        runs = beneath(CACHE / "runs", HOME)
+        runs = beneath(CACHE / "runs", CACHE)
         matches = []
         with os.scandir(runs) as entries:
             for index, entry in enumerate(entries):
+                assert_storage_active()
                 if index >= MAX_RETRY_ENTRIES:
                     raise ValueError(failure)
                 if not re.fullmatch(r"[a-f0-9]{32}", entry.name):
                     continue
                 try:
-                    directory = beneath(runs / entry.name, HOME)
+                    directory = beneath(runs / entry.name, CACHE)
                     for folder in (directory, directory / "stage", directory / "previous-program-files"):
-                        beneath(folder, HOME)
+                        beneath(folder, CACHE)
                         if not folder.is_dir() or folder.stat().st_uid != os.getuid():
                             raise ValueError("Not an owned upgrade directory.")
                     run = private_json(directory / MARKER, directory)
                     backup = directory / "previous-program-files"
                     backup_owner = private_json(backup / ".backup-owner.json", backup)
                     staged = private_json(directory / "stage" / MARKER, directory)
+                    # Old evidence may survive a reboot of this same card.
+                    # Its persistent ownership must match the selected card;
+                    # only the new retry's write path uses full live identity.
+                    for record in (run, backup_owner, staged):
+                        check_storage_record(record)
                     if (run.get("owner") != OWNER or run.get("sourceCommit") != SOURCE_COMMIT
                             or run.get("repair") is not True
-                            or backup_owner != {"owner": OWNER, "sourceCommit": SOURCE_COMMIT}
+                            or backup_owner.get("owner") != OWNER or backup_owner.get("sourceCommit") != SOURCE_COMMIT
+                            or set(backup_owner) - ({"owner", "sourceCommit"} | set(storage_fields()))
                             or staged.get("owner") != OWNER or staged.get("sourceCommit") != SOURCE_COMMIT
                             or staged.get("sourceUrl") != SOURCE_URL or staged.get("saveRoot") != str(save_root())):
                         raise ValueError("Not a matching interrupted upgrade.")
@@ -286,8 +369,9 @@ def interrupted_upgrade_record(metadata):
                     carried = None
                     if journal.exists():
                         carried = private_json(journal, backup)
+                        check_storage_record(carried)
                         previous_files = carried.get("previousFiles")
-                        if (set(carried) != {"owner", "sourceCommit", "previousFiles", "originFiles"}
+                        if (set(carried) - ({"owner", "sourceCommit", "previousFiles", "originFiles"} | set(storage_fields()))
                                 or carried.get("owner") != OWNER or carried.get("sourceCommit") != SOURCE_COMMIT
                                 or not isinstance(previous_files, dict) or set(previous_files) != required):
                             raise ValueError("The carried upgrade recovery record is invalid.")
@@ -301,7 +385,7 @@ def interrupted_upgrade_record(metadata):
                                 raise ValueError("The retry's program backup does not match its verified predecessor.")
                         original_config = ordinary(beneath(backup / "config.toml", backup))
                         if (original_config.stat().st_size > MAX_MANIFEST_BYTES
-                                or configured_save_path(tomllib.loads(original_config.read_text())) != str(save_root())):
+                                or configured_save_path(parse_config(original_config.read_text())) != str(save_root())):
                             raise ValueError("The retry's configuration does not match its interrupted predecessor.")
                         origin = beneath(backup / "upgrade-origin", backup)
                         if not origin.is_dir() or origin.stat().st_uid != os.getuid():
@@ -342,7 +426,7 @@ def interrupted_upgrade_record(metadata):
                         if (details.st_uid != os.getuid() or details.st_nlink != 1
                                 or details.st_size > MAX_MANIFEST_BYTES):
                             raise ValueError("The original configuration backup is not a private bounded file.")
-                        original = configured_save_path(tomllib.loads(config.read_text()))
+                        original = configured_save_path(parse_config(config.read_text()))
                     else:
                         original = str(GAME / "save")
                     previous = previous_save_paths(metadata)
@@ -366,13 +450,15 @@ def interrupted_upgrade_record(metadata):
                                    ("files", "previousSavePaths", "originFiles", "currentFiles"))
                               for value in matches[1:]):
             raise ValueError(failure)
+        assert_storage_active(force=True)
         return matches[0]
     except (OSError, ValueError, KeyError, TypeError):
         raise ValueError(failure) from None
 
 
 def existing_install(repair=False, adopt=False):
-    beneath(GAME, HOME)
+    assert_storage_active(force=True)
+    beneath(GAME, storage_root())
     if not GAME.exists():
         return None
     if not GAME.is_dir():
@@ -381,6 +467,7 @@ def existing_install(repair=False, adopt=False):
     codex = GAME / ".codex-halo-native-install.json"
     if own.exists():
         value = read_marker(own)
+        check_storage_record(value)
         source = value.get("sourceCommit")
     elif codex.exists():
         value = read_marker(codex, "codex-halo-native-frame-20261005")
@@ -485,6 +572,7 @@ def os_release():
 
 
 def preflight(repair=False, adopt=False):
+    assert_storage_active(force=True)
     if pwd.getpwuid(os.getuid()).pw_name != "steamos" or pathlib.Path.home() != HOME:
         raise ValueError("Connect using the Frame's steamos account.")
     if platform.machine().lower() not in ("aarch64", "arm64"):
@@ -516,16 +604,16 @@ def preflight(repair=False, adopt=False):
     beneath(CACHE / "resources", CACHE).mkdir(exist_ok=True)
     beneath(CACHE / "resources/artwork", CACHE).mkdir(exist_ok=True)
     beneath(CACHE / "runs", CACHE).mkdir(exist_ok=True)
-    for name in ("remote_install.py", "build-native.sh", "steam_shortcut.py", "steam_live.py", "steam_notes.py", "frame-controls.patch",
+    for name in ("remote_install.py", "frame_storage.py", "build-native.sh", "steam_shortcut.py", "steam_live.py", "steam_notes.py", "frame-controls.patch",
                  "artwork/halo-ce-cover.jpg", "artwork/halo-ce-landscape.png", "artwork/halo-ce-hero.jpg",
                  "artwork/halo-ce-logo.png", "artwork/halo-ce-icon.png"):
         candidate = beneath(CACHE / "resources" / name, CACHE)
         if candidate.exists() and (not candidate.is_file() or candidate.stat().st_nlink != 1 or candidate.stat().st_uid != os.getuid()):
             raise ValueError("An installer resource path is not a private ordinary file.")
     existing = existing_install(repair, adopt)
-    free = shutil.disk_usage(HOME).free
+    free = shutil.disk_usage(storage_root()).free
     if (existing is None or repair or existing.get("needsUpgrade")) and free < MIN_FREE_BYTES:
-        raise ValueError("At least 12 GiB of free space is needed for the Xbox data and isolated build. Free space and retry.")
+        raise ValueError("At least 12 GiB of free space is needed on the selected storage for Xbox data and the isolated build. Free space and retry.")
     # Podman itself is unprivileged. Never use sudo or disable SteamOS read-only protection.
     podman = json.loads(command(["podman", "info", "--format", "json"]))
     if not podman.get("host", {}).get("security", {}).get("rootless", False):
@@ -534,7 +622,11 @@ def preflight(repair=False, adopt=False):
             "architecture": platform.machine(), "freeBytes": free, "existing": existing,
             "retainedUploadReuse": True,
             "pcVersionDetected": (HOME / "Games/HaloCEVR").is_dir(),
-            "steamOSVersion": system.get("VERSION_ID", "unknown")}
+            "steamOSVersion": system.get("VERSION_ID", "unknown"),
+            "storage": STORAGE_DESCRIPTOR,
+            "alternateInstalls": [item for item in storage_module().discover_storage(HOME)["destinations"]
+                                  if item["id"] != STORAGE_ID and item["installed"]],
+            "containerStorageNote": "Podman's image and temporary container storage may still use internal storage; only the selected game and build workspace use the SD card." if STORAGE_ID != "internal" else None}
 
 
 def preflight_uninstall():
@@ -543,22 +635,24 @@ def preflight_uninstall():
         raise ValueError("Connect using the Frame's steamos account.")
     if platform.machine().lower() not in ("aarch64", "arm64") or os_release().get("ID") != "steamos":
         raise ValueError("Uninstall supports the native game on ARM64 SteamOS Steam Frame only.")
-    if GAME != HOME / "Games/HaloCENativeVR":
-        raise ValueError("Uninstall is restricted to the standard native Halo game folder.")
+    assert_storage_active(force=True)
+    if GAME != storage_root() / "Games/HaloCENativeVR":
+        raise ValueError("Uninstall is restricted to the selected fixed native Halo game folder.")
     owned(CACHE)
     for relative in ("resources", "resources/artwork", "runs"):
         directory = beneath(CACHE / relative, CACHE)
         directory.mkdir(exist_ok=True)
         if not directory.is_dir() or directory.stat().st_uid != os.getuid():
             raise ValueError("An installer resource directory is not owned by this account.")
-    for relative in ("remote_install.py", "steam_shortcut.py", "steam_live.py", "steam_notes.py", "artwork/halo-ce-cover.jpg", "artwork/halo-ce-landscape.png",
+    for relative in ("remote_install.py", "frame_storage.py", "steam_shortcut.py", "steam_live.py", "steam_notes.py", "artwork/halo-ce-cover.jpg", "artwork/halo-ce-landscape.png",
                      "artwork/halo-ce-hero.jpg", "artwork/halo-ce-logo.png", "artwork/halo-ce-icon.png"):
         path = beneath(CACHE / "resources" / relative, CACHE)
         if path.exists():
             details = ordinary(path).stat()
             if details.st_uid != os.getuid() or details.st_nlink != 1:
                 raise ValueError("An uninstall helper resource is not a private ordinary file.")
-    return {"home": str(HOME), "cachePath": str(CACHE), "gamePath": str(GAME), "uninstallSupported": True}
+    return {"home": str(HOME), "cachePath": str(CACHE), "gamePath": str(GAME), "uninstallSupported": True,
+            "storage": STORAGE_DESCRIPTOR}
 
 
 def preflight_library():
@@ -577,10 +671,11 @@ def preflight_library():
 def prepare(value, use_existing_maps=False, repair=False, adopt=False):
     directory = run_dir(value)
     owned(directory)
+    metadata = read_marker(directory / MARKER)
+    check_storage_record(metadata, active_run=True)
     for relative in ("upload", "upload/maps", "stage"):
         path = beneath(directory / relative, directory)
         path.mkdir(exist_ok=True)
-    metadata = read_marker(directory / MARKER)
     if use_existing_maps:
         current = existing_install(repair, adopt)
         if not current or not current["mapsVerified"]:
@@ -590,6 +685,7 @@ def prepare(value, use_existing_maps=False, repair=False, adopt=False):
     metadata["mapsOrigin"] = "existing" if use_existing_maps else "upload"
     metadata["repair"] = repair
     metadata["adopt"] = adopt
+    metadata.update(storage_fields())
     (directory / MARKER).write_text(json.dumps(metadata, indent=2) + "\n")
     return {"runPath": str(directory), "uploadPath": str(directory / "upload")}
 
@@ -638,6 +734,7 @@ def retained_upload(value):
     if not directory.is_dir() or directory.stat().st_uid != os.getuid():
         raise ValueError("The retained upload run is not an owned directory.")
     marker = private_json(directory / MARKER, directory)
+    check_storage_record(marker)
     if (marker.get("owner") != OWNER or marker.get("sourceCommit") != SOURCE_COMMIT
             or marker.get("mapsOrigin") != "upload"):
         raise ValueError("The retained upload has no recognized original-upload marker.")
@@ -676,6 +773,7 @@ def reuse_upload(value):
     """Reuse verified local data from an older attempt, without changing it."""
     directory = run_dir(value)
     metadata = read_marker(directory / MARKER)
+    check_storage_record(metadata, active_run=True)
     if metadata.get("mapsOrigin") != "upload":
         raise ValueError("Only a fresh upload run can select retained Xbox data.")
     upload = beneath(directory / "upload", directory)
@@ -685,6 +783,7 @@ def reuse_upload(value):
     manifest = private_json(upload / "xbox-data-manifest.json", upload)
     selected = map_identity(manifest)
     def check_cancelled():
+        assert_storage_active()
         if (directory / "cancelled").exists():
             raise RuntimeError("Installation cancelled. Existing games and saves were kept.")
     check_cancelled()
@@ -779,7 +878,7 @@ def build_container_args(value, directory, payload=None):
             "--userns=keep-id:uid=0,gid=0", "--user=0:0",
             "--security-opt=no-new-privileges",
             "--volume", str(directory) + ":/build:rw", "--workdir", "/build",
-            "docker.io/library/ubuntu:22.04",
+            BUILD_CONTAINER_IMAGE,
             *(payload or ["/bin/bash", "/build/build-native.sh"])]
 
 
@@ -983,6 +1082,7 @@ class BuildLogMonitor:
 def build(value, repair=False, adopt=False):
     directory = run_dir(value)
     metadata = read_marker(directory / MARKER)
+    check_storage_record(metadata, active_run=True)
     existing = existing_install(repair, adopt)
     if existing and not repair:
         if existing.get("needsUpgrade"):
@@ -990,6 +1090,7 @@ def build(value, repair=False, adopt=False):
         return {"reused": True}
     upload = directory / "upload"
     def check_cancelled():
+        assert_storage_active()
         if (directory / "cancelled").exists():
             raise RuntimeError("Build cancelled. Existing games and saves were kept.")
     check_cancelled()
@@ -1026,22 +1127,36 @@ def build(value, repair=False, adopt=False):
         monitor = BuildLogMonitor(directory)
         try:
             while process.poll() is None:
+                check_cancelled()
                 monitor.poll()
-                if (directory / "cancelled").exists():
-                    cancel(value)
-                    stop_build_process(process)
-                    raise RuntimeError("Build cancelled. Existing games and saves were kept.")
                 monitor.heartbeat()
                 time.sleep(0.25)
-        except BaseException:
+            assert_storage_active(force=True)
+        except BaseException as error:
             try:
-                cancel(value)
+                try:
+                    cancel(value)
+                except (OSError, ValueError):
+                    # The selected mount can disappear with its journal. Its
+                    # run/owner labels still authorize stopping this container.
+                    stop_owned_container(value)
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as stop_error:
+                error.add_note("Stopping the owned container could not be confirmed: " + str(stop_error)[:500])
             finally:
-                stop_build_process(process)
+                try:
+                    stop_build_process(process)
+                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as stop_error:
+                    error.add_note("Reaping the supervised build process could not be confirmed: " + str(stop_error)[:500])
             raise
         finally:
-            output.flush()
-            monitor.drain()
+            try:
+                assert_storage_active(force=True)
+            except (OSError, ValueError):
+                # Do not open logs through a changed or absent mount.
+                pass
+            else:
+                output.flush()
+                monitor.drain()
     if process.returncode:
         stream, details = open_build_log(log, directory)
         with stream:
@@ -1082,19 +1197,24 @@ def stop_build_process(process):
         process.wait(timeout=10)
 
 
-def cancel(value):
-    directory = run_dir(value)
-    read_marker(directory / MARKER)
-    (directory / "cancelled").touch()
+def stop_owned_container(value):
+    """Stop this installer's labeled run without depending on its filesystem."""
+    run_id(value)
     container = "halo-frame-installer-" + value
     check = subprocess.run(["podman", "container", "inspect", container],
                            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15)
     if check.returncode == 0:
-        info = json.loads(check.stdout)[0]
-        labels = info.get("Config", {}).get("Labels", {})
-        if labels.get("org.halo-frame-installer.owner") != OWNER or labels.get("org.halo-frame-installer.run") != value:
+        if len(check.stdout) > 64 * 1024:
+            raise ValueError("The container ownership response exceeds supported bounds.")
+        inspected = json.loads(check.stdout)
+        if not isinstance(inspected, list) or len(inspected) != 1 or not isinstance(inspected[0], dict):
+            raise ValueError("The container ownership response is invalid.")
+        config = inspected[0].get("Config")
+        labels = config.get("Labels") if isinstance(config, dict) else None
+        if (not isinstance(labels, dict) or labels.get("org.halo-frame-installer.owner") != OWNER
+                or labels.get("org.halo-frame-installer.run") != value):
             raise ValueError("Refusing to stop an unowned container.")
-        command(["podman", "stop", "--time", "10", container])
+        command(["podman", "stop", "--time", "10", container], timeout=20)
     return {"cancelled": True}
 
 
@@ -1107,6 +1227,13 @@ def parse_config(original):
     if any(not isinstance(settings.get(section, {}), dict) for section in ("vr", "update", "network", "paths")):
         raise ValueError("The game configuration has an unsupported setting shape. Your original configuration was kept.")
     return settings
+
+
+def cancel(value):
+    directory = run_dir(value)
+    read_marker(directory / MARKER)
+    (directory / "cancelled").touch()
+    return stop_owned_container(value)
 
 
 def merge_config(original, migrate=False):
@@ -1169,7 +1296,7 @@ def repair_program_files(stage, directory, names, check_cancelled, recovery=None
     game_closed()
     backup = beneath(directory / "previous-program-files", directory)
     backup.mkdir(exist_ok=False)
-    (backup / ".backup-owner.json").write_text(json.dumps({"owner": OWNER, "sourceCommit": SOURCE_COMMIT}) + "\n")
+    (backup / ".backup-owner.json").write_text(json.dumps({"owner": OWNER, "sourceCommit": SOURCE_COMMIT, **storage_fields()}) + "\n")
     snapshot = []
     for relative in names:
         check_cancelled()
@@ -1194,6 +1321,7 @@ def repair_program_files(stage, directory, names, check_cancelled, recovery=None
             raise ValueError("The interrupted installation changed while preparing its recovery backup.")
         source = beneath(pathlib.Path(recovery["originPath"]), CACHE)
         origin = beneath(backup / "upgrade-origin", backup)
+        assert_storage_active(force=True)
         origin.mkdir(mode=0o700, exist_ok=False)
         for name, expected in recovery["originFiles"].items():
             check_cancelled()
@@ -1205,11 +1333,13 @@ def repair_program_files(stage, directory, names, check_cancelled, recovery=None
             if digest(ordinary(original)) != expected:
                 raise ValueError("The original upgrade backup changed during recovery.")
             target = beneath(origin / name, origin)
+            assert_storage_active(force=True)
             shutil.copy2(original, target)
             if digest(ordinary(target)) != expected:
                 raise ValueError("The original upgrade backup failed copy verification.")
-        journal = {"owner": OWNER, "sourceCommit": SOURCE_COMMIT,
+        journal = {"owner": OWNER, "sourceCommit": SOURCE_COMMIT, **storage_fields(),
                    "previousFiles": recovery["currentFiles"], "originFiles": recovery["originFiles"]}
+        assert_storage_active(force=True)
         with (backup / ".upgrade-recovery.json").open("x", encoding="utf-8") as stream:
             stream.write(json.dumps(journal) + "\n")
             stream.flush()
@@ -1223,6 +1353,7 @@ def repair_program_files(stage, directory, names, check_cancelled, recovery=None
             actual = digest(ordinary(target)) if target.exists() else None
             if actual != old_hash:
                 raise ValueError("The existing game changed during repair: " + relative)
+            assert_storage_active(force=True)
             target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(stage / relative, target)
             applied.append((relative, old_hash, new_hash))
@@ -1231,15 +1362,20 @@ def repair_program_files(stage, directory, names, check_cancelled, recovery=None
                 raise ValueError("A repaired program file failed verification: " + relative)
         check_cancelled()
     except BaseException as error:
+        try:
+            assert_storage_active(force=True)
+        except (OSError, ValueError):
+            raise RuntimeError("Repair stopped because the selected SD mount changed. Restoration was not attempted on that mount; original program backups remain in " + str(backup) + ".") from error
         failures = []
         for relative, old_hash, _ in reversed(applied):
             target = GAME / relative
             try:
+                assert_storage_active(force=True)
                 if old_hash is None:
                     target.unlink()
                 else:
                     os.replace(backup / relative, target)
-            except OSError:
+            except (OSError, ValueError):
                 failures.append(relative)
         if failures:
             raise RuntimeError("Repair failed and some files could not be restored: " + ", ".join(failures) + ". Original files remain in " + str(backup)) from error
@@ -1250,7 +1386,9 @@ def repair_program_files(stage, directory, names, check_cancelled, recovery=None
 def finalize(value, repair=False, adopt=False):
     directory = run_dir(value)
     run_metadata = read_marker(directory / MARKER)
+    check_storage_record(run_metadata, active_run=True)
     def check_cancelled():
+        assert_storage_active()
         if (directory / "cancelled").exists():
             raise ValueError("This run was cancelled. Existing games and saves were kept.")
     check_cancelled()
@@ -1327,12 +1465,12 @@ def finalize(value, repair=False, adopt=False):
     libs = command(["ldd", str(stage / "halo")])
     if "not found" in libs:
         raise ValueError("A required native runtime library is missing:\n" + libs)
-    metadata = {"owner": OWNER, "version": 1, "sourceCommit": SOURCE_COMMIT,
+    metadata = {"owner": OWNER, "version": 1, "sourceCommit": SOURCE_COMMIT, **storage_fields(),
                 "sourceUrl": SOURCE_URL, "architecture": "native ARM64 ELF64 / ILP32 AArch64 guest",
                 "files": {name: digest(stage / name) for name in ("halo", "libSDL3.so.0", "brokers.txt", "frame-controls.patch")},
                 "maps": {"files": 24, "bytes": manifest["totalBytes"]},
                 "controls": "Head-directed walking, Xbox buttons, motion aim, LB grenade change, RB flashlight",
-                "installerVersion": "1.4.1", "networkProtocol": 17, "saveRoot": str(save_root()),
+                "installerVersion": "1.4.2", "networkProtocol": 17, "saveRoot": str(save_root()),
                 "previousSavePaths": existing.get("previousSavePaths", []) if existing else [],
                 "buildLog": str(directory / "native-build.log")}
     (stage / MARKER).write_text(json.dumps(metadata, indent=2) + "\n")
@@ -1352,12 +1490,13 @@ def finalize(value, repair=False, adopt=False):
         return {"gamePath": str(GAME), "reused": False, "repaired": True,
                 "sourceCommit": SOURCE_COMMIT, "backupPath": backup, "mapsReinstalled": not reuse_maps,
                 "previousSavePaths": existing.get("previousSavePaths", [])}
-    beneath(GAME.parent, HOME).mkdir(exist_ok=True)
+    beneath(GAME.parent, storage_root()).mkdir(exist_ok=True)
     if GAME.exists() or GAME.is_symlink():
         raise ValueError("The game destination appeared during installation. It was not modified.")
     if stage.stat().st_dev != GAME.parent.stat().st_dev:
         raise ValueError("Game and staging must be on the same filesystem for atomic installation.")
     check_cancelled()
+    assert_storage_active(force=True)
     rename_noreplace(stage, GAME)
     return {"gamePath": str(GAME), "reused": False, "sourceCommit": SOURCE_COMMIT}
 
@@ -1407,7 +1546,8 @@ def no_active_build():
 
 
 def uninstall_identity():
-    beneath(GAME, HOME)
+    assert_storage_active(force=True)
+    beneath(GAME, storage_root())
     if not GAME.exists():
         return None
     if not GAME.is_dir() or GAME.stat().st_uid != os.getuid():
@@ -1416,6 +1556,7 @@ def uninstall_identity():
         path = GAME / name
         if path.exists() or path.is_symlink():
             metadata = private_json(path, GAME)
+            check_storage_record(metadata)
             if metadata.get("owner") != owner:
                 raise ValueError("The native game folder belongs to another application. It was kept.")
             return metadata
@@ -1428,7 +1569,8 @@ def uninstall_signature(details):
 
 def uninstall_root_identity(directory):
     """The directory's identity survives its rename and partial file removal."""
-    details = beneath(directory, HOME).lstat()
+    assert_storage_active(force=True)
+    details = beneath(directory, storage_root()).lstat()
     if not stat.S_ISDIR(details.st_mode) or details.st_uid != os.getuid():
         raise ValueError("The uninstall folder is not an ordinary owned directory.")
     return {"device": details.st_dev, "inode": details.st_ino, "uid": details.st_uid}
@@ -1439,6 +1581,7 @@ def write_uninstall_record(directory, metadata, owner=OWNER):
     if metadata.get("owner") != owner:
         raise ValueError("The uninstall record has an invalid owner.")
     uninstall_root_identity(directory)
+    metadata.update(storage_fields())
     target = beneath(directory / MARKER, directory)
     if target.exists():
         current = private_json(target, directory)
@@ -1480,7 +1623,8 @@ def uninstall_mounts():
 
 def uninstall_inventory(directory):
     """Validate the whole owned tree before deletion; never follow a link or mount."""
-    beneath(directory, HOME)
+    assert_storage_active(force=True)
+    beneath(directory, storage_root())
     root = directory.lstat()
     if not stat.S_ISDIR(root.st_mode) or root.st_uid != os.getuid() or os.path.ismount(directory):
         raise ValueError("Uninstall requires an ordinary owned folder, not a link or mount.")
@@ -1561,17 +1705,20 @@ def uninstall_save_files(inventory):
 
 
 def copy_uninstall_save(relative, target, signature):
+    assert_storage_active(force=True)
     source = ordinary(beneath(GAME / relative, GAME))
     descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     with os.fdopen(descriptor, "rb") as stream:
         details = os.fstat(stream.fileno())
         if details.st_nlink != 1 or uninstall_signature(details) != signature:
             raise ValueError("A save file changed while preparing its backup. Game files were kept.")
+        assert_storage_active(force=True)
         target.parent.mkdir(parents=True, exist_ok=True)
         checksum = hashlib.sha256()
         copied = 0
         with target.open("xb") as output:
             while True:
+                assert_storage_active()
                 block = stream.read(min(1024 * 1024, details.st_size - copied + 1))
                 if not block:
                     break
@@ -1582,6 +1729,7 @@ def copy_uninstall_save(relative, target, signature):
                 checksum.update(block)
             output.flush()
             os.fsync(output.fileno())
+        assert_storage_active(force=True)
         if target.stat().st_size != details.st_size or uninstall_signature(os.fstat(stream.fileno())) != signature:
             raise ValueError("A save backup could not be verified. Game files were kept.")
         target.chmod(details.st_mode & 0o777)
@@ -1594,12 +1742,14 @@ def copy_uninstall_save(relative, target, signature):
 
 def remove_uninstall_tree(directory, inventory, completed, total):
     """Unlink only validated paths, counting actual removal work for the UI."""
+    assert_storage_active(force=True)
     files = [relative for relative, (kind, _) in inventory.items() if kind == "file"]
     markers = [relative for relative in files if relative in (MARKER, ".codex-halo-native-install.json")]
     files = sorted(relative for relative in files if relative not in markers)
     directories = sorted((relative for relative, (kind, _) in inventory.items() if kind == "directory"),
                          key=lambda relative: len(pathlib.Path(relative).parts), reverse=True)
     for relative in files + directories + markers:
+        assert_storage_active()
         path = beneath(directory / relative, directory)
         details = path.lstat()
         kind, signature = inventory[relative]
@@ -1615,14 +1765,22 @@ def remove_uninstall_tree(directory, inventory, completed, total):
         if total:
             progress("uninstall", f"Uninstalling native Halo: {completed[0]:,} of {total:,} file tasks.",
                      completed[0] * 100 // total)
+    assert_storage_active(force=True)
     directory.rmdir()
     completed[0] += 1
 
 
-def same_uninstall_root(expected, directory):
+def same_uninstall_root(expected, directory, metadata=None):
+    actual = uninstall_root_identity(directory)
+    comparable = dict(expected) if isinstance(expected, dict) else expected
+    if STORAGE_ID != "internal" and isinstance(comparable, dict):
+        # Require the persistent CID/filesystem journal before allowing a
+        # device number to change when that same card has been remounted.
+        check_storage_record(metadata or {})
+        comparable["device"] = actual["device"]
     if (not isinstance(expected, dict) or set(expected) != {"device", "inode", "uid"}
             or any(type(value) is not int or value < 0 for value in expected.values())
-            or expected != uninstall_root_identity(directory)):
+            or comparable != actual):
         raise ValueError("The quarantine directory does not match its recorded uninstall identity.")
 
 
@@ -1632,18 +1790,21 @@ def uninstall_quarantine_record(path, identifier):
     directory = beneath(CACHE / "runs" / identifier, CACHE)
     uninstall_root_identity(directory)
     metadata = private_json(directory / MARKER, directory)
+    check_storage_record(metadata)
     if (metadata.get("owner") != OWNER or metadata.get("operation") != "uninstall"
             or metadata.get("state") not in ("quarantining", "removing")
             or metadata.get("quarantinePath") != str(path)):
         raise ValueError("No matching private interrupted-uninstall record was found.")
     root = metadata.get("quarantineRoot")
     if root is not None:
-        same_uninstall_root(root, path)
+        same_uninstall_root(root, path, metadata)
     recognized = False
     for name, owner in ((MARKER, OWNER), (".codex-halo-native-install.json", "codex-halo-native-frame-20261005")):
         marker = path / name
         if marker.exists() or marker.is_symlink():
-            if private_json(marker, path).get("owner") != owner:
+            value = private_json(marker, path)
+            check_storage_record(value)
+            if value.get("owner") != owner:
                 raise ValueError("A quarantine marker belongs to another application.")
             recognized = True
     # Older versions wrote the exact path and operation only after the rename.
@@ -1663,9 +1824,10 @@ def verified_uninstall_backup(identifier, metadata):
     if not isinstance(location, str) or location != str(saved):
         raise ValueError("The uninstall save backup path does not match its operation.")
     if metadata.get("savedBackupRoot") is not None:
-        same_uninstall_root(metadata["savedBackupRoot"], saved)
+        same_uninstall_root(metadata["savedBackupRoot"], saved, metadata)
     inventory = uninstall_inventory(saved)
     value = private_json(saved / MARKER, saved)
+    check_storage_record(value)
     if value.get("owner") != OWNER + "-save-backup" or value.get("gamePath") != str(GAME):
         raise ValueError("The recorded save backup has no valid native-game ownership record.")
     actual = {relative for relative, (kind, _) in inventory.items() if kind == "file" and relative != MARKER}
@@ -1715,7 +1877,7 @@ def recover_interrupted_uninstall():
     prefix = ".HaloCENativeVR-uninstall-"
     candidates = []
     # Avoid sorting/materializing an unbounded glob of user-controlled entries.
-    beneath(GAME.parent, HOME)
+    beneath(GAME.parent, storage_root())
     if not GAME.parent.exists():
         return recovery
     with os.scandir(GAME.parent) as entries:
@@ -1810,8 +1972,8 @@ def uninstall(value, close_steam=False, keep_saves=False):
     inventory = uninstall_inventory(GAME) if identity else {}
     save_files, external = uninstall_save_files(inventory) if identity and keep_saves else ([], [])
     quarantine = GAME.parent / (".HaloCENativeVR-uninstall-" + value)
-    saved = beneath(GAME.parent / ("HaloCENativeVR-saves-" + value), HOME)
-    staging = beneath(GAME.parent / (".HaloCENativeVR-saves-" + value + ".tmp"), HOME)
+    saved = beneath(GAME.parent / ("HaloCENativeVR-saves-" + value), storage_root())
+    staging = beneath(GAME.parent / (".HaloCENativeVR-saves-" + value + ".tmp"), storage_root())
     if staging.exists() or staging.is_symlink():
         raise ValueError("An unfinished save backup already exists and was kept: " + str(staging)
                          + ". Use a fresh uninstall run.")
@@ -1833,6 +1995,7 @@ def uninstall(value, close_steam=False, keep_saves=False):
     progress("uninstall", "Preparing to remove the managed native game and its Steam shortcut...", 0)
     try:
         if save_files:
+            assert_storage_active(force=True)
             staging.mkdir(mode=0o700, exist_ok=False)
             staged = True
             backup_metadata = {"owner": OWNER + "-save-backup", "gamePath": str(GAME),
@@ -1886,9 +2049,11 @@ def uninstall(value, close_steam=False, keep_saves=False):
                          "keepSaves": keep_saves, "state": "quarantining"})
         write_uninstall_record(directory, metadata)
         if staged:
+            assert_storage_active(force=True)
             rename_noreplace(staging, saved)
             staged, saved_path = False, str(saved)
             verified_uninstall_backup(value, metadata)
+        assert_storage_active(force=True)
         rename_noreplace(GAME, quarantine)
         renamed = True
         metadata["state"] = "removing"
@@ -1912,6 +2077,7 @@ def uninstall(value, close_steam=False, keep_saves=False):
             removals = completed[0] - len(save_files)
             if removals == 0:
                 try:
+                    assert_storage_active(force=True)
                     rename_noreplace(quarantine, GAME)
                     renamed = False
                 except (OSError, ValueError, RuntimeError):
@@ -1931,16 +2097,21 @@ def uninstall(value, close_steam=False, keep_saves=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("step", choices=("preflight", "preflight-uninstall", "preflight-library", "prepare", "reuse-upload", "build", "finalize", "cancel", "shortcut", "uninstall"))
+    parser.add_argument("step", choices=("storage", "preflight", "preflight-uninstall", "preflight-library", "prepare", "reuse-upload", "build", "finalize", "cancel", "shortcut", "uninstall"))
     parser.add_argument("--run-id")
     parser.add_argument("--close-steam", action="store_true")
     parser.add_argument("--repair", action="store_true")
     parser.add_argument("--adopt-existing", action="store_true")
     parser.add_argument("--use-existing-maps", action="store_true")
     parser.add_argument("--keep-saves", action="store_true")
+    parser.add_argument("--storage-id", default="internal")
     args = parser.parse_args()
+    if args.step == "storage":
+        storage_module().main()
+        return
     if args.step in ("prepare", "reuse-upload", "build", "finalize", "cancel", "uninstall") and args.run_id is None:
         parser.error("--run-id is required")
+    select_storage(args.storage_id)
     functions = {"preflight": lambda: preflight(args.repair, args.adopt_existing),
                  "preflight-uninstall": preflight_uninstall,
                  "preflight-library": preflight_library,

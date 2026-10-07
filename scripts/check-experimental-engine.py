@@ -33,7 +33,8 @@ PATCH_FILES = frozenset((
     "source/units/units.c", "source/units/units.h",
     "source/hs/hs_library_external.c", "port/linux/arm64/host_vr.c",
     "tools/test_vr_tutorial.py", "tools/test_vr_tracking.py", "tools/test_vr_tutorial_buttons.py",
-    "source/objects/object_lights.c", "tools/test_vr_flashlight.py",
+    "source/objects/object_lights.c", "tools/test_vr_flashlight.py", "tools/test_vr_menu.py",
+    "tools/android_build.py", "tools/test_build_sources.py",
 ))
 
 

@@ -18,6 +18,11 @@ RESOURCES = Path(__file__).resolve().parents[1] / "resources"
 
 
 def load_resource(name):
+    if "frame_storage" not in sys.modules:
+        storage_spec = importlib.util.spec_from_file_location("frame_storage", RESOURCES / "frame_storage.py")
+        storage = importlib.util.module_from_spec(storage_spec)
+        sys.modules[storage_spec.name] = storage
+        storage_spec.loader.exec_module(storage)
     spec = importlib.util.spec_from_file_location("resource_" + name, RESOURCES / (name + ".py"))
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -89,7 +94,7 @@ def test_shortcut_rejects_unknown_types_or_duplicate_fields():
 def test_shortcut_wont_change_live_steam_files(tmp_path, monkeypatch):
     steam = load_resource("steam_shortcut")
     monkeypatch.setattr(steam, "steam_running", lambda: True)
-    result = steam.add_native_shortcut(tmp_path, tmp_path / "game")
+    result = steam.add_native_shortcut(tmp_path, tmp_path / "Games/HaloCENativeVR")
     assert result["status"] == "manual"
     assert list(tmp_path.iterdir()) == []
 
@@ -113,7 +118,7 @@ def test_legacy_shutdown_request_leaves_running_steam_and_games_untouched(tmp_pa
     shutdown, restart = Mock(), Mock()
     monkeypatch.setattr(subprocess, "run", shutdown)
     monkeypatch.setattr(subprocess, "Popen", restart)
-    result = steam.add_native_shortcut(tmp_path, tmp_path / "game", close_steam=True)
+    result = steam.add_native_shortcut(tmp_path, tmp_path / "Games/HaloCENativeVR", close_steam=True)
     assert result["status"] == "manual"
     shutdown.assert_not_called()
     restart.assert_not_called()
@@ -129,7 +134,7 @@ def test_closed_steam_registration_does_not_start_a_new_client(tmp_path, monkeyp
     restart = Mock()
     monkeypatch.setattr(subprocess, "run", normal_shutdown)
     monkeypatch.setattr(subprocess, "Popen", restart)
-    assert steam.add_native_shortcut(tmp_path, tmp_path / "game", close_steam=True)["status"] == "added"
+    assert steam.add_native_shortcut(tmp_path, tmp_path / "Games/HaloCENativeVR", close_steam=True)["status"] == "added"
     normal_shutdown.assert_not_called()
     restart.assert_not_called()
 
@@ -909,6 +914,8 @@ def native_install(remote, *, source=None, save_path=None):
         + '\nsaves = ' + json.dumps(str(save_path)) + '\n[audio]\nvolume = 0.3\n[vr]\nturn = "snap"\n')
     marker = {"owner": remote.OWNER, "sourceCommit": source or remote.LEGACY_SOURCE_COMMIT,
               "files": {name: remote.digest(game / name) for name in ("halo", "libSDL3.so.0")}}
+    if remote.STORAGE_DESCRIPTOR is not None:
+        marker.update(remote.storage_fields())
     (game / remote.MARKER).write_text(json.dumps(marker))
     return manifest, save_path
 
@@ -959,16 +966,21 @@ def hard_exit_finalizer(remote, identifier):
     metadata["repair"] = True
     (directory / remote.MARKER).write_text(json.dumps(metadata))
     script = '''
-import importlib.util, os, pathlib, sys, types
+import importlib.util, json, os, pathlib, sys, types
 if sys.platform == "win32":
     sys.modules["pwd"] = types.SimpleNamespace()
 spec = importlib.util.spec_from_file_location("scratch_remote", sys.argv[1])
 remote = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(remote)
 remote.HOME = pathlib.Path(sys.argv[2])
-remote.GAME = remote.HOME / "Games/HaloCENativeVR"
-remote.CACHE = remote.HOME / "cache"
+remote.GAME = pathlib.Path(sys.argv[4])
+remote.CACHE = pathlib.Path(sys.argv[5])
 remote.os.getuid = lambda: remote.HOME.stat().st_uid
+descriptor = json.loads(sys.argv[6])
+if descriptor is not None:
+    remote.STORAGE_ID = descriptor["id"]
+    remote.STORAGE_DESCRIPTOR = descriptor
+    remote.storage_module().resolve_storage = lambda identifier, home: descriptor
 remote.game_closed = lambda: None
 remote.command = lambda *args, **kwargs: "native libraries resolved"
 marker = remote.CACHE / "runs" / sys.argv[3] / "stage" / remote.MARKER
@@ -980,7 +992,8 @@ def interrupt(source, target):
 remote.os.replace = interrupt
 remote.finalize(sys.argv[3], repair=True)
 '''
-    result = subprocess.run([sys.executable, "-c", script, remote.__file__, str(remote.HOME), identifier],
+    result = subprocess.run([sys.executable, "-c", script, remote.__file__, str(remote.HOME), identifier,
+                             str(remote.GAME), str(remote.CACHE), json.dumps(remote.STORAGE_DESCRIPTOR)],
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 72, result.stdout + result.stderr
     return directory
@@ -1201,7 +1214,7 @@ def test_verified_stable_upgrade_keeps_old_checkpoints_and_backs_up_config(remot
     assert settings["audio"]["volume"] == 0.3 and settings["vr"]["turn"] == "snap"
     assert remote.save_root().is_dir() and not any(remote.save_root().iterdir())
     marker = remote.read_marker(remote.GAME / remote.MARKER)
-    assert marker["installerVersion"] == "1.4.1" and marker["networkProtocol"] == 17
+    assert marker["installerVersion"] == "1.4.2" and marker["networkProtocol"] == 17
     assert marker["saveRoot"] == str(remote.save_root()) and "experimental" not in marker
     assert not remote.existing_install()["needsUpgrade"]
     # A later Repair preserves both generations and the former custom location.

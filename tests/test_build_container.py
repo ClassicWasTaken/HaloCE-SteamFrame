@@ -85,7 +85,8 @@ def test_build_launches_package_manager_as_container_root_with_host_isolation(tm
     assert argv.count("--volume") == 1
     assert argv[argv.index("--volume") + 1] == str(directory) + ":/build:rw"
     assert argv[argv.index("--workdir") + 1] == "/build"
-    assert argv[-3:] == ["docker.io/library/ubuntu:22.04", "/bin/bash", "/build/build-native.sh"]
+    assert argv[-3:] == [remote.BUILD_CONTAINER_IMAGE, "/bin/bash", "/build/build-native.sh"]
+    assert remote.BUILD_CONTAINER_IMAGE.startswith("docker.io/library/ubuntu:22.04@sha256:")
     assert kwargs["start_new_session"] is True
     assert not kwargs.get("shell", False)
     assert not any(option in argv for option in (

@@ -4,7 +4,7 @@ from unittest.mock import Mock
 import paramiko
 import pytest
 
-from halo_frame_installer.ssh import CancelledError, Settings, SSHConnection, SSHError, _VerifyHost, fingerprint, validate_host
+from halo_frame_installer.ssh import CancelledError, RemoteTimeoutError, Settings, SSHConnection, SSHError, _VerifyHost, fingerprint, validate_host
 
 
 @pytest.mark.parametrize("host", ["192.168.1.12", "frame.local", "frame", "::1"])
@@ -409,7 +409,7 @@ def test_silent_exec_handshake_is_bounded_by_a_watchdog(monkeypatch):
     connection = SSHConnection(Settings('frame', 'private'))
     connection.handshake_grace = 0.05
     started = time_module.monotonic()
-    with pytest.raises(SSHError, match='could not be started'):
+    with pytest.raises(RemoteTimeoutError, match='handshake timed out'):
         connection.run(['python3', 'helper.py'], timeout=0.5)
     assert time_module.monotonic() - started < 5  # unbounded waits defeat this without the watchdog
 
@@ -665,7 +665,8 @@ def test_real_silent_handshake_stops_on_deadline_or_cancel(silent_paramiko_sessi
     recovery = Mock(side_effect=assert_no_handshake_watchdog)
     started = time.monotonic()
     try:
-        with pytest.raises(CancelledError if cancelled else SSHError) as error:
+        expected = CancelledError if cancelled else RemoteTimeoutError if stage == 'exec' else SSHError
+        with pytest.raises(expected) as error:
             if stage == 'exec':
                 connection.run(['never-executed'], cancel_event=cancel,
                                timeout=30 if cancelled else 0.1, on_cancel=recovery)
@@ -675,7 +676,7 @@ def test_real_silent_handshake_stops_on_deadline_or_cancel(silent_paramiko_sessi
         assert requested.is_set()
         assert not connection.is_active()
         assert 'private' not in str(error.value)
-        if stage == 'exec' and cancelled:
+        if stage == 'exec':
             recovery.assert_called_once()
         else:
             recovery.assert_not_called()
@@ -684,3 +685,77 @@ def test_real_silent_handshake_stops_on_deadline_or_cancel(silent_paramiko_sessi
         if notifier is not None:
             notifier.join(timeout=2)
         connection.close()
+
+
+@pytest.mark.parametrize('acknowledged', [False, True])
+@pytest.mark.parametrize('recovery_fails', [False, True])
+def test_exec_watchdog_timeout_preserves_uncertain_removal_after_retirement(monkeypatch, acknowledged, recovery_fails):
+    import time
+    original, replacement, client, channel = Mock(), Mock(), Mock(), Mock()
+    closing, closed = threading.Event(), threading.Event()
+    client.get_transport.return_value = original
+
+    def close():
+        closing.set()
+        time.sleep(0.025)
+        closed.set()
+
+    def stalled_exec(*args, **kwargs):
+        assert closing.wait(2)
+        client.get_transport.return_value = replacement
+        if acknowledged:
+            # An acknowledgement racing the deadline must not begin streaming
+            # from the closed transport or lose its timeout classification.
+            return Mock(), Mock(channel=channel), Mock()
+        raise EOFError('private')
+
+    def recover():
+        assert closed.is_set()
+        assert_no_handshake_watchdog()
+        replacement.close.assert_not_called()
+        if recovery_fails:
+            raise paramiko.SSHException('private recovery failure')
+
+    original.close.side_effect = close
+    client.exec_command.side_effect = stalled_exec
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    connection = SSHConnection(Settings('frame', 'private'))
+    connection.handshake_grace = 0
+    recovery = Mock(side_effect=recover)
+    message = 'Removal may be incomplete; check the saved backup and activity log before retrying.'
+    with pytest.raises(RemoteTimeoutError) as error:
+        connection.run(['python3', 'helper.py', 'uninstall'], timeout=0.05,
+                       timeout_message=message, on_cancel=recovery)
+    assert str(error.value) == message and 'private' not in str(error.value)
+    assert error.value.__suppress_context__ and error.value.__cause__ is None
+    recovery.assert_called_once()
+    original.close.assert_called_once()
+    replacement.close.assert_not_called()
+    channel.recv.assert_not_called()
+    assert not connection._command_channels
+    assert_no_handshake_watchdog()
+
+
+def test_cancel_at_watchdog_deadline_remains_cancellation_after_retirement(monkeypatch):
+    client, transport = Mock(), Mock()
+    release = threading.Event()
+    cancel = threading.Event()
+    client.get_transport.return_value = transport
+    def close():
+        cancel.set()
+        release.set()
+    def stalled_exec(*args, **kwargs):
+        assert release.wait(2)
+        raise EOFError('private')
+    transport.close.side_effect = close
+    client.exec_command.side_effect = stalled_exec
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    connection = SSHConnection(Settings('frame', 'private'))
+    connection.handshake_grace = 0
+    recovery = Mock(side_effect=assert_no_handshake_watchdog)
+    with pytest.raises(CancelledError) as error:
+        connection.run(['helper'], timeout=0.05, cancel_event=cancel, on_cancel=recovery,
+                       timeout_message='An expired deadline must not replace this cancellation.')
+    assert error.value.requires_attention is False
+    recovery.assert_called_once()
+    assert_no_handshake_watchdog()

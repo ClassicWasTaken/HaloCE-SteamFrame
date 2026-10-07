@@ -17,6 +17,8 @@ import urllib.parse
 import urllib.request
 import zlib
 
+from frame_storage import validate_game_path
+
 MAX_BYTES = 8 * 1024 * 1024
 PORT = 8080
 TIMEOUT = 30
@@ -24,6 +26,7 @@ LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 HOME = Path("/home/steamos")
 GAME = HOME / "Games/HaloCENativeVR"
 NAME = "Halo: Combat Evolved VR (Native)"
+SD_NAME = "Halo: Combat Evolved VR (Native, SD card)"
 LAUNCH_OPTIONS = "SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=0 %command%"
 
 
@@ -241,12 +244,20 @@ class Client:
         self.ws.close()
 
 
-def native_spec(home, game, name, launch_options=LAUNCH_OPTIONS):
-    if (Path(home) != HOME or Path(game) != GAME or name != NAME or launch_options != LAUNCH_OPTIONS):
+def native_spec(home, game, name=None, launch_options=LAUNCH_OPTIONS):
+    if Path(home) != HOME or launch_options != LAUNCH_OPTIONS:
         raise LiveSteamError("The live client path is restricted to the managed native Halo installation.")
-    exe = str(GAME / "halo")
-    return {"name": NAME, "exe": exe, "directory": str(GAME), "launchOptions": LAUNCH_OPTIONS,
-            "candidateAppids": [zlib.crc32((value + NAME).encode()) | 0x80000000
+    try:
+        destination = validate_game_path(home, game)
+    except (OSError, ValueError) as error:
+        raise LiveSteamError("The live client path is restricted to a currently verified native Halo installation: " + str(error)) from error
+    expected_name = SD_NAME if destination["kind"] == "sd" else NAME
+    if name is not None and name != expected_name:
+        raise LiveSteamError("The live client shortcut name is restricted to its verified native Halo destination.")
+    game = Path(game)
+    exe = str(game / "halo")
+    return {"name": expected_name, "exe": exe, "directory": str(game), "launchOptions": LAUNCH_OPTIONS,
+            "candidateAppids": [zlib.crc32((value + expected_name).encode()) | 0x80000000
                                  for value in (exe, '"' + exe + '"')]}
 
 
@@ -409,6 +420,7 @@ def _library(home, game, name, operation, launch_options=LAUNCH_OPTIONS):
                 or verified.get("launchOptions") != LAUNCH_OPTIONS or verified.get("shortcutLaunchOptions") != LAUNCH_OPTIONS
                 or verified.get("vr") is not True or verified.get("compatibilityTool") != ""):
             raise LiveSteamError("Steam's native launch settings did not pass readback verification.")
+    value["name"] = spec["name"]
     return value
 
 
@@ -535,7 +547,7 @@ def _artwork_config(home, account_name):
 def _live_artwork(home, game, appid, sources=None):
     from steam_shortcut import (ARTWORK, ARTWORK_EXTENSIONS, ARTWORK_TYPES, ICON_NAME,
                                 ICON_SHA256, _artwork_file, _private_steam_directory)
-    spec = native_spec(home, game, NAME)
+    spec = native_spec(home, game)
     spec["appid"] = appid
     sources = Path(sources) if sources is not None else Path(__file__).resolve().parent / "artwork"
     _private_steam_directory(sources)
@@ -625,7 +637,7 @@ def _live_icon(home, game, appid, sources=None):
     from steam_shortcut import (ICON_NAME, ICON_SHA256, _artwork_file,
                                 _private_steam_directory, _publish_shortcut_icon,
                                 _shortcut_icon_field)
-    spec = native_spec(home, game, NAME)
+    spec = native_spec(home, game)
     spec["appid"] = appid
     spec["requestIcon"] = True
     source = Path(sources) if sources is not None else Path(__file__).resolve().parent / "artwork"
@@ -706,7 +718,7 @@ def _live_icon(home, game, appid, sources=None):
         return {"status": "added", "path": icon["path"]}
 
 
-def add_native(home, game, name=NAME, launch_options=LAUNCH_OPTIONS, artwork=None):
+def add_native(home, game, name=None, launch_options=LAUNCH_OPTIONS, artwork=None):
     value = _library(home, game, name, "add", launch_options)
     try:
         art_result = _live_artwork(home, game, value["appid"], artwork)
@@ -718,12 +730,12 @@ def add_native(home, game, name=NAME, launch_options=LAUNCH_OPTIONS, artwork=Non
     except (ImportError, OSError, ValueError, RuntimeError, UnicodeError) as error:
         art_result["icon"] = {"status": "manual", "reason": str(error),
                               "instructions": "Click Add to Steam again to retry the Halo shortcut icon."}
-    return {"status": "added", "libraryAdded": True, "appid": value["appid"], "name": NAME,
+    return {"status": "added", "libraryAdded": True, "appid": value["appid"], "name": value["name"],
             "unchanged": not value.get("created", False), "transport": "live-client",
             "artwork": art_result}
 
 
-def remove_native(home, game, name=NAME):
+def remove_native(home, game, name=None):
     value = _library(home, game, name, "remove")
-    return {"status": value["status"], "name": NAME, "transport": "live-client", "accountScope": "active-client",
+    return {"status": value["status"], "name": value["name"], "transport": "live-client", "accountScope": "active-client",
             **({"appid": value["appid"]} if "appid" in value else {})}

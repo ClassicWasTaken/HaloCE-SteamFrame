@@ -16,6 +16,10 @@ RESOURCES = Path(__file__).resolve().parents[1] / "resources"
 
 @pytest.fixture
 def steam(monkeypatch):
+    storage_spec = importlib.util.spec_from_file_location("frame_storage", RESOURCES / "frame_storage.py")
+    storage = importlib.util.module_from_spec(storage_spec)
+    monkeypatch.setitem(sys.modules, storage_spec.name, storage)
+    storage_spec.loader.exec_module(storage)
     spec = importlib.util.spec_from_file_location("steam_session_safety", RESOURCES / "steam_shortcut.py")
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
