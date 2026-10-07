@@ -2,6 +2,7 @@ import sys
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 import pytest
 
 WINDOWS_GUI = pytest.mark.skipif(sys.platform != 'win32', reason='Windows Tk packaging smoke test')
@@ -1387,7 +1388,8 @@ def test_current_inspection_failure_preserves_selection_and_readable_redacted_er
 
 @WINDOWS_GUI
 @pytest.mark.parametrize('folder', [False, True])
-def test_cancel_during_install_revalidation_stops_before_extraction_and_clears_credentials(app, monkeypatch, tmp_path, folder):
+@pytest.mark.parametrize('phase', ['validation', 'extraction'])
+def test_cancel_during_install_data_preparation_is_not_a_failure(app, monkeypatch, tmp_path, folder, phase):
     from halo_frame_installer import gui, install
     selected = tmp_path / ('maps' if folder else 'Halo.iso')
     if folder:
@@ -1405,15 +1407,25 @@ def test_cancel_during_install_revalidation_stops_before_extraction_and_clears_c
     def cancel_validation(path, *, cancel_event):
         assert cancel_event is app.cancel
         inspections.append(path)
-        # Model Cancel arriving as the worker starts its second validation.
-        cancel_event.set()
-        return inspect_source(path, cancel_event=cancel_event)
+        if phase == 'validation':
+            # Exercise the real cancellation check before reading game data.
+            cancel_event.set()
+            return inspect_source(path, cancel_event=cancel_event)
+        return SimpleNamespace(estimated_bytes=0)
 
     monkeypatch.setattr(app, '_settings', remember_settings)
     monkeypatch.setattr(gui, name, cancel_validation)
     monkeypatch.setattr(gui.threading, 'Thread', _ImmediateThread)
-    for action in ('extract_image', 'copy_maps'):
-        monkeypatch.setattr(gui, action, lambda *args, **kwargs: pytest.fail('Cancelled validation extracted maps.'))
+    if phase == 'validation':
+        for action in ('extract_image', 'copy_maps'):
+            monkeypatch.setattr(gui, action, lambda *args, **kwargs: pytest.fail('Cancelled validation extracted maps.'))
+    else:
+        action = 'copy_maps' if folder else 'extract_image'
+        extract_source = getattr(gui, action)
+        def cancel_extraction(*args, **kwargs):
+            kwargs['cancel_event'].set()
+            return extract_source(*args, **kwargs)
+        monkeypatch.setattr(gui, action, cancel_extraction)
     monkeypatch.setattr(install, 'run', lambda *args, **kwargs: pytest.fail('Cancelled validation began installation.'))
     app.source.set(str(selected))
     app.authorized.set(True)
@@ -1428,6 +1440,9 @@ def test_cancel_during_install_revalidation_stops_before_extraction_and_clears_c
     assert not app.password_to_redact
     assert app.source.get() == str(selected)
     assert 'cancelled' in '\n'.join(app.log_lines).lower()
+    assert app.phase.get() == 'Setup cancelled'
+    assert 'cancelled' in app.status.get().lower()
+    assert not app._test_dialogs
     assert 'offline-secret' not in '\n'.join(app.log_lines)
     assert float(app.progress['value']) == 0
     assert not _disabled(app.primary_button)
@@ -1530,3 +1545,97 @@ def test_genuine_failure_during_a_set_cancel_still_needs_attention(app):
     assert 'Setup stopped' in app.status.get()
     assert app.connection_status.get() == 'Connection check needs attention. See setup activity, then retry.'
     assert any(title == 'Setup needs attention' for title, _ in app._test_dialogs)
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('cleanup_fails', [False, True])
+def test_connection_worker_keeps_cleanup_failures_visible_after_cancel(app, monkeypatch, cleanup_fails):
+    from halo_frame_installer import gui
+    from halo_frame_installer.ssh import CancelledError, SSHError
+    actions, settings_used = [], []
+
+    class OfflineConnection:
+        def __init__(self, settings):
+            settings_used.append(settings)
+        def connect(self):
+            actions.append('connect')
+        def run(self, argv, *, cancel_event):
+            cancel_event.set()
+            raise CancelledError('Connection check cancelled.')
+        def close(self):
+            actions.append('close')
+            if cleanup_fails:
+                raise SSHError('The USB forward could not be removed: offline-secret')
+
+    monkeypatch.setattr(gui, 'SSHConnection', OfflineConnection)
+    monkeypatch.setattr(gui.threading, 'Thread', _ImmediateThread)
+    app.password.set('offline-secret')
+    app._test_connection()
+    _drain_events(app)
+    assert actions == ['connect', 'close']
+    assert not app.busy and not app.password.get() and not settings_used[0].password
+    assert not app.password_to_redact
+    if cleanup_fails:
+        assert app.phase.get() == "Let's try that again"
+        assert 'needs attention' in app.connection_status.get()
+        assert app._test_dialogs[-1][0] == 'Setup needs attention'
+        assert app._test_dialogs[-1][1].startswith('Connection check cancelled.')
+        assert 'USB forward could not be removed' in '\n'.join(app.log_lines)
+    else:
+        assert app.phase.get() == 'Setup cancelled'
+        assert app.connection_status.get() == 'Connection check cancelled.'
+        assert not app._test_dialogs
+    assert 'offline-secret' not in '\n'.join(app.log_lines)
+
+
+@WINDOWS_GUI
+@pytest.mark.parametrize('operation', ['install', 'library', 'uninstall'])
+@pytest.mark.parametrize('primary_failure', [False, True])
+@pytest.mark.parametrize('cleanup_fails', [False, True])
+def test_installer_workers_distinguish_cancel_from_failures(app, monkeypatch, operation, primary_failure, cleanup_fails):
+    from halo_frame_installer import gui, install
+    from halo_frame_installer.ssh import SSHError
+    actions, settings_used = [], []
+
+    class OfflineConnection:
+        def __init__(self, settings):
+            self.settings = settings
+            settings_used.append(settings)
+        def connect(self):
+            actions.append('connect')
+            app.cancel.set()
+            if primary_failure:
+                raise SSHError('Original connection failure.')
+        def close(self):
+            actions.append('close')
+            if cleanup_fails:
+                raise SSHError('The USB forward could not be removed: offline-secret')
+
+    # Keep the real installer cleanup and GUI worker; no SSH or device methods run.
+    installer = install.Installer(OfflineConnection)
+    monkeypatch.setattr(install, 'Installer', lambda: installer)
+    monkeypatch.setattr(gui.threading, 'Thread', _ImmediateThread)
+    app.password.set('offline-secret')
+    app.authorized.set(True)
+    app.steam_closed.set(True)
+    if operation == 'install':
+        app._install(repair=True)
+    elif operation == 'library':
+        app._retry_steam()
+    else:
+        app._uninstall()
+    _drain_events(app)
+    assert actions == ['connect', 'close']
+    assert not app.busy and not app.installing
+    assert not app.password.get() and not settings_used[0].password and not app.password_to_redact
+    if primary_failure or cleanup_fails:
+        assert app.phase.get() == "Let's try that again"
+        assert app._test_dialogs[-1][0] == 'Setup needs attention'
+        if primary_failure:
+            assert app._test_dialogs[-1][1].startswith('Original connection failure.')
+    else:
+        assert app.phase.get() == 'Setup cancelled'
+        assert not app._test_dialogs
+    if cleanup_fails:
+        assert 'USB forward could not be removed' in '\n'.join(app.log_lines)
+    assert 'offline-secret' not in '\n'.join(app.log_lines)

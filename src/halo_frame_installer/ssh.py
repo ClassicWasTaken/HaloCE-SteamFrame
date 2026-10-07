@@ -26,7 +26,9 @@ class RemoteTimeoutError(SSHError):
 
 
 class CancelledError(RuntimeError):
-    pass
+    """The user stopped setup; failed cleanup can still require attention."""
+
+    requires_attention = False
 
 
 def validate_host(host: str) -> str:

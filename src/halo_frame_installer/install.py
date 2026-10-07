@@ -397,6 +397,8 @@ class Installer:
         except (CancelledError, RemoteTimeoutError, SSHError) as error:
             cancel_remote()
             if cancellation_warning:
+                if isinstance(error, CancelledError):
+                    error.requires_attention = True
                 message = str(error)
                 if cancellation_unconfirmed:
                     first, separator, rest = message.partition("\n")
@@ -411,6 +413,8 @@ class Installer:
                     cleanup_activity(progress, "Setup has disconnected from your Frame.")
                 elif sys.exc_info()[1] is not None:
                     error = sys.exc_info()[1]
+                    if isinstance(error, CancelledError):
+                        error.requires_attention = True
                     error.args = (str(error) + "\n\n" + warning,)
 
     def add_to_steam(self, settings: Settings, progress_callback: ProgressCallback | None = None,
@@ -513,6 +517,8 @@ class Installer:
                     cleanup_activity(progress, "Setup has disconnected from your Frame.")
                 elif sys.exc_info()[1] is not None:
                     error = sys.exc_info()[1]
+                    if isinstance(error, CancelledError):
+                        error.requires_attention = True
                     error.args = (str(error) + "\n\n" + warning,)
 
 

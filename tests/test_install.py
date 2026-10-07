@@ -266,8 +266,11 @@ def test_cancelled_install_is_not_replaced_by_a_failed_disconnect():
     event = threading.Event()
     event.set()
     fake = ForwardCleanupFailure(Settings("frame", "private"))
-    with pytest.raises(CancelledError):
+    with pytest.raises(CancelledError) as error:
         Installer(lambda settings: fake, RESOURCES).run(fake.settings, None, cancel_event=event)
+    assert error.value.requires_attention
+    assert str(error.value).startswith('Installation cancelled.')
+    assert 'USB forward cleanup failed' in str(error.value)
 
 
 def test_close_connection_reports_a_swallowed_cleanup_failure():
@@ -302,7 +305,8 @@ def test_successful_install_with_failed_cleanup_retains_result_and_needs_attenti
 
 @pytest.mark.parametrize('primary_error', [CancelledError, RemoteTimeoutError, SSHError])
 @pytest.mark.parametrize('original_active', [False, True])
-def test_failed_remote_stop_uses_one_pinned_fresh_connection(primary_error, original_active):
+@pytest.mark.parametrize('recovery_cleanup_fails', [False, True])
+def test_failed_remote_stop_uses_one_pinned_fresh_connection(primary_error, original_active, recovery_cleanup_fails):
     class BrokenConnection(FakeConnection):
         def is_active(self):
             return original_active
@@ -322,6 +326,10 @@ def test_failed_remote_stop_uses_one_pinned_fresh_connection(primary_error, orig
     class RecoveryConnection(FakeConnection):
         def connect(self, *, timeout):
             self.connect_timeout = timeout
+        def close(self):
+            super().close()
+            if recovery_cleanup_fails:
+                raise SSHError('Recovery connection cleanup failed.')
         def run(self, argv, **kwargs):
             self.commands.append(argv)
             assert kwargs['timeout'] == 45 and 'cancel_event' not in kwargs
@@ -352,6 +360,10 @@ def test_failed_remote_stop_uses_one_pinned_fresh_connection(primary_error, orig
     assert 'could not be confirmed' not in str(error.value)
     assert not any(command[2] in ('finalize', 'shortcut') for command in original.commands if command[1] != '-c')
     assert any(event[1] == 'Remote build cancellation confirmed.' for event in events)
+    if primary_error is CancelledError:
+        assert error.value.requires_attention is recovery_cleanup_fails
+    if recovery_cleanup_fails:
+        assert 'Recovery connection cleanup failed.' in str(error.value)
 
 
 @pytest.mark.parametrize('failure', ['unapproved', 'changed-key', 'unconfirmed-response'])
@@ -381,6 +393,7 @@ def test_unconfirmed_remote_stop_is_visible_without_masking_cancel(failure):
     with pytest.raises(CancelledError) as error:
         Installer(factory, RESOURCES).run(settings, None)
     first_line = str(error.value).splitlines()[0]
+    assert error.value.requires_attention
     assert 'cancelled' in first_line and 'Remote stopping could not be confirmed' in first_line
     assert 'In the Frame\'s terminal, run: python3 /home/steamos/.cache/' in str(error.value)
     assert 'private' not in str(error.value) and original.closed

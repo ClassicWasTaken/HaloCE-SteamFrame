@@ -15,7 +15,7 @@ from tkinter import filedialog, messagebox, ttk
 import webbrowser
 
 from . import __version__
-from .assets import inspect_image, inspect_maps, extract_image, copy_maps
+from .assets import ExtractionCancelled, inspect_image, inspect_maps, extract_image, copy_maps
 from .ssh import CancelledError, Settings, SSHConnection
 from .music import MenuMusic
 from .progress import SetupProgress
@@ -1008,13 +1008,14 @@ class App(tk.Tk):
                     raise ValueError("This device is not an ARM64 Steam Frame.")
                 confirmed = ("connected", settings.host_identity, connection.host_fingerprint)
             except Exception as exc:
-                cancelled = isinstance(exc, CancelledError)
+                cancelled = isinstance(exc, CancelledError) and not exc.requires_attention
                 error = str(exc)
             finally:
                 try:
                     if connection is not None:
                         connection.close()
                 except Exception as exc:
+                    cancelled = False  # A real disconnect failure still needs attention.
                     cleanup = "Setup could not finish disconnecting after the connection check.\n" + str(exc)
                     error = (error + "\n\n" + cleanup) if error else cleanup
                 finally:
@@ -1082,7 +1083,9 @@ class App(tk.Tk):
                     result = run(settings, extracted / "maps", report, self.cancel)
                 self.events.put(("complete", result))
             except Exception as exc:
-                self.events.put(("error", str(exc), isinstance(exc, CancelledError)))
+                cancelled = (isinstance(exc, ExtractionCancelled)
+                             or isinstance(exc, CancelledError) and not exc.requires_attention)
+                self.events.put(("error", str(exc), cancelled))
             finally:
                 settings.password = ""
                 self.events.put(("clear_password",))
@@ -1115,7 +1118,7 @@ class App(tk.Tk):
                     lambda s,m,p=None:self.events.put(("progress",s,str(m),p)), self.cancel)
                 self.events.put(("complete",result))
             except Exception as exc:
-                self.events.put(("error",str(exc), isinstance(exc, CancelledError)))
+                self.events.put(("error",str(exc), isinstance(exc, CancelledError) and not exc.requires_attention))
             finally:
                 settings.password = ""
                 self.events.put(("clear_password",)); self.events.put(("idle",))
@@ -1158,7 +1161,7 @@ class App(tk.Tk):
                     self.cancel, keep_saves=keep_saves)
                 self.events.put(("uninstall_complete", result))
             except Exception as exc:
-                self.events.put(("error", str(exc), isinstance(exc, CancelledError)))
+                self.events.put(("error", str(exc), isinstance(exc, CancelledError) and not exc.requires_attention))
             finally:
                 settings.password = ""
                 self.events.put(("clear_password",))
