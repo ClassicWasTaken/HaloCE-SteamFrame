@@ -384,11 +384,12 @@ def existing_install(repair=False, adopt=False):
     if (GAME / "config.toml").exists():
         ordinary(GAME / "config.toml")
         settings = tomllib.loads((GAME / "config.toml").read_text())
-        if migrating and not recovered:
-            previous = configured_save_path(settings)
-            if previous not in previous_paths:
-                previous_paths.append(previous)
-        elif not migrating:
+        if migrating:
+            if not recovered:
+                previous = configured_save_path(settings)
+                if previous not in previous_paths:
+                    previous_paths.append(previous)
+        else:
             validate_save_paths(settings, require_explicit=not repair)
         if repair:
             merge_config((GAME / "config.toml").read_text(), migrate=migrating)
