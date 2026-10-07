@@ -82,6 +82,15 @@ class App(tk.Tk):
         self.authorized = tk.BooleanVar()
         self.steam_closed = tk.BooleanVar()
         self.mode = tk.StringVar(value="install")
+        self.storage_kind = tk.StringVar(value="internal")
+        self.storage_id = tk.StringVar(value="internal")
+        self.storage_label = tk.StringVar()
+        self.storage_note = tk.StringVar(value="Internal storage is selected. SD cards are checked securely on your Frame.")
+        self.summary_storage = tk.StringVar()
+        self._storage_generation = 0
+        self._storage_destinations = {}
+        self._storage_picker_ids = {}
+        self._storage_inventory_identity = None
         self.keep_saves = tk.BooleanVar(value=True)
         self.current_page = self.current_step = 0
         self.max_page = 0
@@ -116,7 +125,9 @@ class App(tk.Tk):
         self.source.trace_add("write", lambda *args:self._source_changed())
         self.mode.trace_add("write", lambda *args:self._mode_changed())
         self.transport.trace_add("write", lambda *args:self._transport_changed())
-        self.usb_serial.trace_add("write", lambda *args:self._update_summary())
+        for variable in (self.host, self.port, self.usb_serial, self.adb_path):
+            variable.trace_add("write", lambda *args:self._invalidate_storage())
+        self.storage_kind.trace_add("write", lambda *args:self._storage_changed())
         self.keep_saves.trace_add("write", lambda *args:self._update_summary())
         self._apply_icon()
         self.after_idle(self._apply_window_theme)
@@ -140,6 +151,14 @@ class App(tk.Tk):
         style.map("TEntry", bordercolor=[("focus", ACCENT)],
                   fieldbackground=[("disabled", "#233027")],
                   foreground=[("disabled", DISABLED)])
+        style.configure("Storage.TCombobox", fieldbackground=INSET, background=SURFACE,
+                        foreground=TEXT, arrowcolor=ACCENT, bordercolor=BORDER,
+                        font=("Segoe UI", 10), padding=(10, 9))
+        style.map("Storage.TCombobox", fieldbackground=[("readonly", INSET), ("disabled", "#233027")],
+                  foreground=[("disabled", DISABLED)], selectbackground=[("readonly", INSET)],
+                  selectforeground=[("readonly", TEXT)])
+        self.option_add("*TCombobox*Listbox.background", INSET)
+        self.option_add("*TCombobox*Listbox.foreground", TEXT)
         style.configure("TCheckbutton", background=SURFACE, foreground=TEXT,
                         indicatorbackground=INSET, indicatorforeground=ACCENT,
                         indicatorcolor=ACCENT, bordercolor=BORDER,
@@ -381,7 +400,7 @@ class App(tk.Tk):
         uninstall = self._card(body, "REMOVE NATIVE HALO VR")
         self.uninstall_card = uninstall.master
         self._label(uninstall,
-            "Remove ~/Games/HaloCENativeVR and its native Halo Steam library entry.\n"
+            "Remove Halo VR and its Steam entry from the location selected on the next page.\n"
             "No disc image is needed. Your other games are kept.",
             10, background=SURFACE, wraplength=620).pack(anchor="w", pady=(0, 9))
         self._check(uninstall, "Keep my campaign saves in a backup (recommended)", self.keep_saves).pack(anchor="w")
@@ -468,6 +487,28 @@ class App(tk.Tk):
             "Steam Home and SteamVR stay running. Setup will show any manual library steps.",
             9, color=MUTED, background=SURFACE, wraplength=620)
         self.connection_steam_note.pack(anchor="w", pady=(2, 0))
+        storage = self._card(body, "Install location")
+        choices = tk.Frame(storage, bg=SURFACE)
+        choices.pack(fill="x")
+        choices.columnconfigure((0, 1), weight=1, uniform="storage")
+        self.storage_choices = []
+        for index, title, subtitle, value in (
+            (0, "Internal storage", "Frame's built-in drive", "internal"),
+            (1, "SD card", "Mounted on your Frame", "sd")):
+            choice = Choice(choices, title, subtitle, self.storage_kind, value, self._storage_changed)
+            choice.grid(row=0, column=index, sticky="ew", padx=(0, 6) if index == 0 else (6, 0))
+            self.storage_choices.append(choice)
+        self.storage_picker = ttk.Combobox(storage, textvariable=self.storage_label, state="disabled",
+                                          style="Storage.TCombobox")
+        self.storage_picker.pack(fill="x", pady=(10, 0))
+        self.storage_picker.bind("<<ComboboxSelected>>", self._select_storage_card)
+        self._label(storage, textvariable=self.storage_note, size=9, color=MUTED,
+                    background=SURFACE, wraplength=620).pack(anchor="w", pady=(9, 0))
+        self._button(storage, "Refresh storage", self._test_connection).pack(anchor="w", pady=(9, 0))
+        self._label(storage,
+            "Install uses your selected Xbox data. Repair and Uninstall affect only the selected location.\n"
+            "Existing installations on another drive are kept; setup does not move them.",
+            8, color=MUTED, background=SURFACE, wraplength=620).pack(anchor="w", pady=(8, 0))
 
     def _build_install_page(self, body):
         summary = self._card(body)
@@ -486,6 +527,8 @@ class App(tk.Tk):
                     background=SURFACE, wraplength=620).pack(anchor="w", pady=(4, 6))
         self._label(summary, textvariable=self.summary_note, size=9, color=MUTED,
                     background=SURFACE, wraplength=620).pack(anchor="w")
+        self._label(summary, textvariable=self.summary_storage, size=9, color=MUTED,
+                    background=SURFACE, wraplength=620).pack(anchor="w", pady=(9, 0))
         self.progress_card = self._card(body)
         progress_heading = tk.Frame(self.progress_card, bg=SURFACE)
         progress_heading.pack(fill="x")
@@ -510,7 +553,7 @@ class App(tk.Tk):
         self.notes_button = self._button(self.progress_card, "View game description", self._show_steam_note)
         self.notes_button.pack_forget()
         self.install_note = self._label(body,
-            "Keep this window open during setup. Allow 12 GB free on the Frame.\nThe first native build can take a while.",
+            "Allow 12 GiB free on the selected drive. The compiler container may also need temporary internal space.\nThe first native build can take a while.",
             9, color=MUTED, wraplength=620)
         self.install_note.pack(anchor="w", pady=(0, 10))
 
@@ -575,7 +618,7 @@ class App(tk.Tk):
         self.connection_steam_note.configure(text="Steam Home and SteamVR stay running. Uninstall may need a manual library step." if uninstall
                                             else "Steam Home and SteamVR stay running. Setup will show any manual library steps.")
         self.install_note.configure(text="Keep this window open until the uninstall finishes and setup disconnects." if uninstall
-                                    else "Keep this window open during setup. Allow 12 GB free on the Frame.\nThe first native build can take a while.")
+                                    else "Allow 12 GiB free on the selected drive. The compiler container may also need temporary internal space.\nThe first native build can take a while.")
         self._update_summary()
         self._update_navigation()
         if uninstall:
@@ -588,7 +631,7 @@ class App(tk.Tk):
         uninstall = self.mode.get() == "uninstall"
         self.summary_heading.set("UNINSTALL SUMMARY" if uninstall else "INSTALLATION SUMMARY")
         self.summary_data_heading.set("NATIVE GAME FOLDER" if uninstall else "GAME DATA")
-        self.summary_source.set("~/Games/HaloCENativeVR" if uninstall else
+        self.summary_source.set(self._storage_game_path() if uninstall else
                                 Path(source).name if source else "Use valid Xbox maps already installed on the Frame")
         if self.transport.get() == "usb":
             serial = self.usb_serial.get().strip()
@@ -601,6 +644,77 @@ class App(tk.Tk):
                                 "A  Jump   ·   B  Melee   ·   X  Reload / use   ·   Y  Change weapon")
         self.summary_note.set("The native game files and its Steam entry will be removed." if uninstall else
                               "Motion aiming and Xbox-style controls are included. Steam artwork and game Notes are added automatically.")
+        self.summary_storage.set("LOCATION: " + self._storage_game_path())
+
+    def _storage_identity(self):
+        return (self.transport.get(), self.host.get().strip(), self.port.get().strip(),
+                self.usb_serial.get().strip(), self.adb_path.get().strip())
+
+    def _invalidate_storage(self):
+        self._storage_generation += 1
+        self._storage_destinations = {}
+        self._storage_picker_ids = {}
+        self._storage_inventory_identity = None
+        self.storage_label.set("")
+        if hasattr(self, "storage_picker"):
+            self.storage_picker.configure(values=())
+            self._storage_changed()
+        if self.busy and getattr(self, "operation", None) == "connection":
+            self.cancel.set()
+            self._set_busy(False)
+        self._update_summary()
+
+    def _storage_game_path(self):
+        if self.storage_kind.get() == "internal":
+            return self._storage_destinations.get("internal", {}).get("gamePath", "~/Games/HaloCENativeVR")
+        destination = self._storage_destinations.get(self.storage_id.get())
+        return destination["gamePath"] if destination else "Choose a mounted SD card on your Frame"
+
+    def _storage_changed(self):
+        if self.storage_kind.get() == "internal":
+            self.storage_id.set("internal")
+            self.storage_label.set("")
+            selected = self._storage_destinations.get("internal")
+            self.storage_note.set((f"Internal storage · {selected['freeBytes'] / 1024**3:.1f} GiB free\n" + selected["gamePath"]
+                                   + ("\nAn existing installation was detected here." if selected.get("installed") else ""))
+                                  if selected else "Internal storage is selected. SD cards are checked securely on your Frame.")
+        else:
+            cards = [item for item in self._storage_destinations.values() if item.get("kind") == "sd"]
+            if self.storage_id.get() not in {item["id"] for item in cards}:
+                self.storage_id.set(cards[0]["id"] if len(cards) == 1 else "")
+            selected = self._storage_destinations.get(self.storage_id.get())
+            self.storage_label.set(next((label for label, identifier in self._storage_picker_ids.items()
+                                        if identifier == self.storage_id.get()), ""))
+            if selected:
+                self.storage_note.set(f"{selected['label']} · {selected['freeBytes'] / 1024**3:.1f} GiB free\n"
+                                      + selected["gamePath"] + ("\nAn existing installation was detected here." if selected.get("installed") else
+                                          "\nNo recognized installation is here. Use Install with your Xbox data."))
+            elif cards:
+                self.storage_note.set("Multiple SD cards are available. Choose the card to use; other installations are kept.")
+            elif self._storage_inventory_identity == self._storage_identity():
+                self.storage_note.set("No eligible mounted SD card was found. Insert or prepare a card in Steam Settings → Storage, then Refresh storage.")
+            else:
+                self.storage_note.set("Insert a card in your Frame and prepare it in Steam Settings → Storage, then Refresh storage.")
+        if hasattr(self, "storage_picker"):
+            self.storage_picker.configure(state="readonly" if not self.busy and self.storage_kind.get() == "sd"
+                                          and self._storage_picker_ids else "disabled")
+        self._update_summary()
+
+    def _select_storage_card(self, event=None):
+        self.storage_id.set(self._storage_picker_ids.get(self.storage_label.get(), ""))
+        self._storage_changed()
+
+    def _apply_storage_inventory(self, destinations, identity):
+        self._storage_destinations = {item["id"]: dict(item) for item in destinations}
+        self._storage_inventory_identity = identity
+        self._storage_picker_ids = {}
+        for index, item in enumerate(item for item in destinations if item.get("kind") == "sd"):
+            label = f"{index + 1}. {item['label']} · {item['freeBytes'] / 1024**3:.1f} GiB free"
+            if item.get("installed"):
+                label += " · Installed"
+            self._storage_picker_ids[label] = item["id"]
+        self.storage_picker.configure(values=tuple(self._storage_picker_ids))
+        self._storage_changed()
 
     def _show_page(self, index):
         if not 0 <= index < len(self.pages):
@@ -719,6 +833,7 @@ class App(tk.Tk):
         self.advanced_button.configure(text="Hide connection settings" if self.advanced_open else "Advanced connection settings")
 
     def _transport_changed(self):
+        self._invalidate_storage()
         usb = self.transport.get() == "usb"
         self.network_panel.pack_forget()
         self.usb_panel.pack_forget()
@@ -836,7 +951,8 @@ class App(tk.Tk):
             "  USB tools are included. Approve USB debugging if prompted.\n"
             "• The Frame still needs internet access to download and build the game.\n"
             "• Save and close games. Steam Home and SteamVR stay running.\n"
-            "• Install SteamVR and allow at least 12 GB free on your Frame.\n"
+            "• Install SteamVR and allow at least 12 GiB free on the selected drive.\n"
+            "• For SD, prepare a writable ext4/f2fs card, then Refresh storage.\n"
             "• Repair refreshes the program and controls while preserving saves.\n"
             "• Install and repair automatically add Steam artwork and a game description in Steam Notes.\n"
             "• Online play uses the native port's own multiplayer protocol.\n\n" + EXPERIMENTAL_NOTICE,
@@ -922,7 +1038,7 @@ class App(tk.Tk):
         self.music.load(Path(selected))
         self.status.set("Game data validated. Connect your Frame next.")
 
-    def _settings(self):
+    def _settings(self, *, storage_id=None):
         usb = self.transport.get() == "usb"
         if usb:
             host, port = "frame", 22
@@ -934,12 +1050,18 @@ class App(tk.Tk):
             host = self.host.get().strip()
         serial = self.usb_serial.get().strip() or None
         identity = f"usb:{serial}" if usb and serial else f"{host}:{port}" if not usb else None
+        if storage_id is None:
+            storage_id = self.storage_id.get()
+            if self.storage_kind.get() == "sd" and (not storage_id or storage_id == "internal"
+                    or self._storage_inventory_identity != self._storage_identity()
+                    or storage_id not in self._storage_destinations):
+                raise ValueError("Refresh storage and select a mounted SD card on your Frame before continuing.")
         return Settings(host=host, password=self.password.get(), port=port,
             transport=self.transport.get(), adb_path=self.adb_path.get().strip() or None,
             usb_serial=serial, known_host_fingerprints=dict(self.fingerprints),
             known_host_fingerprint=self.fingerprints.get(identity) if identity else None,
             accept_host_key=lambda h,a,v:self._approve_host(h,a,v,port),
-            close_steam_for_shortcut=False)
+            close_steam_for_shortcut=False, storage_id=storage_id)
 
     def _approve_host(self, host, algorithm, value, port):
         ready = threading.Event()
@@ -962,6 +1084,10 @@ class App(tk.Tk):
             choice.configure(state="disabled" if value else "normal")
         for choice in self.transport_choices:
             choice.configure(state="disabled" if value else "normal")
+        for choice in self.storage_choices:
+            choice.configure(state="disabled" if value else "normal")
+        self.storage_picker.configure(state="readonly" if not value and self.storage_kind.get() == "sd"
+                                      and self._storage_picker_ids else "disabled")
         steam = self.last_result.steam if self.last_result is not None else {}
         pending_steam = (bool(self.last_result and self.last_result.requires_manual_steam_step)
                          or steam.get("artwork", {}).get("status") == "manual"
@@ -985,45 +1111,48 @@ class App(tk.Tk):
         self._update_navigation()
 
     def _test_connection(self):
+        if self.busy:
+            return
         try:
-            settings = self._settings()
+            settings = self._settings(storage_id="internal")
         except ValueError as exc:
             messagebox.showerror("Connection details", str(exc), parent=self)
             return
         self.password_to_redact = settings.password
         self.operation = "connection"
+        self._storage_generation += 1
+        generation = self._storage_generation
+        identity = self._storage_identity()
+        self._storage_destinations = {}
+        self._storage_picker_ids = {}
+        self._storage_inventory_identity = None
+        self.storage_picker.configure(values=())
+        self._storage_changed()
+        settings.accept_host_key = lambda h,a,v:self._approve_storage_host(generation, identity, h, a, v, settings.port)
         self._set_busy(True)
-        self.status.set("Connecting to your Frame…")
-        self.connection_status.set("Connecting to your Frame…")
+        self.status.set("Connecting to your Frame and checking storage…")
+        self.connection_status.set("Connecting to your Frame and checking storage…")
         def worker():
-            connection = None
-            confirmed = None
-            error = None
+            from .install import Installer
             try:
-                connection = SSHConnection(settings)
-                connection.connect()
-                arch = connection.run(["uname", "-m"], cancel_event=self.cancel).strip()
-                if arch not in ("aarch64", "arm64"):
-                    raise ValueError("This device is not an ARM64 Steam Frame.")
-                confirmed = ("connected", settings.host_identity, connection.host_fingerprint)
+                result = Installer().discover_storage(settings, cancel_event=self.cancel)
+                if result.cleanup_warning:
+                    raise ValueError("Setup could not finish disconnecting after the connection check.\n" + result.cleanup_warning)
+                self.events.put(("storage_result", generation, identity, settings.host_identity, result))
             except Exception as exc:
-                error = str(exc)
+                self.events.put(("storage_error", generation, identity, str(exc)))
             finally:
-                try:
-                    if connection is not None:
-                        connection.close()
-                except Exception as exc:
-                    cleanup = "Setup could not finish disconnecting after the connection check.\n" + str(exc)
-                    error = (error + "\n\n" + cleanup) if error else cleanup
-                finally:
-                    settings.password = ""
-                    if error is not None:
-                        self.events.put(("error", error))
-                        self.events.put(("clear_password",))
-                    elif confirmed is not None:
-                        self.events.put(confirmed)
-                    self.events.put(("idle",))
+                settings.password = ""
+                self.events.put(("storage_idle", generation, identity))
         threading.Thread(target=worker, daemon=True).start()
+
+    def _approve_storage_host(self, generation, identity, host, algorithm, value, port):
+        ready, answer = threading.Event(), []
+        self.events.put(("storage_fingerprint", generation, identity, host, algorithm, value, port, ready, answer))
+        while not ready.wait(0.1):
+            if self.cancel.is_set() or generation != self._storage_generation:
+                return False
+        return bool(answer and answer[0])
 
     def _install(self, repair=False):
         if (not repair and not self.source.get()) or not self.authorized.get():
@@ -1041,7 +1170,7 @@ class App(tk.Tk):
         source = Path(self.source.get()) if self.source.get() else None
         if repair:
             data_note = "Your selected Xbox data may replace the installed maps." if source else "Valid installed Xbox maps are kept. If maps are damaged, choose an original Xbox image and retry."
-            if not messagebox.askyesno("Repair existing native game", "Setup will check ~/Games/HaloCENativeVR on your Frame and reinstall its native program files and Xbox controls. Saves and unrelated settings are preserved.\n\n" + data_note + "\n\nRepair this installation?", parent=self):
+            if not messagebox.askyesno("Repair existing native game", "Setup will check " + self._storage_game_path() + " on your Frame and reinstall its native program files and Xbox controls. Saves and unrelated settings are preserved.\n\n" + data_note + "\n\nOnly this location is repaired; other installations are kept.\n\nRepair this installation?", parent=self):
                 return
             settings.adopt_existing_native = True
         self.operation = "install"
@@ -1094,7 +1223,13 @@ class App(tk.Tk):
             messagebox.showinfo("Close games first", GAME_CLOSE_NOTE, parent=self)
             return
         try:
-            settings = self._settings()
+            settings = self._settings(storage_id=getattr(self.last_result, "storage_id", "internal"))
+            expected_frame = getattr(self.last_result, "host_fingerprint", None)
+            if expected_frame:
+                # A pending library update belongs to the Frame that installed
+                # this game, even after its address or current selection changes.
+                settings.known_host_fingerprint = expected_frame
+                settings.accept_host_key = None
         except ValueError as exc:
             messagebox.showerror("Connection details", str(exc), parent=self)
             return
@@ -1133,7 +1268,7 @@ class App(tk.Tk):
         keep_saves = self.keep_saves.get()
         saves_note = ("Your campaign saves will be backed up on the Frame before removing the game."
                       if keep_saves else "Campaign saves contained in the native game folder will also be removed.")
-        confirmation = ("Remove the native Halo VR installation at ~/Games/HaloCENativeVR on your Frame?\n\n"
+        confirmation = ("Remove the native Halo VR installation at " + self._storage_game_path() + " on your Frame?\n\n"
                         "This removes the native game program, Xbox maps, configuration files, and its native Halo Steam library entry.\n\n"
                         + saves_note + "\n\nOther games and saved backups are kept.\n\nOnce removal begins, let setup finish and disconnect.")
         if not messagebox.askyesno("Uninstall native Halo VR", confirmation, parent=self):
@@ -1177,6 +1312,14 @@ class App(tk.Tk):
             for _ in range(100):
                 event = self.events.get_nowait()
                 kind = event[0]
+                if kind == "storage_fingerprint":
+                    _, generation, identity, host, algorithm, value, port, ready, answer = event
+                    if generation != self._storage_generation or identity != self._storage_identity():
+                        answer.append(False)
+                        ready.set()
+                        continue
+                    kind = "fingerprint"
+                    event = (kind, host, algorithm, value, port, ready, answer)
                 if kind == "asset":
                     self._finish_asset_check(*event[1:])
                 elif kind == "music":
@@ -1188,6 +1331,28 @@ class App(tk.Tk):
                     if accepted:
                         self._remember(host, port, value)
                     ready.set()
+                elif kind in ("storage_result", "storage_error", "storage_idle"):
+                    _, generation, identity, *payload = event
+                    if generation != self._storage_generation or identity != self._storage_identity():
+                        continue
+                    if kind == "storage_result":
+                        resolved, result = payload
+                        if result.host_fingerprint:
+                            self._remember(resolved, None, result.host_fingerprint)
+                        self._apply_storage_inventory(result.destinations, identity)
+                        self.status.set("Connected to your Frame. Review the install location before continuing.")
+                        self.connection_status.set("Connected to your Frame. Storage checked; setup disconnected securely.")
+                        self._append("SSH connection verified and storage checked. No password was saved.")
+                        for item in result.destinations:
+                            self._append(f"Storage: {item['label']} · {item['freeBytes'] / 1024**3:.1f} GiB free · {item['gamePath']}")
+                        for item in getattr(result, "unavailable", ()):
+                            self._append("Storage unavailable: " + item["mountPath"] + " — " + item["reason"])
+                    elif kind == "storage_error":
+                        self._show_setup_error(payload[0])
+                        self.password.set("")
+                        self.password_to_redact = ""
+                    else:
+                        self._set_busy(False)
                 elif kind == "connected":
                     _, identity, value = event
                     if value:
@@ -1220,8 +1385,9 @@ class App(tk.Tk):
                     cleanup_pending = bool(cleanup_warning)
                     library_update = getattr(self, "operation", None) == "library"
                     action = "repaired" if getattr(result, "repaired", False) else "installed"
+                    game_name = result.steam.get("name", "Halo: Combat Evolved VR (Native)")
                     done = ("Halo's Steam library info has been updated. Your native game and saves were kept." if library_update else
-                            f"Native Halo VR is {action}. Open Steam and launch Halo: Combat Evolved VR (Native).")
+                            f"Native Halo VR is {action}. Open Steam and launch {game_name}.")
                     if getattr(result, "backup_path", None):
                         self._append("Program-file backup: " + result.backup_path)
                     if result.requires_manual_steam_step:

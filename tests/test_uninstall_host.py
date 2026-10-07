@@ -66,7 +66,7 @@ def test_uninstall_needs_no_iso_maps_or_build_and_disconnects_before_success():
     result = Installer(lambda settings: fake, RESOURCES).uninstall(fake.settings, progress)
     assert result.uninstalled and not result.requires_manual_steam_step
     assert result.saved_backup_path.startswith('/home/steamos/Games/HaloCENativeVR-saves-')
-    assert [name for name, remote in fake.uploads] == ['remote_install.py', 'steam_shortcut.py', 'steam_live.py']
+    assert [name for name, remote in fake.uploads] == ['frame_storage.py', 'remote_install.py', 'steam_shortcut.py', 'steam_live.py']
     assert len(fake.commands) == 2
     assert '--keep-saves' in fake.commands[-1][0] and '--close-steam' not in fake.commands[-1][0]
     assert stages[-3:] == ['disconnect', 'disconnected', 'complete']

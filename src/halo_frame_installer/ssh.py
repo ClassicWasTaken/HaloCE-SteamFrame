@@ -67,8 +67,12 @@ class Settings:
     adb_path: str | None = None
     usb_serial: str | None = None
     known_host_fingerprints: dict[str, str] = field(default_factory=dict, repr=False)
+    storage_id: str = "internal"
 
     def __post_init__(self) -> None:
+        if (not isinstance(self.storage_id, str)
+                or not re.fullmatch(r"internal|sd:[a-f0-9]{32}", self.storage_id)):
+            raise ValueError("Choose internal storage or a detected SD card.")
         if self.transport not in ("network", "usb"):
             raise ValueError("Choose Wi-Fi / Ethernet or USB-C transfer.")
         self.host = validate_host(self.host) if self.transport == "network" else "frame"

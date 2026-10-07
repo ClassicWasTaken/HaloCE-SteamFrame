@@ -13,12 +13,18 @@ RESOURCES = Path(__file__).resolve().parents[1] / "resources"
 
 
 @pytest.fixture
-def notes(monkeypatch):
-    for name in ("steam_live", "steam_notes"):
+def notes(monkeypatch, tmp_path):
+    for name in ("frame_storage", "steam_live", "steam_notes"):
         spec = importlib.util.spec_from_file_location(name, RESOURCES / (name + ".py"))
         module = importlib.util.module_from_spec(spec)
         monkeypatch.setitem(sys.modules, name, module)
         spec.loader.exec_module(module)
+        if name == "steam_live":
+            home = tmp_path / "home"
+            game = home / "Games/HaloCENativeVR"
+            game.mkdir(parents=True)
+            monkeypatch.setattr(module, "HOME", home)
+            monkeypatch.setattr(module, "GAME", game)
     return sys.modules["steam_notes"]
 
 
@@ -37,7 +43,7 @@ function call(method,...args) {
 }
 globalThis.SteamClient={Apps:{RegisterForAppDetails:(id,callback)=>{
   call('RegisterForAppDetails',id);
-  callback({unAppID:input.wrongId?id+1:id,strShortcutExe:input.foreignExe?'/foreign/game':spec.exe});
+  callback({unAppID:input.wrongId?id+1:id,strShortcutExe:input.foreignExe?'/foreign/game':(input.actualExe ?? spec.exe)});
   return {unregister:()=>call('unregister')};
 }},GameNotes:{
   SyncToClient:async()=>{call('SyncToClient');return input.syncClientResult ?? 1;},
@@ -65,15 +71,15 @@ if (input.missingMethod) delete SteamClient.GameNotes[input.missingMethod];
 """
 
 
-def run_notes(notes, **options):
+def run_notes(notes, game=None, **options):
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is required to exercise the real Steam Notes expression")
-    spec = notes.native_spec(notes.HOME, notes.GAME, notes.NAME)
+    spec = notes.native_spec(notes.HOME, notes.GAME if game is None else game)
     spec.update({"appid": 3000000001, "noteId": notes.NOTE_ID,
-                 "title": notes.NOTE_TITLE, "content": notes.NOTE_CONTENT,
+                 "title": notes.NOTE_TITLE, "content": notes._note_content(spec["name"]),
                  "maxBytes": notes.MAX_DOCUMENT_BYTES, "maxNotes": notes.MAX_NOTES,
-                 "previousContents": list(notes.PREVIOUS_NOTE_CONTENTS)})
+                 "previousContents": list(notes.PREVIOUS_NOTE_CONTENTS) if spec["name"] == notes.NAME else []})
     spec.update(options.pop("spec_overrides", {}))
     body = {"spec": spec, "expression": notes.expression(notes.NOTES, spec), **options}
     output = subprocess.run([node, "-e", NODE_CLIENT], input=json.dumps(body),
@@ -93,6 +99,75 @@ def managed(notes, **fields):
 
 def methods(result):
     return [call[0] for call in result["calls"]]
+
+
+@pytest.fixture
+def sd_game(notes, tmp_path, monkeypatch):
+    storage = sys.modules["frame_storage"]
+    internal = storage.discover_storage(notes.HOME)["destinations"][0]
+    mount = tmp_path / "media" / "Halo SD Ω"
+    game = mount / "Games/HaloCENativeVR"
+    game.mkdir(parents=True)
+    descriptor = {"id": "sd:" + "b" * 32, "kind": "sd", "label": "Halo SD Ω",
+                  "mountPath": str(mount), "gamePath": str(game),
+                  "cachePath": str(mount / ".cache/halo-frame-installer"),
+                  "freeBytes": 32 * 1024 ** 3, "installed": False}
+    monkeypatch.setattr(storage, "discover_storage", lambda home=notes.HOME: {
+        "home": str(home), "destinations": [internal, descriptor]})
+    return game
+
+
+def test_sd_notes_use_distinct_document_name_and_destination_content(notes, sd_game):
+    result = run_notes(notes, game=sd_game)
+    assert result["result"]["status"] == "added"
+    expected = "notes_shortcut_Halo__Combat_Evolved_VR__Native__SD_card_"
+    reads = [call for call in result["calls"] if call[0] == "GetNotes"]
+    assert reads and all(call[1:] == [expected, expected + "_images/"] for call in reads)
+    assert result["document"]["shortcut_name"] == notes.SD_NAME
+    content = result["document"]["notes"][0]["content"]
+    assert notes.SD_NAME in content and "SD-card installation stays separate" in content
+    assert "Keep this SD" in content and "Internal game files are retained" in content
+
+
+def test_sd_notes_reject_internal_executable_readback_without_writes(notes, sd_game):
+    result = run_notes(notes, game=sd_game, actualExe=str(notes.GAME / "halo"))
+    assert result["result"]["status"] == "manual" and "SaveNotes" not in methods(result)
+
+
+def test_sd_notes_reject_internal_document_instead_of_upgrading_it(notes, sd_game):
+    original = document(notes, [managed(notes)])
+    result = run_notes(notes, game=sd_game, document=original)
+    assert result["result"]["status"] == "manual" and "SaveNotes" not in methods(result)
+    assert result["document"] == original
+
+
+def test_sd_notes_wrapper_delegates_exact_sd_identity(notes, sd_game, monkeypatch):
+    requests = []
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def evaluate(self, expression):
+            requests.append(json.loads(expression.removeprefix("(() => {const S = ").split(";\nreturn ", 1)[0]))
+            return {"ok": True, "status": "added"}
+
+    monkeypatch.setattr(notes, "Client", Client)
+    result = notes.add_notes(notes.HOME, sd_game, 3000000002)
+    assert result["ok"] and requests[0]["name"] == notes.SD_NAME
+    assert requests[0]["exe"] == str(sd_game / "halo")
+    assert requests[0]["previousContents"] == []
+    assert result["content"] == requests[0]["content"] == notes._note_content(notes.SD_NAME)
+
+
+def test_removed_sd_does_not_open_notes_client(notes, sd_game, monkeypatch):
+    monkeypatch.setattr(sys.modules["frame_storage"], "discover_storage", lambda home=notes.HOME: {
+        "home": str(home), "destinations": []})
+    monkeypatch.setattr(notes, "Client", lambda: pytest.fail("Missing SD must not open Steam Notes"))
+    assert notes.add_notes(notes.HOME, sd_game, 3000000002)["status"] == "manual"
 
 
 def test_missing_file_adds_verified_shortcut_note_with_native_filename(notes):

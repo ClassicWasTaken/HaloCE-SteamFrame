@@ -17,6 +17,11 @@ RESOURCES = Path(__file__).resolve().parents[1] / "resources"
 
 
 def load_resource(name):
+    if "frame_storage" not in sys.modules:
+        storage_spec = importlib.util.spec_from_file_location("frame_storage", RESOURCES / "frame_storage.py")
+        storage = importlib.util.module_from_spec(storage_spec)
+        sys.modules[storage_spec.name] = storage
+        storage_spec.loader.exec_module(storage)
     spec = importlib.util.spec_from_file_location("resource_" + name, RESOURCES / (name + ".py"))
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -50,7 +55,7 @@ def test_shortcut_rejects_unknown_types_or_duplicate_fields():
 def test_shortcut_wont_change_live_steam_files(tmp_path, monkeypatch):
     steam = load_resource("steam_shortcut")
     monkeypatch.setattr(steam, "steam_running", lambda: True)
-    result = steam.add_native_shortcut(tmp_path, tmp_path / "game")
+    result = steam.add_native_shortcut(tmp_path, tmp_path / "Games/HaloCENativeVR")
     assert result["status"] == "manual"
     assert list(tmp_path.iterdir()) == []
 
@@ -74,7 +79,7 @@ def test_legacy_shutdown_request_leaves_running_steam_and_games_untouched(tmp_pa
     shutdown, restart = Mock(), Mock()
     monkeypatch.setattr(subprocess, "run", shutdown)
     monkeypatch.setattr(subprocess, "Popen", restart)
-    result = steam.add_native_shortcut(tmp_path, tmp_path / "game", close_steam=True)
+    result = steam.add_native_shortcut(tmp_path, tmp_path / "Games/HaloCENativeVR", close_steam=True)
     assert result["status"] == "manual"
     shutdown.assert_not_called()
     restart.assert_not_called()
@@ -90,7 +95,7 @@ def test_closed_steam_registration_does_not_start_a_new_client(tmp_path, monkeyp
     restart = Mock()
     monkeypatch.setattr(subprocess, "run", normal_shutdown)
     monkeypatch.setattr(subprocess, "Popen", restart)
-    assert steam.add_native_shortcut(tmp_path, tmp_path / "game", close_steam=True)["status"] == "added"
+    assert steam.add_native_shortcut(tmp_path, tmp_path / "Games/HaloCENativeVR", close_steam=True)["status"] == "added"
     normal_shutdown.assert_not_called()
     restart.assert_not_called()
 
@@ -838,7 +843,7 @@ def test_verified_stable_upgrade_keeps_old_checkpoints_and_backs_up_config(remot
     assert settings["audio"]["volume"] == 0.3 and settings["vr"]["turn"] == "snap"
     assert remote.save_root().is_dir() and not any(remote.save_root().iterdir())
     marker = remote.read_marker(remote.GAME / remote.MARKER)
-    assert marker["installerVersion"] == "1.4.1" and marker["networkProtocol"] == 17
+    assert marker["installerVersion"] == "1.4.2" and marker["networkProtocol"] == 17
     assert marker["saveRoot"] == str(remote.save_root()) and "experimental" not in marker
     assert not remote.existing_install()["needsUpgrade"]
     # A later Repair preserves both generations and the former custom location.

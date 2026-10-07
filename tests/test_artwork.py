@@ -13,6 +13,10 @@ RESOURCES = Path(__file__).resolve().parents[1] / "resources"
 
 @pytest.fixture
 def steam(monkeypatch):
+    storage_spec = importlib.util.spec_from_file_location("frame_storage", RESOURCES / "frame_storage.py")
+    storage = importlib.util.module_from_spec(storage_spec)
+    monkeypatch.setitem(sys.modules, storage_spec.name, storage)
+    storage_spec.loader.exec_module(storage)
     spec = importlib.util.spec_from_file_location("steam_artwork_test", RESOURCES / "steam_shortcut.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -218,6 +222,42 @@ def owned_game(tmp_path):
         "owner": "halo-frame-installer", "sourceCommit": "2ae0ee4e3e8a4dfdadfd528a5b085ca699fc9ea4",
         "files": {"halo": hashlib.sha256(program).hexdigest()}}))
     return game
+
+
+def test_sd_closed_shortcut_keeps_internal_entry_and_uses_home_grid(steam, tmp_path, monkeypatch):
+    home, active, _ = make_steam_home(tmp_path)
+    internal_game = owned_game(home)
+    mount = tmp_path / "media" / "Halo SD Ω"
+    game = owned_game(mount)
+    storage = sys.modules["frame_storage"]
+    internal = storage.discover_storage(home)["destinations"][0]
+    descriptor = {"id": "sd:" + "c" * 32, "kind": "sd", "mountPath": str(mount),
+                  "gamePath": str(game)}
+    monkeypatch.setattr(storage, "discover_storage", lambda home=home: {
+        "home": str(home), "destinations": [internal, descriptor]})
+    raw, internal_id = steam.update_shortcut(None, str(internal_game / "halo"), str(internal_game))
+    path = active / "shortcuts.vdf"
+    path.write_bytes(raw)
+    result = steam.add_native_shortcut(home, game)
+    assert result["status"] == "added" and result["name"] == steam.SD_NAME
+    assert result["appid"] != internal_id
+    records = steam.loads(path.read_bytes())["shortcuts"].value
+    assert records["0"] == steam.loads(raw)["shortcuts"].value["0"]
+    assert records["1"].value["AppName"].value == steam.SD_NAME
+    assert records["1"].value["Exe"].value == '"' + str(game / "halo") + '"'
+    assert records["1"].value["StartDir"].value == '"' + str(game) + '"'
+    assert records["1"].value["icon"].value == str(game / ".installer-artwork" / steam.ICON_NAME)
+    assert (active / "grid" / (str(result["appid"]) + "p.jpg")).is_file()
+    assert not (mount / ".local").exists()
+    removed = steam.remove_native_shortcut(home, game)
+    assert removed["status"] == "removed" and path.read_bytes() == raw
+    assert not (active / "grid" / (str(result["appid"]) + "p.jpg")).exists()
+
+
+def test_closed_shortcut_rejects_unapproved_display_title(steam, tmp_path):
+    game = owned_game(tmp_path)
+    with pytest.raises(ValueError, match="name is unsupported"):
+        steam.update_shortcut(None, str(game / "halo"), str(game), "Another game")
 
 
 def test_closed_shortcut_icon_uses_persistent_owned_sidecar(steam, tmp_path):

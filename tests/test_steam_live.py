@@ -18,11 +18,20 @@ RESOURCE = Path(__file__).resolve().parents[1] / "resources/steam_live.py"
 
 
 @pytest.fixture
-def live(monkeypatch):
+def live(monkeypatch, tmp_path):
+    storage_spec = importlib.util.spec_from_file_location("frame_storage", RESOURCE.parent / "frame_storage.py")
+    storage = importlib.util.module_from_spec(storage_spec)
+    monkeypatch.setitem(sys.modules, storage_spec.name, storage)
+    storage_spec.loader.exec_module(storage)
     spec = importlib.util.spec_from_file_location("steam_live_test", RESOURCE)
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
+    home = tmp_path / "home"
+    game = home / "Games/HaloCENativeVR"
+    game.mkdir(parents=True)
+    monkeypatch.setattr(module, "HOME", home)
+    monkeypatch.setattr(module, "GAME", game)
     return module
 
 
@@ -96,17 +105,17 @@ for (const key of input.missing || []) delete SteamClient.Apps[key];
 """
 
 
-def run_client(live, operation="add", source=None, spec_values=None, **options):
+def run_client(live, operation="add", source=None, spec_values=None, game=None, **options):
     node = shutil.which("node")
     if not node:
         pytest.skip("Node is required to exercise the actual Steam API expression")
-    spec = live.native_spec(live.HOME, live.GAME, live.NAME)
+    spec = live.native_spec(live.HOME, live.GAME if game is None else game)
     spec["operation"] = operation
     spec.update(spec_values or {})
     body = {"spec": spec, "probe": live.expression(live.PROBE, spec),
             "expression": live.expression(source or live.LIBRARY, spec), **options}
     result = subprocess.run([node, "-e", NODE_CLIENT], input=json.dumps(body),
-                            text=True, capture_output=True, timeout=12, check=True)
+                            text=True, encoding="utf-8", capture_output=True, timeout=12, check=True)
     return json.loads(result.stdout)
 
 
@@ -304,6 +313,95 @@ def test_native_spec_rejects_unmanaged_paths(live):
 
 
 @pytest.fixture
+def sd_game(live, tmp_path, monkeypatch):
+    storage = sys.modules["frame_storage"]
+    internal = storage.discover_storage(live.HOME)["destinations"][0]
+    mount = tmp_path / "media" / "Halo SD Ω"
+    game = mount / "Games/HaloCENativeVR"
+    game.mkdir(parents=True)
+    descriptor = {"id": "sd:" + "a" * 32, "kind": "sd", "label": "Halo SD Ω",
+                  "mountPath": str(mount), "gamePath": str(game),
+                  "cachePath": str(mount / ".cache/halo-frame-installer"),
+                  "freeBytes": 32 * 1024 ** 3, "installed": False}
+    monkeypatch.setattr(storage, "discover_storage", lambda home=live.HOME: {
+        "home": str(home), "destinations": [internal, descriptor]})
+    return game
+
+
+def test_native_spec_accepts_only_discovered_sd_fixed_game_path(live, sd_game):
+    spec = live.native_spec(live.HOME, sd_game)
+    assert spec["exe"] == str(sd_game / "halo") and spec["directory"] == str(sd_game)
+    assert spec["name"] == live.SD_NAME
+    assert spec["candidateAppids"] != live.native_spec(live.HOME, live.GAME, live.NAME)["candidateAppids"]
+    for foreign in (sd_game.parent / "Foreign", sd_game.parent.parent / "halo", sd_game / "../foreign"):
+        with pytest.raises(live.LiveSteamError, match="restricted"):
+            live.native_spec(live.HOME, foreign)
+
+
+@pytest.mark.parametrize("field", ["home", "name", "launch_options"])
+def test_sd_spec_retains_fixed_home_title_and_launch_options(live, sd_game, field):
+    arguments = {"home": live.HOME, "game": sd_game, "name": live.SD_NAME,
+                 "launch_options": live.LAUNCH_OPTIONS}
+    arguments[field] = live.HOME.parent if field == "home" else "foreign"
+    with pytest.raises(live.LiveSteamError, match="restricted"):
+        live.native_spec(**arguments)
+    with pytest.raises(live.LiveSteamError, match="restricted"):
+        live.native_spec(live.HOME, sd_game, live.NAME)
+
+
+def test_sd_registration_uses_exact_quoted_executable_and_working_directory(live, sd_game):
+    result = run_client(live, game=sd_game)
+    assert result["result"]["verified"]["exe"] == str(sd_game / "halo")
+    assert result["result"]["verified"]["directory"] == str(sd_game)
+    add = next(call for call in result["calls"] if call[0] == "AddShortcut")
+    assert add == ["AddShortcut", live.SD_NAME, str(sd_game / "halo"), "", '"' + str(sd_game / "halo") + '"']
+    assert [call for call in result["calls"] if call[0] == "SetShortcutStartDir"] == [
+        ["SetShortcutStartDir", result["result"]["appid"], str(sd_game)]]
+    assert result["result"]["verified"]["vr"] is True
+    assert result["result"]["verified"]["compatibilityTool"] == ""
+
+
+def test_sd_registration_coexists_with_existing_internal_entry(live, sd_game):
+    result = run_client(live, game=sd_game, entries=[entry(live)], returnId=3000000002)
+    assert result["result"]["created"] is True
+    assert result["entries"][0]["display_name"] == live.NAME
+    assert result["entries"][1]["display_name"] == live.SD_NAME
+    assert result["data"][0]["strShortcutExe"] == str(live.GAME / "halo")
+    assert not any(call[0].startswith("Set") and call[1] == 3000000001 for call in result["calls"])
+
+
+def test_sd_registration_refuses_foreign_entry_with_sd_title(live, sd_game):
+    result = run_client(live, game=sd_game, entries=[entry(live, name=live.SD_NAME, exe="/foreign/game")])
+    assert "different game" in result["error"]
+    assert all(call[0] in ("RegisterForAppDetails", "unregister") for call in result["calls"])
+
+
+def test_sd_repair_keeps_existing_sd_appid_and_internal_shortcut(live, sd_game):
+    result = run_client(live, game=sd_game, entries=[entry(live),
+        entry(live, appid=3000000002, name="My SD Halo", exe=str(sd_game / "halo"))])
+    assert result["result"]["appid"] == 3000000002 and not result["result"]["created"]
+    assert not any(call[0] == "AddShortcut" for call in result["calls"])
+    assert result["entries"][0]["display_name"] == live.NAME
+    assert result["entries"][1]["display_name"] == live.SD_NAME
+
+
+def test_sd_remove_keeps_internal_copy_and_only_removes_exact_selected_executable(live, sd_game):
+    result = run_client(live, "remove", game=sd_game, entries=[
+        entry(live), entry(live, appid=3000000002, name="My SD Halo", exe=str(sd_game / "halo"))])
+    assert result["result"] == {"ok": True, "status": "removed", "appid": 3000000002}
+    assert [item["appid"] for item in result["entries"]] == [3000000001]
+    assert [call for call in result["calls"] if call[0] == "RemoveShortcut"] == [["RemoveShortcut", 3000000002]]
+
+
+def test_missing_sd_is_rejected_before_any_live_client_access(live, sd_game, monkeypatch):
+    monkeypatch.setattr(sys.modules["frame_storage"], "discover_storage", lambda home=live.HOME: {
+        "home": str(home), "destinations": []})
+    monkeypatch.setattr(live, "Client", lambda: pytest.fail("Missing SD must not open Steam's client"))
+    with pytest.raises(live.LiveSteamError, match="restricted"):
+        live.add_native(live.HOME, sd_game)
+
+
+@pytest.fixture
 def artwork_client(live, tmp_path, monkeypatch):
     spec = importlib.util.spec_from_file_location("steam_shortcut", RESOURCE.parent / "steam_shortcut.py")
     shortcut = importlib.util.module_from_spec(spec)
@@ -324,7 +422,7 @@ def artwork_client(live, tmp_path, monkeypatch):
     login.write_text('"users" { "76561197960265738" { "AccountName" "active-user" "MostRecent" "0" } '
                      '"76561197960265748" { "AccountName" "another-user" "MostRecent" "1" } }')
     game = live.GAME
-    game.mkdir(parents=True)
+    game.mkdir(parents=True, exist_ok=True)
     program = bytearray(64)
     program[:6] = b"\x7fELF\x02\x01"
     program[18:20] = (183).to_bytes(2, "little")
@@ -366,7 +464,10 @@ def artwork_client(live, tmp_path, monkeypatch):
                 if self.fail_write:
                     raise live.LiveSteamError("Steam shortcut icon API did not finish")
                 record = shortcut.loads(persisted.read_bytes())
-                record["shortcuts"].value["0"].value["icon"].value = "/custom/concurrent.png" if self.corrupt_write else request["iconPath"]
+                matching = [item.value for item in record["shortcuts"].value.values()
+                            if item.value["appid"].value == request["appid"]]
+                assert len(matching) == 1
+                matching[0]["icon"].value = "/custom/concurrent.png" if self.corrupt_write else request["iconPath"]
                 persisted.write_bytes(shortcut.dumps(record))  # Simulate Steam's own path setter.
                 if self.switch_after_write:
                     self.account = "another-user"
@@ -407,6 +508,27 @@ def test_live_artwork_uses_api_types_and_active_account_not_most_recent(live, ar
         assert hashlib.sha256((grid / ("3000000001" + suffix + extension)).read_bytes()).hexdigest() == expected
     assert list(foreign.iterdir()) == [foreign / "unrelated.png"]
     assert login.read_text().count('"MostRecent" "1"') == 1
+
+
+def test_sd_live_artwork_uses_home_account_grid_and_sd_icon_sidecar(live, artwork_client, sd_game):
+    home, internal_game, grid, foreign, login, client, shortcut = artwork_client
+    assert shortcut.SD_NAME == live.SD_NAME
+    for filename in ("halo", ".halo-frame-installer.json"):
+        (sd_game / filename).write_bytes((internal_game / filename).read_bytes())
+    persisted = grid.parent / "shortcuts.vdf"
+    before = persisted.read_bytes()
+    updated, appid = shortcut.update_shortcut(before, str(sd_game / "halo"), str(sd_game), live.SD_NAME)
+    persisted.write_bytes(updated)
+    result = live._live_artwork(home, sd_game, appid)
+    icon = live._live_icon(home, sd_game, appid)
+    assert result["status"] == icon["status"] == "added"
+    assert icon["path"] == str(sd_game / ".installer-artwork" / shortcut.ICON_NAME)
+    assert all(item["name"] == live.SD_NAME and item["exe"] == str(sd_game / "halo") for item in client.writes)
+    assert all((grid / (str(appid) + suffix + extension)).is_file()
+               for suffix, extension, _, _ in shortcut.ARTWORK)
+    assert shortcut.loads(persisted.read_bytes())["shortcuts"].value["0"] == shortcut.loads(before)["shortcuts"].value["0"]
+    assert list(foreign.iterdir()) == [foreign / "unrelated.png"]
+    assert not (sd_game / ".local").exists() and not (sd_game.parent.parent / ".local").exists()
 
 
 def test_live_artwork_preserves_custom_extensions_and_reuses_managed_hash(live, artwork_client):
@@ -461,7 +583,7 @@ def test_live_artwork_source_integrity_is_checked_before_any_client_request(live
 
 def test_artwork_failure_keeps_verified_library_result_and_reports_manual(live, artwork_client, monkeypatch):
     home, game, grid, foreign, login, client, shortcut = artwork_client
-    monkeypatch.setattr(live, "_library", lambda *args: {"appid": 3000000001, "created": False})
+    monkeypatch.setattr(live, "_library", lambda *args: {"appid": 3000000001, "created": False, "name": live.NAME})
     client.fail_write = True
     result = live.add_native(home, game)
     assert result["status"] == "added" and result["libraryAdded"] is True
@@ -580,7 +702,7 @@ def test_live_icon_unverified_client_selection_is_kept_and_reported_manual(live,
 def test_unpersisted_icon_record_does_not_block_library_or_banner_completion(live, artwork_client, monkeypatch):
     home, game, grid, foreign, login, client, shortcut = artwork_client
     (grid.parent / "shortcuts.vdf").unlink()
-    monkeypatch.setattr(live, "_library", lambda *args: {"appid": 3000000001, "created": False})
+    monkeypatch.setattr(live, "_library", lambda *args: {"appid": 3000000001, "created": False, "name": live.NAME})
     result = live.add_native(home, game)
     assert result["status"] == "added" and result["libraryAdded"] is True
     assert result["artwork"]["status"] == "added"

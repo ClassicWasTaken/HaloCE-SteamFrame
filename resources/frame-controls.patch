@@ -1310,7 +1310,7 @@ index c23181bd889e417aa70dd1b549765265a254ba5c..f997e57f79e1253b8e36528e32ad92f2
  		"gamepad's Back, held) is the player's eye. \"standing\": the head\n"
  		"vr.player_height above the floor is." },
 diff --git a/port/linux/src/vr.c b/port/linux/src/vr.c
-index 89cfb6f0d81d1d406b6b9cff2e76a66129202b4a..110884526b023bccde19ff04b657867e1bb482b6 100644
+index 89cfb6f0d81d1d406b6b9cff2e76a66129202b4a..1f995a3946f537e589e818f3203900c00acd8410 100644
 --- a/port/linux/src/vr.c
 +++ b/port/linux/src/vr.c
 @@ -31,6 +31,7 @@ it or in steps ("level", "snap"). The controllers are a gamepad's halves.
@@ -1336,7 +1336,18 @@ index 89cfb6f0d81d1d406b6b9cff2e76a66129202b4a..110884526b023bccde19ff04b657867e
  	int snap_latched;
  	float recentre_time;
  	/* a gamepad's Back held (halo_vr_gamepad_back), and for how long */
-@@ -153,6 +162,7 @@ static struct
+@@ -109,6 +118,10 @@ static struct
+ 	int acquired[VR_SWAPCHAIN_COUNT];
+ 	int force_render;
+ 	int menus;
++	/* A menu is placed once when opened, independently of the gameplay
++	origin. It stays in the play space until closed or deliberately recentred. */
++	int menu_open;
++	struct vr_host_pose menu_pose;
+ 	/* the eyes' depth this frame, and its range */
+ 	int depth_written;
+ 	/* the melee gesture: the right hand's last position, and the frames
+@@ -153,6 +166,7 @@ static struct
  	float menu_width;
  	int controller_aim;
  	int gamepad_aim;
@@ -1344,7 +1355,7 @@ index 89cfb6f0d81d1d406b6b9cff2e76a66129202b4a..110884526b023bccde19ff04b657867e
  	/* vr.gamepad_view: the view's heading in steps ("snap"), and pitched
  	with the facing ("camera") */
  	int gamepad_snap;
-@@ -236,6 +246,7 @@ static void settings_read(void)
+@@ -236,6 +250,7 @@ static void settings_read(void)
  	settings.menu_width = (float)config_real("vr.menu_width");
  	settings.gamepad_aim = !strcmp(config_string("vr.aim"), "gamepad");
  	settings.controller_aim = !settings.gamepad_aim && strcmp(config_string("vr.aim"), "head") != 0;
@@ -1352,7 +1363,7 @@ index 89cfb6f0d81d1d406b6b9cff2e76a66129202b4a..110884526b023bccde19ff04b657867e
  	settings.gamepad_snap = !strcmp(config_string("vr.gamepad_view"), "snap");
  	settings.gamepad_pitch = !settings.gamepad_snap && strcmp(config_string("vr.gamepad_view"), "level") != 0;
  	settings.melee_gesture = config_boolean("vr.melee_gesture");
-@@ -395,6 +406,7 @@ static void recentre(void)
+@@ -395,10 +410,12 @@ static void recentre(void)
  	else if (vr.origin_valid)
  		vr.body_yaw += yaw - vr.origin_yaw;
  	vr.origin_yaw = yaw;
@@ -1360,7 +1371,12 @@ index 89cfb6f0d81d1d406b6b9cff2e76a66129202b4a..110884526b023bccde19ff04b657867e
  	vr.origin_position[0] = head->position[0];
  	vr.origin_position[1] = settings.standing ? settings.player_height : head->position[1];
  	vr.origin_position[2] = head->position[2];
-@@ -511,6 +523,43 @@ static void weapon_pointing(float forward[3], float up[3])
+ 	vr.origin_valid = 1;
++	vr.menu_pose.valid = 0;
+ 	platform_log("vr: recentred (%s)", settings.standing ? "standing" : "seated");
+ }
+ 
+@@ -511,6 +528,43 @@ static void weapon_pointing(float forward[3], float up[3])
  }
  
  /* the controllers' turning and recentring, once a frame */
@@ -1404,7 +1420,7 @@ index 89cfb6f0d81d1d406b6b9cff2e76a66129202b4a..110884526b023bccde19ff04b657867e
  static void input_update(void)
  {
  	unsigned long now = GetTickCount();
-@@ -564,20 +613,7 @@ static void input_update(void)
+@@ -564,20 +618,7 @@ static void input_update(void)
  	{
  		vr.gamepad_recentre_time = 0.0f;
  	}
@@ -1426,7 +1442,117 @@ index 89cfb6f0d81d1d406b6b9cff2e76a66129202b4a..110884526b023bccde19ff04b657867e
  	/* (not while the left hand holds a long gun's foregrip) */
  	if (vr.input.left_grip > 0.8f && vr.input.right_grip > 0.8f && !vr.two_handed)
  	{
-@@ -1044,6 +1080,126 @@ int halo_vr_view(struct halo_vr_view *view)
+@@ -863,6 +904,51 @@ int halo_vr_frame_active(void)
+ 	return vr.frame && vr.views.should_render;
+ }
+ 
++/* Capture only a fresh, focused pose. Menus can open without a gameplay
++camera (the main menu or postgame), so they do not depend on aiming or the
++recentred gameplay origin. Use the full orientation to remain in front even
++when looking up or down, then keep the quad fixed while the menu is open. */
++static int menu_tracking_valid(float orientation[4])
++{
++	const struct vr_host_pose *head = &vr.views.head;
++	int axis;
++
++	if (!vr.initialized || !vr.frame || !vr.views.should_render || !vr.views.focused || !head->valid ||
++		!halo_vr_locomotion_orientation(head->orientation, orientation))
++		return 0;
++	for (axis = 0; axis < 3; axis++)
++		if (!isfinite(head->position[axis]))
++			return 0;
++	return 1;
++}
++
++static int menu_place(void)
++{
++	static const float forwards[3] = { 0.0f, 0.0f, -1.0f };
++	const struct vr_host_pose *head = &vr.views.head;
++	struct vr_host_pose pose;
++	float pointing[3];
++	int axis;
++
++	if (!menu_tracking_valid(pose.orientation) || !isfinite(settings.menu_distance) || settings.menu_distance <= 0.0f)
++	{
++		vr.menu_pose.valid = 0;
++		return 0;
++	}
++	if (vr.menu_pose.valid)
++		return 1;
++	quaternion_rotate(pose.orientation, forwards, pointing);
++	for (axis = 0; axis < 3; axis++)
++	{
++		pose.position[axis] = head->position[axis] + pointing[axis] * settings.menu_distance;
++		if (!isfinite(pose.position[axis]))
++			return 0;
++	}
++	pose.valid = 1;
++	vr.menu_pose = pose;
++	return 1;
++}
++
+ /* The frame is ended (xrEndFrame) only when the next begins, as the game
+ starts drawing it: SteamVR's xrEndFrame waits for the GPU to finish the
+ frame, and in the meantime the game updates (input, ticks, sounds). */
+@@ -876,6 +962,15 @@ void halo_vr_present(int eyes_drawn, int hud_drawn)
+ 	gamepad goes by this frame's) */
+ 	vr.aimed = vr.aiming;
+ 	vr.aiming = 0;
++	if (vr.menu_open)
++	{
++		float orientation[4];
++
++		/* Even a blank or suppressed frame can lose tracking or focus.
++		The next valid frame places the menu for the current wearer. */
++		if (!menu_tracking_valid(orientation))
++			vr.menu_pose.valid = 0;
++	}
+ 	if (!vr.frame)
+ 		return;
+ 	memset(pending, 0, sizeof(*pending));
+@@ -889,11 +984,13 @@ void halo_vr_present(int eyes_drawn, int hud_drawn)
+ 			vr.depth_far > vr.depth_near;
+ 		pending->near_z = vr.depth_near;
+ 		pending->far_z = vr.depth_far;
+-		if (pending->projection && !vr.menus)
++		if (eyes_drawn && !vr.menus)
+ 		{
+ 			/* the HUD before the eyes, where the HUD's camera looks */
+ 			float width = 2.0f * settings.hud_distance * tanf(settings.hud_size * 0.5f * (float)M_PI / 180.0f);
+ 
++			vr.menu_open = 0;
++			vr.menu_pose.valid = 0;
+ 			pending->hud_head_locked = 1;
+ 			pending->hud_pose.orientation[3] = 1.0f;
+ 			pending->hud_pose.position[2] = -settings.hud_distance;
+@@ -902,14 +999,18 @@ void halo_vr_present(int eyes_drawn, int hud_drawn)
+ 		}
+ 		else
+ 		{
+-			/* the menus, in front of where the head was at the recentring */
+-			float s = sinf(vr.origin_yaw * 0.5f), c = cosf(vr.origin_yaw * 0.5f);
+-
+-			pending->hud_pose.orientation[1] = s;
+-			pending->hud_pose.orientation[3] = c;
+-			pending->hud_pose.position[0] = vr.origin_position[0] - sinf(vr.origin_yaw) * settings.menu_distance;
+-			pending->hud_pose.position[1] = settings.standing ? settings.player_height : vr.origin_position[1];
+-			pending->hud_pose.position[2] = vr.origin_position[2] - cosf(vr.origin_yaw) * settings.menu_distance;
++			/* Capture at the first actually displayed menu, not during a
++			blank loading frame. A missing eye image is still a gameplay HUD. */
++			if (pending->hud)
++			{
++				if (!vr.menu_open)
++					vr.menu_pose.valid = 0;
++				vr.menu_open = 1;
++				if (menu_place())
++					pending->hud_pose = vr.menu_pose;
++				else
++					pending->hud = 0;
++			}
+ 			pending->hud_size[0] = settings.menu_width;
+ 			pending->hud_size[1] = settings.menu_width * (float)HUD_HEIGHT / (float)HUD_WIDTH;
+ 		}
+@@ -1044,6 +1145,126 @@ int halo_vr_view(struct halo_vr_view *view)
  
  /* ---------- aiming */
  
@@ -1553,7 +1679,7 @@ index 89cfb6f0d81d1d406b6b9cff2e76a66129202b4a..110884526b023bccde19ff04b657867e
  int halo_vr_aim(float current_yaw, int long_gun, float *yaw, float *pitch)
  {
  	static const float backwards[3] = { 0.0f, 0.0f, -1.0f };
-@@ -1105,11 +1261,17 @@ void halo_vr_aim_release(void)
+@@ -1105,11 +1326,23 @@ void halo_vr_aim_release(void)
  {
  	vr.aim_synced = 0;
  	vr.aiming = 0;
@@ -1562,6 +1688,12 @@ index 89cfb6f0d81d1d406b6b9cff2e76a66129202b4a..110884526b023bccde19ff04b657867e
  
  void halo_vr_menus(int active)
  {
++	active = active != 0;
++	if (active != vr.menus)
++	{
++		vr.menu_open = 0;
++		vr.menu_pose.valid = 0;
++	}
  	vr.menus = active;
 +	if (active)
 +	{
@@ -1571,7 +1703,7 @@ index 89cfb6f0d81d1d406b6b9cff2e76a66129202b4a..110884526b023bccde19ff04b657867e
  }
  
  int halo_vr_aiming(void)
-@@ -1161,10 +1323,10 @@ void halo_vr_gamepad(void *gamepad)
+@@ -1161,10 +1394,10 @@ void halo_vr_gamepad(void *gamepad)
  	analog(pad, XINPUT_GAMEPAD_B, (buttons & VR_BUTTON_B) || vr.melee_frames > 0);
  	analog(pad, XINPUT_GAMEPAD_X, buttons & VR_BUTTON_X);
  	analog(pad, XINPUT_GAMEPAD_Y, buttons & VR_BUTTON_Y);
@@ -3763,10 +3895,10 @@ index 0000000000000000000000000000000000000000..0b0f6b83d8e2a90962c81eac5ae46a81
 +    main()
 diff --git a/tools/test_vr_locomotion.py b/tools/test_vr_locomotion.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..84926978f6b60e17d53891f4ce6df113833000bc
+index 0000000000000000000000000000000000000000..8f9f3b4045152e97a7d067194455afe9b86a93ac
 --- /dev/null
 +++ b/tools/test_vr_locomotion.py
-@@ -0,0 +1,440 @@
+@@ -0,0 +1,442 @@
 +#!/usr/bin/env python3
 +"""Compile and run the production VR walking math and integration on a host.
 +
@@ -3857,6 +3989,8 @@ index 0000000000000000000000000000000000000000..84926978f6b60e17d53891f4ce6df113
 +static struct {
 +    int initialized, frame, pending, origin_valid, aim_synced, menus, aiming, long_gun;
 +    struct vr_host_views views;
++    int menu_open;
++    struct vr_host_pose menu_pose;
 +    float origin_yaw, body_yaw, origin_position[3];
 +    struct halo_vr_locomotion_heading movement_heading;
 +    int tutorial_head_valid, tutorial_turn_flags, turn_control_allowed;
@@ -4203,6 +4337,345 @@ index 0000000000000000000000000000000000000000..84926978f6b60e17d53891f4ce6df113
 +        subprocess.run(command, cwd=temp, check=True)
 +        subprocess.run([str(executable)], cwd=temp, check=True)
 +    print('PASS: production source integration, Xbox mapping and unchanged controller/long-gun aim')
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/tools/test_vr_menu.py b/tools/test_vr_menu.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..3bf8bf32d48b58d877e7b7485305fa077c02e73b
+--- /dev/null
++++ b/tools/test_vr_menu.py
+@@ -0,0 +1,333 @@
++#!/usr/bin/env python3
++"""Run production menu placement and OpenXR quad submission on a C11 host.
++
++No game data, headset, runtime or SDL is required. The checked-in guest/host
++ABI and Khronos headers are used; only runtime calls and unrelated logging
++are stubbed. Menu input remains covered by the existing walking/tutorial tests.
++"""
++import argparse
++import os
++from pathlib import Path
++import re
++import shutil
++import subprocess
++import tempfile
++
++from test_vr_locomotion import function
++
++ROOT = Path(__file__).resolve().parents[1]
++
++HARNESS = r'''
++#define _USE_MATH_DEFINES
++#include <math.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <openxr/openxr.h>
++#include "vr_host.h"
++#include "vr_locomotion.h"
++#ifndef M_PI
++#define M_PI 3.14159265358979323846
++#endif
++#define HUD_WIDTH 1280
++#define HUD_HEIGHT 960
++static unsigned checks;
++#define CHECK(c) do { checks++; if (!(c)) { fprintf(stderr,"failed line %d: %s\n",__LINE__,#c); exit(1); } } while(0)
++static int close_float(float a, float b) { return fabsf(a-b) < 0.00005f; }
++static struct {
++    int initialized, frame, pending, attempted, origin_valid, aim_synced, aiming, aimed;
++    int menus, menu_open, depth_written;
++    unsigned long presents;
++    int acquired[VR_SWAPCHAIN_COUNT];
++    float origin_yaw, body_yaw, origin_position[3], depth_near, depth_far;
++    struct vr_host_views views;
++    struct vr_host_layers pending_layers;
++    struct vr_host_pose menu_pose;
++    struct halo_vr_locomotion_heading movement_heading;
++    int tutorial_turn_flags, tutorial_head_valid;
++} vr;
++static struct {
++    int gamepad_aim, standing;
++    float player_height, menu_distance, menu_width, hud_distance, hud_size;
++} settings;
++static void platform_log(const char *format, const char *mode) { (void)format; (void)mode; }
++@@GUEST@@
++
++/* Keep the host's production global separate from the guest's production
++global; this is its only identifier substitution in the extracted functions. */
++static struct {
++    int frame_begun;
++    XrFrameState frame;
++    XrSession session;
++    XrSpace play_space, view_space;
++    XrSwapchain swapchains[VR_SWAPCHAIN_COUNT];
++    int swapchain_width[VR_SWAPCHAIN_COUNT], swapchain_height[VR_SWAPCHAIN_COUNT];
++} runtime;
++static struct { int enabled; double release, end; } timing;
++static XrCompositionLayerQuad submitted_quad;
++static unsigned submitted_quads, submitted_projections, release_calls;
++static double seconds_now(void) { return 0.0; }
++static void timing_frame(void) { CHECK(timing.enabled > 0); }
++static void check(XrResult result, const char *message) { CHECK(result == XR_SUCCESS && message != NULL); }
++void host_vr_release(int swapchain) { CHECK(swapchain >= 0 && swapchain < VR_SWAPCHAIN_COUNT); release_calls++; }
++XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession session, const XrFrameEndInfo *end) {
++    uint32_t index;
++    CHECK(session == runtime.session && end->type == XR_TYPE_FRAME_END_INFO && end->next == NULL);
++    CHECK(end->displayTime == runtime.frame.predictedDisplayTime);
++    CHECK(end->environmentBlendMode == XR_ENVIRONMENT_BLEND_MODE_OPAQUE && end->layerCount <= 2);
++    submitted_quads = submitted_projections = 0;
++    for (index = 0; index < end->layerCount; index++) {
++        const XrCompositionLayerBaseHeader *layer = end->layers[index];
++        if (layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
++            submitted_quad = *(const XrCompositionLayerQuad *)layer; submitted_quads++;
++        } else {
++            CHECK(layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION);
++            submitted_projections++;
++        }
++    }
++    return XR_SUCCESS;
++}
++/* OpenXR's conventional { TYPE } initializes the other members to zero. */
++#ifdef __clang__
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wmissing-field-initializers"
++#endif
++@@HOST@@
++#ifdef __clang__
++#pragma clang diagnostic pop
++#endif
++
++static void head_pose(float yaw, float pitch, float roll) {
++    float turn[4] = { 0.f, sinf(yaw*.5f), 0.f, cosf(yaw*.5f) };
++    float tilt[4] = { sinf(pitch*.5f), 0.f, 0.f, cosf(pitch*.5f) };
++    float lean[4] = { 0.f, 0.f, sinf(roll*.5f), cosf(roll*.5f) };
++    float oriented[4];
++    quaternion_multiply(turn, tilt, oriented);
++    quaternion_multiply(oriented, lean, vr.views.head.orientation);
++    vr.views.head.valid = 1;
++}
++static void fixture(void) {
++    int image;
++    memset(&vr, 0, sizeof(vr)); memset(&settings, 0, sizeof(settings));
++    vr.initialized = vr.frame = vr.origin_valid = vr.aim_synced = 1;
++    vr.views.should_render = vr.views.focused = 1;
++    head_pose(0.f, 0.f, 0.f);
++    vr.views.head.position[0] = 1.f; vr.views.head.position[1] = 1.6f; vr.views.head.position[2] = 2.f;
++    vr.origin_position[0] = -500.f; vr.origin_position[1] = 20.f; vr.origin_position[2] = 700.f;
++    vr.origin_yaw = -1.3f; vr.body_yaw = 2.5f;
++    settings.standing = 1; settings.player_height = 1.7f;
++    settings.menu_distance = 1.5f; settings.menu_width = 1.8f;
++    settings.hud_distance = 1.f; settings.hud_size = 60.f;
++    memset(&runtime, 0, sizeof(runtime)); memset(&timing, 0, sizeof(timing));
++    runtime.session = (XrSession)(uintptr_t)1;
++    runtime.play_space = (XrSpace)(uintptr_t)2; runtime.view_space = (XrSpace)(uintptr_t)3;
++    runtime.frame.predictedDisplayTime = 123456;
++    for (image = 0; image < VR_SWAPCHAIN_COUNT; image++) {
++        vr.acquired[image] = 0;
++        runtime.swapchains[image] = (XrSwapchain)(uintptr_t)(image+4);
++        runtime.swapchain_width[image] = HUD_WIDTH; runtime.swapchain_height[image] = HUD_HEIGHT;
++    }
++    release_calls = 0;
++}
++static void submit(int eyes, int hud) {
++    unsigned releases_before = release_calls;
++    vr.frame = 1;
++    halo_vr_present(eyes, hud);
++    runtime.frame_begun = 1;
++    host_vr_frame_end(&vr.pending_layers);
++    CHECK(!runtime.frame_begun && vr.pending && !vr.frame);
++    CHECK(release_calls == releases_before + VR_SWAPCHAIN_COUNT);
++    CHECK(submitted_quads == (unsigned)vr.pending_layers.hud);
++    CHECK(submitted_projections == (unsigned)vr.pending_layers.projection);
++    if (submitted_quads) {
++        CHECK(submitted_quad.space == (vr.pending_layers.hud_head_locked ? runtime.view_space : runtime.play_space));
++        CHECK(submitted_quad.eyeVisibility == XR_EYE_VISIBILITY_BOTH);
++        CHECK(submitted_quad.subImage.swapchain == runtime.swapchains[VR_SWAPCHAIN_HUD]);
++        CHECK(close_float(submitted_quad.pose.position.x, vr.pending_layers.hud_pose.position[0]));
++        CHECK(close_float(submitted_quad.pose.position.y, vr.pending_layers.hud_pose.position[1]));
++        CHECK(close_float(submitted_quad.pose.position.z, vr.pending_layers.hud_pose.position[2]));
++        CHECK(close_float(submitted_quad.pose.orientation.x, vr.pending_layers.hud_pose.orientation[0]));
++        CHECK(close_float(submitted_quad.pose.orientation.y, vr.pending_layers.hud_pose.orientation[1]));
++        CHECK(close_float(submitted_quad.pose.orientation.z, vr.pending_layers.hud_pose.orientation[2]));
++        CHECK(close_float(submitted_quad.pose.orientation.w, vr.pending_layers.hud_pose.orientation[3]));
++        CHECK(close_float(submitted_quad.size.width, vr.pending_layers.hud_size[0]));
++        CHECK(close_float(submitted_quad.size.height, vr.pending_layers.hud_size[1]));
++    }
++}
++static void check_front(void) {
++    static const float forwards[3] = { 0.f, 0.f, -1.f };
++    float orientation[4], pointing[3], distance_squared = 0.f;
++    int axis;
++    CHECK(halo_vr_locomotion_orientation(vr.views.head.orientation, orientation));
++    quaternion_rotate(orientation, forwards, pointing);
++    CHECK(vr.menu_open && vr.menu_pose.valid && vr.pending_layers.hud && !vr.pending_layers.hud_head_locked);
++    for (axis = 0; axis < 3; axis++) {
++        float offset = vr.pending_layers.hud_pose.position[axis] - vr.views.head.position[axis];
++        CHECK(close_float(offset, pointing[axis] * settings.menu_distance));
++        distance_squared += offset * offset;
++    }
++    CHECK(close_float(distance_squared, settings.menu_distance * settings.menu_distance));
++    for (axis = 0; axis < 4; axis++) CHECK(close_float(vr.pending_layers.hud_pose.orientation[axis], orientation[axis]));
++}
++static void check_open_angles_and_gameplay_state(void) {
++    int yaw, pitch, roll;
++    for (yaw = -180; yaw <= 180; yaw += 15) for (pitch = -90; pitch <= 90; pitch += 15)
++    for (roll = -60; roll <= 60; roll += 30) {
++        float origin[3], body;
++        fixture(); head_pose((float)yaw*(float)M_PI/180.f, (float)pitch*(float)M_PI/180.f, (float)roll*(float)M_PI/180.f);
++        memcpy(origin, vr.origin_position, sizeof(origin)); body = vr.body_yaw;
++        halo_vr_menus(1); submit(1, 1); check_front();
++        CHECK(memcmp(origin, vr.origin_position, sizeof(origin)) == 0 && vr.body_yaw == body);
++        CHECK(vr.origin_yaw == -1.3f && vr.aim_synced && vr.pending_layers.projection);
++    }
++    fixture(); settings.gamepad_aim = 1; settings.standing = 0; vr.aim_synced = vr.origin_valid = 0;
++    head_pose(2.8f, 0.4f, -0.2f); halo_vr_menus(1); submit(1, 1); check_front();
++    CHECK(!vr.origin_valid && !vr.aim_synced); /* A menu needs no gameplay camera/aim. */
++    fixture(); vr.views.head.orientation[3] = 1.01f; halo_vr_menus(1); submit(1, 1); check_front();
++}
++static void check_stable_reopen_recentre(void) {
++    struct vr_host_pose anchor;
++    int frame;
++    fixture(); head_pose(2.4f, 0.3f, 0.1f); halo_vr_menus(1); submit(1, 1); check_front();
++    anchor = vr.menu_pose;
++    for (frame = 0; frame < 20; frame++) {
++        head_pose((float)frame*0.2f, -(float)frame*0.03f, 0.f);
++        vr.views.head.position[0] += 0.1f; vr.views.head.position[1] += 0.01f;
++        vr.views.head.position[2] -= 0.1f;
++        halo_vr_menus(1); submit(1, 1);
++        CHECK(memcmp(&anchor, &vr.menu_pose, sizeof(anchor)) == 0);
++        CHECK(memcmp(&anchor, &vr.pending_layers.hud_pose, sizeof(anchor)) == 0);
++    }
++    halo_vr_menus(0); CHECK(!vr.menu_pose.valid && !vr.menu_open);
++    halo_vr_menus(1); submit(1, 1); check_front();
++    CHECK(memcmp(&anchor, &vr.menu_pose, sizeof(anchor)) != 0);
++    /* Deliberate recenter is one replacement, not continual head locking. */
++    head_pose(-2.3f, -0.2f, 0.f); recentre(); CHECK(!vr.menu_pose.valid);
++    submit(1, 1); check_front(); anchor = vr.menu_pose;
++    head_pose(0.f, 0.f, 0.f); submit(1, 1); CHECK(memcmp(&anchor, &vr.menu_pose, sizeof(anchor)) == 0);
++    halo_vr_menus(0); submit(1, 1);
++    CHECK(!vr.menu_open && !vr.menu_pose.valid && vr.pending_layers.hud_head_locked);
++    CHECK(close_float(submitted_quad.pose.position.z, -settings.hud_distance));
++    /* Failed eye acquisition must not reclassify the gameplay HUD as a menu. */
++    vr.acquired[VR_SWAPCHAIN_EYES] = -1; submit(1, 1);
++    CHECK(!vr.pending_layers.projection && vr.pending_layers.hud_head_locked && !vr.menu_open);
++}
++static void corrupt_pose(int corruption) {
++    switch (corruption) {
++    case 0: vr.initialized = 0; break;
++    case 1: vr.views.should_render = 0; break;
++    case 2: vr.views.focused = 0; break;
++    case 3: vr.views.head.valid = 0; break;
++    case 4: vr.views.head.position[0] = NAN; break;
++    case 5: vr.views.head.position[1] = INFINITY; break;
++    case 6: vr.views.head.position[2] = -INFINITY; break;
++    case 7: vr.views.head.orientation[0] = NAN; break;
++    case 8: vr.views.head.orientation[1] = INFINITY; break;
++    case 9: memset(vr.views.head.orientation, 0, sizeof(vr.views.head.orientation)); break;
++    case 10: vr.views.head.orientation[3] = 2.f; break;
++    case 11: settings.menu_distance = NAN; break;
++    case 12: settings.menu_distance = 0.f; break;
++    }
++}
++static void check_tracking_loss_and_deferral(void) {
++    int corruption, already_open;
++    for (already_open = 0; already_open < 2; already_open++) for (corruption = 0; corruption < 13; corruption++) {
++        fixture(); halo_vr_menus(1);
++        if (already_open) { submit(1, 1); CHECK(vr.menu_pose.valid); }
++        corrupt_pose(corruption); submit(1, 1);
++        CHECK(!vr.menu_pose.valid && !vr.pending_layers.hud && !submitted_quads);
++        vr.initialized = vr.views.should_render = vr.views.focused = 1;
++        vr.views.head.position[0] = 7.f; vr.views.head.position[1] = 1.25f; vr.views.head.position[2] = -4.f;
++        settings.menu_distance = 1.5f; head_pose(-2.9f, 0.8f, 0.3f);
++        submit(1, 1); check_front(); /* Never retain the previous wearer's pose. */
++    }
++    fixture(); halo_vr_menus(1); submit(1, 1);
++    vr.frame = 0; CHECK(!menu_place() && !vr.menu_pose.valid); /* Pending frame is stale. */
++    submit(1, 1); check_front();
++    vr.views.focused = 0; submit(0, 0); CHECK(!vr.menu_pose.valid);
++    vr.views.focused = 1; head_pose(2.6f, -0.4f, 0.f); submit(1, 1); check_front();
++    fixture(); halo_vr_menus(1); submit(1, 1);
++    vr.frame = 0; halo_vr_present(1, 1); CHECK(!vr.menu_pose.valid);
++    head_pose(-2.f, 0.2f, 0.f); submit(1, 1); check_front();
++}
++static void check_main_postgame_and_blank_frames(void) {
++    struct vr_host_pose anchor;
++    fixture(); vr.origin_valid = vr.aim_synced = 0;
++    head_pose(2.5f, -0.5f, 0.f); submit(0, 0);
++    CHECK(!vr.menu_open && !vr.menu_pose.valid); /* No capture before menu is visible. */
++    head_pose(-2.7f, 0.2f, 0.f); submit(0, 1); check_front();
++    CHECK(!vr.pending_layers.projection && submitted_projections == 0);
++    anchor = vr.menu_pose;
++    head_pose(0.f, 0.f, 0.f); submit(0, 1); CHECK(memcmp(&anchor, &vr.menu_pose, sizeof(anchor)) == 0);
++    submit(1, 1); CHECK(!vr.menu_open && vr.pending_layers.hud_head_locked);
++    /* The endgame path displays no 3D projection even before its menu flag. */
++    head_pose(2.9f, 0.5f, 0.2f); submit(0, 1); check_front();
++    CHECK(!vr.pending_layers.projection && submitted_quad.space == runtime.play_space);
++    /* An explicit close/reopen without an intermediate render is still new. */
++    halo_vr_menus(1); submit(0, 1); anchor = vr.menu_pose;
++    halo_vr_menus(0); halo_vr_menus(1); head_pose(-2.9f, -0.2f, 0.f);
++    submit(0, 1); check_front(); CHECK(memcmp(&anchor, &vr.menu_pose, sizeof(anchor)) != 0);
++    fixture(); vr.tutorial_head_valid = 1; vr.tutorial_turn_flags = 3; halo_vr_menus(7);
++    CHECK(vr.menus == 1 && !vr.tutorial_head_valid && !vr.tutorial_turn_flags);
++}
++int main(void) {
++    check_open_angles_and_gameplay_state(); check_stable_reopen_recentre();
++    check_tracking_loss_and_deferral(); check_main_postgame_and_blank_frames();
++    printf("PASS: %u production VR menu/quad placement assertions\n", checks); return 0;
++}
++'''
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('--cc')
++    parser.add_argument('--vcvarsall', type=Path)
++    args = parser.parse_args()
++    guest = (ROOT / 'port/linux/src/vr.c').read_text()
++    host = (ROOT / 'port/linux/arm64/host_vr.c').read_text()
++    harness = HARNESS.replace('@@GUEST@@', '\n\n'.join(function(guest, name) for name in (
++        'quaternion_rotate', 'quaternion_yaw', 'quaternion_multiply', 'recentre',
++        'menu_tracking_valid', 'menu_place', 'halo_vr_present', 'halo_vr_menus')))
++    harness = harness.replace('@@HOST@@', re.sub(r'\bvr\b', 'runtime', '\n\n'.join(
++        function(host, name) for name in ('pose_to_xr', 'host_vr_frame_end'))))
++    compiler = args.cc or os.environ.get('CC')
++    vcvars = args.vcvarsall
++    if not compiler and os.name == 'nt':
++        installations = Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'Microsoft Visual Studio'
++        candidates = sorted(installations.glob('*/**/VC/Tools/MSVC/*/bin/Hostx64/x64/cl.exe'))
++        if candidates:
++            compiler = str(candidates[-1])
++            vcvars = vcvars or candidates[-1].parents[6] / 'Auxiliary/Build/vcvarsall.bat'
++    compiler = compiler or shutil.which('cc') or shutil.which('clang') or shutil.which('gcc')
++    if not compiler:
++        raise SystemExit('No C11 host compiler found; select one with --cc.')
++    include_paths = [ROOT / 'port/third_party/openxr', ROOT / 'port/linux/src']
++    with tempfile.TemporaryDirectory(prefix='halo-vr-menu-', ignore_cleanup_errors=True) as directory:
++        temp = Path(directory)
++        source = temp / 'test.c'
++        executable = temp / ('test.exe' if os.name == 'nt' else 'test')
++        source.write_text(harness)
++        if Path(compiler).name.lower() in ('cl', 'cl.exe'):
++            command = [compiler, '/nologo', '/std:c11', '/W4', '/WX', '/D_CRT_SECURE_NO_WARNINGS',
++                       '/Fe:' + str(executable), '/Fo:' + str(temp / 'test.obj')]
++            command.extend('/I' + str(path) for path in include_paths)
++            command.append(str(source))
++            if vcvars:
++                for path in (vcvars, Path(compiler), temp):
++                    if any(character in str(path) for character in '\r\n"&|<>^%!'):
++                        raise SystemExit('Unsupported compiler/temp shell metacharacter')
++                batch = temp / 'compile.cmd'
++                batch.write_text('@echo off\ncall "' + str(vcvars) + '" x64 >nul\n'
++                                 'if errorlevel 1 exit /b 1\n' + subprocess.list2cmdline(command) + '\n')
++                command = ['cmd.exe', '/d', '/c', str(batch)]
++        else:
++            command = [compiler, '-std=c11', '-Wall', '-Wextra', '-Werror']
++            command.extend('-I' + str(path) for path in include_paths)
++            command.extend([str(source), *([] if os.name == 'nt' else ['-lm']), '-o', str(executable)])
++        subprocess.run(command, cwd=temp, check=True)
++        subprocess.run([str(executable)], cwd=temp, check=True)
 +
 +
 +if __name__ == '__main__':
