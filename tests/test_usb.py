@@ -2,6 +2,7 @@ import hashlib
 import json
 import socket
 import subprocess
+import sys
 from unittest.mock import Mock
 
 import paramiko
@@ -291,3 +292,55 @@ def test_bundled_helper_and_notices_are_verified_then_cached(tmp_path, monkeypat
 def test_unknown_transport_rejected():
     with pytest.raises(ValueError, match='Choose'):
         Settings('frame', 'secret', transport='other')
+
+
+def _install_fake_bundle(tmp_path, monkeypatch):
+    root = tmp_path / 'bundle' / 'resources' / 'usb'
+    root.mkdir(parents=True)
+    files = {name: hashlib.sha256(name.encode()).hexdigest() for name in usb.ADB_FILES}
+    for name in (*usb.ADB_FILES, 'NOTICE.txt'):
+        (root / name).write_bytes(name.encode())
+    manifest = {'version': '37.0.1', 'files': files, 'noticeSha256': hashlib.sha256(b'NOTICE.txt').hexdigest()}
+    (root / 'manifest.json').write_text(json.dumps(manifest))
+    monkeypatch.setattr(usb.sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(usb.sys, '_MEIPASS', str(root.parent.parent), raising=False)
+    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path / 'local'))
+    return tmp_path / 'local' / 'HaloFrameInstaller' / 'usb-tools' / '37.0.1' / 'adb.exe'
+
+
+def _expose_adb_on_search_path(tmp_path, monkeypatch):
+    folder = tmp_path / 'search-path'
+    folder.mkdir()
+    # shutil.which("adb") needs an executable file named exactly "adb" on
+    # POSIX and finds "adb.exe" via the Windows suffix rules, so provide both.
+    for name in ('adb', 'adb.exe'):
+        shadow = folder / name
+        shadow.write_bytes(b'shadowing adb')
+        shadow.chmod(0o755)
+    # shutil.which on Windows searches the working directory before PATH.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('PATH', str(folder))
+    return (folder / ('adb.exe' if sys.platform == 'win32' else 'adb')).resolve()
+
+
+def test_hash_verified_bundle_is_preferred_over_search_path_adb(tmp_path, monkeypatch):
+    bundled = _install_fake_bundle(tmp_path, monkeypatch)
+    _expose_adb_on_search_path(tmp_path, monkeypatch)
+    assert usb.resolve_adb() == bundled
+
+
+def test_search_path_adb_is_used_when_no_bundle_exists(tmp_path, monkeypatch):
+    monkeypatch.setattr(usb.sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(usb.sys, '_MEIPASS', str(tmp_path / 'no-bundle'), raising=False)
+    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path / 'local'))
+    shadow = _expose_adb_on_search_path(tmp_path, monkeypatch)
+    assert usb.resolve_adb() == shadow
+
+
+def test_explicitly_selected_adb_wins_over_bundle_and_search_path(tmp_path, monkeypatch):
+    _install_fake_bundle(tmp_path, monkeypatch)
+    _expose_adb_on_search_path(tmp_path, monkeypatch)
+    chosen = tmp_path / 'chosen' / 'adb.exe'
+    chosen.parent.mkdir()
+    chosen.write_bytes(b'user selected adb')
+    assert usb.resolve_adb(str(chosen)) == chosen.resolve()
