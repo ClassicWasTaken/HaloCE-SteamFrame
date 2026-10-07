@@ -30,7 +30,7 @@ With `vr.aim = "controller"`, **`vr.movement = "head"`** makes the left stick fo
 
 **Multiplayer > CO-OP CAMPAIGN** opens network campaign choices in VR and flat mode: **HOST LOCAL (LAN)**, **JOIN LOCAL (LAN)**, **HOST ONLINE (INTERNET)**, **JOIN ONLINE (INTERNET)**, and **JOIN INVITE LINK**. Campaign uses one local player per machine; there is no second-controller or split-screen campaign route. Hosts start with **SINGLEPLAYER** maps selected. All peers need compatible **protocol 17** builds, matching game data and capacity limits; stable protocol 11 and retail Xbox/PC/Custom Edition/MCC clients cannot join. Extra co-op enemies default to `"none"`; Repair preserves a configured enemy mode.
 
-The build stages `brokers.txt` for internet invite/server discovery. The relative default `network.brokers_file = "brokers.txt"` resolves beside the game's config; a custom setting is preserved. The tester confirmed LAN and online campaign work; successful joining still depends on compatible peers, reachable brokers, and each network's connectivity. [Pinned co-op implementation and protocol sources](SOURCES.md#140-engine-changes) explain these requirements.
+The build stages `brokers.txt` for internet invite/server discovery. The relative default `network.brokers_file = "brokers.txt"` resolves beside the game's config; a custom setting is preserved. The tester confirmed LAN and online campaign work; successful joining still depends on compatible peers, reachable brokers, and each network's connectivity. [Pinned co-op implementation and protocol sources](SOURCES.md#retained-140-engine-changes) explain these requirements.
 
 ## Online campaign co-op with a friend
 
