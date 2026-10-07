@@ -220,7 +220,9 @@ def test_uninstall_timeout_reports_uncertain_removal_and_closes_channel(monkeypa
     client = Mock()
     client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
     monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
-    monkeypatch.setattr(ssh.time, 'monotonic', Mock(side_effect=[0, 601]))
+    clock = Mock(return_value=0)
+    monkeypatch.setattr(ssh.time, 'monotonic', clock)
+    channel.set_combine_stderr.side_effect = lambda value: setattr(clock, 'return_value', 601)
     connection = SSHConnection(Settings('frame', 'private'))
     with pytest.raises(SSHError, match='Removal may be incomplete') as error:
         connection.run(['python3', 'helper.py', 'uninstall'], timeout=600,
@@ -277,7 +279,9 @@ def test_failed_cancel_notice_does_not_mask_the_timeout_error(monkeypatch):
     client = Mock()
     client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
     monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
-    monkeypatch.setattr(ssh.time, 'monotonic', Mock(side_effect=[0, 601]))
+    clock = Mock(return_value=0)
+    monkeypatch.setattr(ssh.time, 'monotonic', clock)
+    channel.set_combine_stderr.side_effect = lambda value: setattr(clock, 'return_value', 601)
     on_cancel = Mock(side_effect=paramiko.SSHException('SSH session not active'))
     with pytest.raises(SSHError, match='timed out'):
         SSHConnection(Settings('frame', 'private')).run(['python3', 'helper.py'], timeout=600, on_cancel=on_cancel)
@@ -332,7 +336,9 @@ def test_channel_close_failure_cannot_replace_the_timeout(monkeypatch):
     client = Mock()
     client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
     monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
-    monkeypatch.setattr(ssh.time, 'monotonic', Mock(side_effect=[0, 601]))
+    clock = Mock(return_value=0)
+    monkeypatch.setattr(ssh.time, 'monotonic', clock)
+    channel.set_combine_stderr.side_effect = lambda value: setattr(clock, 'return_value', 601)
     connection = SSHConnection(Settings('frame', 'private'))
     with pytest.raises(ssh.RemoteTimeoutError, match='timed out'):
         connection.run(['helper'], timeout=600)
@@ -384,3 +390,297 @@ def test_eof_connect_or_keepalive_failure_is_redacted_and_tears_down(monkeypatch
         SSHConnection(Settings('frame', 'private')).connect()
     assert 'private' not in str(error.value)
     client.close.assert_called_once()
+
+
+def test_silent_exec_handshake_is_bounded_by_a_watchdog(monkeypatch):
+    import time as time_module
+    release = threading.Event()
+    transport = Mock()
+    transport.close.side_effect = release.set
+    client = Mock()
+    client.get_transport.return_value = transport
+
+    def blocked_exec(command, timeout=None):
+        release.wait(60)
+        raise paramiko.SSHException('SSH session not active')
+
+    client.exec_command.side_effect = blocked_exec
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    connection = SSHConnection(Settings('frame', 'private'))
+    connection.handshake_grace = 0.05
+    started = time_module.monotonic()
+    with pytest.raises(SSHError, match='could not be started'):
+        connection.run(['python3', 'helper.py'], timeout=0.5)
+    assert time_module.monotonic() - started < 5  # unbounded waits defeat this without the watchdog
+
+
+def test_newline_free_flood_keeps_only_the_recent_tail(monkeypatch):
+    from collections import deque
+    payload = b'A' * (2 * 1024 * 1024) + b'B\n'
+    packets = deque(payload[index:index + 65536] for index in range(0, len(payload), 65536))
+    channel = Mock()
+    channel.recv_ready.side_effect = lambda: bool(packets)
+    channel.recv.side_effect = lambda count: packets.popleft()
+    channel.exit_status_ready.side_effect = lambda: not packets
+    channel.recv_exit_status.return_value = 0
+    client = Mock()
+    client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    lines = []
+    SSHConnection(Settings('frame', 'private')).run(['python3', 'helper.py'], progress=lines.append)
+    assert lines and len(lines[-1]) < 200 * 1024
+
+
+def test_cancel_is_honored_inside_a_readable_channel(monkeypatch):
+    cancel = threading.Event()
+    calls = [0]
+    channel = Mock()
+    channel.recv_ready.return_value = True
+    channel.exit_status_ready.return_value = False
+
+    def recv(count):
+        calls[0] += 1
+        if calls[0] == 3:
+            cancel.set()
+        return b'y' * 65536
+
+    channel.recv.side_effect = recv
+    client = Mock()
+    client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    with pytest.raises(CancelledError):
+        SSHConnection(Settings('frame', 'private')).run(['python3', 'helper.py'], cancel_event=cancel)
+
+
+def assert_no_handshake_watchdog():
+    assert not any(thread.name == 'ssh-handshake-watchdog' for thread in threading.enumerate())
+
+
+def test_healthy_upload_can_outlast_the_handshake_budget(monkeypatch):
+    import time
+    client, sftp, transport = Mock(), Mock(), Mock()
+    client.get_transport.return_value = transport
+    client.open_sftp.return_value = sftp
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    connection = SSHConnection(Settings('frame', 'private'))
+    connection.sftp_timeout = 0.02
+    connection.handshake_grace = 0.03
+    progress = Mock()
+
+    def transfer(local, remote, *, callback, confirm):
+        # Scale the handshake budget down while the healthy upload lasts four
+        # times longer. The upload must never inherit the handshake deadline.
+        assert_no_handshake_watchdog()
+        for count in range(4):
+            time.sleep(0.05)
+            callback(count + 1, 4)
+            transport.close.assert_not_called()
+
+    sftp.put.side_effect = transfer
+    connection.put('local.map', 'remote.map', callback=progress)
+    assert progress.call_count == 4
+    sftp.close.assert_called_once()
+    assert not connection._sftp_clients
+    assert_no_handshake_watchdog()
+
+
+@pytest.mark.parametrize('operation', ['exec', 'sftp'])
+@pytest.mark.parametrize('fail', [False, True])
+def test_handshake_watchdog_retires_after_success_or_error(monkeypatch, operation, fail):
+    import time
+    client, channel, sftp = Mock(), Mock(), Mock()
+    channel.recv_ready.return_value = False
+    channel.exit_status_ready.return_value = True
+    channel.recv_exit_status.return_value = 0
+    client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
+    client.open_sftp.return_value = sftp
+    target = client.exec_command if operation == 'exec' else client.open_sftp
+    if fail:
+        target.side_effect = EOFError('private')
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    connection = SSHConnection(Settings('frame', 'private'))
+    connection.sftp_timeout = 0.02
+    connection.handshake_grace = 0.03
+    cancel = threading.Event()
+    invoke = (lambda: connection.run(['helper'], timeout=0.2, cancel_event=cancel)) if operation == 'exec' else (
+        lambda: connection.put('local', 'remote', cancel_event=cancel))
+    if fail:
+        with pytest.raises(SSHError):
+            invoke()
+    else:
+        invoke()
+    assert_no_handshake_watchdog()
+    # A late cancel/deadline must not affect a following operation's transport.
+    cancel.set()
+    time.sleep(0.3)
+    client.get_transport.return_value.close.assert_not_called()
+
+
+def test_cancel_recovery_waits_for_watchdog_and_uses_captured_transport(monkeypatch):
+    import time
+    client, original, replacement = Mock(), Mock(), Mock()
+    closing = threading.Event()
+    closed = threading.Event()
+    cancel = threading.Event()
+    client.get_transport.return_value = original
+
+    def close():
+        closing.set()
+        time.sleep(0.05)
+        closed.set()
+
+    def blocked_exec(*args, **kwargs):
+        cancel.set()
+        assert closing.wait(2)
+        client.get_transport.return_value = replacement
+        raise EOFError('private')
+
+    def recover():
+        assert closed.is_set()
+        assert_no_handshake_watchdog()
+        replacement.close.assert_not_called()
+
+    original.close.side_effect = close
+    client.exec_command.side_effect = blocked_exec
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    recovery = Mock(side_effect=recover)
+    with pytest.raises(CancelledError):
+        SSHConnection(Settings('frame', 'private')).run(['helper'], cancel_event=cancel, on_cancel=recovery)
+    recovery.assert_called_once()
+    original.close.assert_called_once()
+    replacement.close.assert_not_called()
+
+
+def test_cancel_at_sftp_handshake_completion_never_starts_upload(monkeypatch):
+    client, sftp = Mock(), Mock()
+    cancel = threading.Event()
+
+    def open_sftp():
+        cancel.set()
+        return sftp
+
+    client.open_sftp.side_effect = open_sftp
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    connection = SSHConnection(Settings('frame', 'private'))
+    with pytest.raises(CancelledError):
+        connection.put('never-opened', 'never-written', cancel_event=cancel)
+    sftp.put.assert_not_called()
+    sftp.close.assert_called_once()
+    assert not connection._sftp_clients
+    assert_no_handshake_watchdog()
+
+
+def test_continuous_output_still_honors_the_step_deadline(monkeypatch):
+    from halo_frame_installer import ssh
+    client, channel = Mock(), Mock()
+    clock = Mock(return_value=0)
+    channel.recv_ready.return_value = True
+    channel.exit_status_ready.return_value = False
+
+    def recv(count):
+        clock.return_value = 2
+        return b'still streaming without newlines'
+
+    channel.recv.side_effect = recv
+    client.exec_command.return_value = (Mock(), Mock(channel=channel), Mock())
+    monkeypatch.setattr(paramiko, 'SSHClient', lambda: client)
+    monkeypatch.setattr(ssh.time, 'monotonic', clock)
+    recovery = Mock()
+    with pytest.raises(ssh.RemoteTimeoutError, match='custom step deadline'):
+        SSHConnection(Settings('frame', 'private')).run(
+            ['helper'], timeout=1, timeout_message='custom step deadline', on_cancel=recovery)
+    recovery.assert_called_once()
+    channel.recv.assert_called_once()
+    channel.close.assert_called_once()
+    assert_no_handshake_watchdog()
+
+
+@pytest.fixture
+def silent_paramiko_session():
+    """A local socketpair server that never runs commands or accesses files."""
+    import socket
+    sessions = []
+
+    def create(stage):
+        requested, release = threading.Event(), threading.Event()
+
+        class Server(paramiko.ServerInterface):
+            def check_auth_password(self, username, password):
+                return paramiko.AUTH_SUCCESSFUL
+
+            def check_channel_request(self, kind, chanid):
+                return paramiko.OPEN_SUCCEEDED
+
+            def check_channel_exec_request(self, channel, command):
+                requested.set()
+                release.wait(3)
+                return False
+
+            def check_channel_subsystem_request(self, channel, name):
+                requested.set()
+                if stage == 'subsystem':
+                    release.wait(3)
+                    return False
+                # Accept SFTP but send no version packet. This reproduces the
+                # additional read inside SFTPClient construction, after the
+                # subsystem request itself has already succeeded.
+                return True
+
+        left, right = socket.socketpair()
+        server_transport = paramiko.Transport(left)
+        client_transport = paramiko.Transport(right)
+        sessions.append((client_transport, server_transport, release))
+        server_transport.add_server_key(paramiko.RSAKey.generate(1024))
+        server_transport.start_server(event=threading.Event(), server=Server())
+        client_transport.start_client(timeout=2)
+        client_transport.auth_password('steamos', 'test-only')
+        connection = SSHConnection(Settings('frame', 'private'))
+        connection.client._transport = client_transport
+        return connection, requested
+
+    yield create
+    for client, server, release in sessions:
+        release.set()
+        client.close()
+        server.close()
+        client.join(timeout=2)
+        server.join(timeout=2)
+
+
+@pytest.mark.parametrize('stage', ['exec', 'subsystem', 'sftp-version'])
+@pytest.mark.parametrize('cancelled', [False, True])
+def test_real_silent_handshake_stops_on_deadline_or_cancel(silent_paramiko_session, stage, cancelled):
+    import time
+    connection, requested = silent_paramiko_session(stage)
+    cancel = threading.Event()
+    connection.handshake_grace = 0
+    connection.sftp_timeout = 20 if cancelled else 0.1
+    notifier = None
+    if cancelled:
+        def press_cancel():
+            if requested.wait(2):
+                cancel.set()
+        notifier = threading.Thread(target=press_cancel, daemon=True)
+        notifier.start()
+    recovery = Mock(side_effect=assert_no_handshake_watchdog)
+    started = time.monotonic()
+    try:
+        with pytest.raises(CancelledError if cancelled else SSHError) as error:
+            if stage == 'exec':
+                connection.run(['never-executed'], cancel_event=cancel,
+                               timeout=30 if cancelled else 0.1, on_cancel=recovery)
+            else:
+                connection.put('never-opened', 'never-written', cancel_event=cancel)
+        assert time.monotonic() - started < 1.5
+        assert requested.is_set()
+        assert not connection.is_active()
+        assert 'private' not in str(error.value)
+        if stage == 'exec' and cancelled:
+            recovery.assert_called_once()
+        else:
+            recovery.assert_not_called()
+        assert_no_handshake_watchdog()
+    finally:
+        if notifier is not None:
+            notifier.join(timeout=2)
+        connection.close()

@@ -10,6 +10,7 @@ import socket
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -226,6 +227,46 @@ class SSHConnection:
                 raise SSHError(str(exc)) from None
             self._usb_forward = None
 
+    handshake_grace = 5.0
+    """Extra seconds a handshake may take past its step timeout before the
+    transport is force-closed; paramiko's internal waits are otherwise
+    unbounded on a live-but-silent session."""
+    sftp_timeout = 20.0
+
+    @contextmanager
+    def _handshake_watchdog(self, timeout: float, cancel_event: threading.Event | None):
+        """Interrupt only this handshake, then retire before any recovery work."""
+        transport = self.client.get_transport()
+        finished = threading.Event()
+        deadline = time.monotonic() + timeout
+
+        def watch():
+            while not finished.is_set():
+                remaining = deadline - time.monotonic()
+                if (cancel_event is not None and cancel_event.is_set()) or remaining <= 0:
+                    # Closing the captured session releases Paramiko's exec,
+                    # subsystem and SFTP-version waits, which ignore the channel
+                    # timeout. Never look up a potentially replacement session.
+                    try:
+                        if transport is not None:
+                            transport.close()
+                    except Exception:
+                        pass
+                    return
+                if finished.wait(min(0.05, remaining)):
+                    return
+
+        watchdog = threading.Thread(target=watch, name="ssh-handshake-watchdog", daemon=True)
+        watchdog.start()
+        try:
+            yield
+        finally:
+            finished.set()
+            # cancel() alone cannot stop a timer callback that has already
+            # started. Wait for retirement before a transfer or on_cancel can
+            # start another operation on this connection.
+            watchdog.join()
+
     def run(self, argv: list[str], *, progress: Callable[[str], None] | None = None,
             cancel_event: threading.Event | None = None, timeout: float = 3600,
             on_cancel: Callable[[], None] | None = None,
@@ -244,7 +285,8 @@ class SSHConnection:
         command = shlex.join([str(arg) for arg in argv])
         started = time.monotonic()
         try:
-            _, stdout, _ = self.client.exec_command(command, timeout=min(30, timeout))
+            with self._handshake_watchdog(min(30, timeout) + self.handshake_grace, cancel_event):
+                _, stdout, _ = self.client.exec_command(command, timeout=min(30, timeout))
         except (paramiko.SSHException, OSError, EOFError):
             if cancel_event is not None and cancel_event.is_set():
                 notify_cancelled()
@@ -268,6 +310,15 @@ class SSHConnection:
                     notify_cancelled()
                     raise RemoteTimeoutError(timeout_message or "The remote step timed out. You can reconnect and retry; existing games and saves were kept.")
                 while channel.recv_ready():
+                    # These checks live inside the receive loop on purpose: a
+                    # device that keeps the channel readable must not make the
+                    # cancel button or the step timeout unreachable.
+                    if cancel_event is not None and cancel_event.is_set():
+                        notify_cancelled()
+                        raise CancelledError("Installation cancelled. Existing games and saves were kept.")
+                    if time.monotonic() - started > timeout:
+                        notify_cancelled()
+                        raise RemoteTimeoutError(timeout_message or "The remote step timed out. You can reconnect and retry; existing games and saves were kept.")
                     data = channel.recv(65536)
                     if not data:
                         break
@@ -282,6 +333,10 @@ class SSHConnection:
                         else:
                             retained_bytes -= len(first)
                     pending.extend(data)
+                    if len(pending) > 1024 * 1024:
+                        # Endless newline-free output must not grow host memory
+                        # without bound; keep only the most recent tail.
+                        del pending[:len(pending) - 64 * 1024]
                     while b"\n" in pending:
                         line, _, rest = pending.partition(b"\n")
                         pending[:] = rest
@@ -341,9 +396,12 @@ class SSHConnection:
             raise CancelledError("Installation cancelled. Existing games and saves were kept.")
         sftp = None
         try:
-            sftp = self.client.open_sftp()
+            with self._handshake_watchdog(self.sftp_timeout + self.handshake_grace, cancel_event):
+                sftp = self.client.open_sftp()
             self._sftp_clients.add(sftp)
-            sftp.get_channel().settimeout(20)
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledError("Installation cancelled. Existing games and saves were kept.")
+            sftp.get_channel().settimeout(self.sftp_timeout)
             sftp.put(str(local), remote, callback=update, confirm=True)
         except (OSError, EOFError, paramiko.SSHException):
             if cancel_event is not None and cancel_event.is_set():
