@@ -2,6 +2,7 @@ import importlib.util
 import json
 import sys
 import struct
+import subprocess
 import threading
 import types
 from collections import OrderedDict
@@ -647,6 +648,45 @@ def test_repair_preserves_custom_sun_glow_strength(remote):
     assert updated['vr']['sun_glow_strength'] == 0.25
 
 
+def legacy_install(remote, source_commit):
+    game = remote.GAME
+    game.mkdir(parents=True)
+    header = bytearray(64)
+    header[:6] = b'ELF'
+    struct.pack_into('<H', header, 18, 183)
+    for name in ('halo', 'libSDL3.so.0'):
+        (game / name).write_bytes(header)
+    maps = xbox_maps(game, remote)
+    (game / 'xbox-data-manifest.json').write_text(json.dumps(maps))
+    (game / remote.MARKER).write_text(json.dumps({'owner': remote.OWNER,
+        'sourceCommit': source_commit,
+        'files': {name: remote.digest(game / name) for name in ('halo', 'libSDL3.so.0')}}))
+    return game
+
+
+@pytest.mark.parametrize('repair', [False, True])
+def test_redirected_config_without_upgrade_evidence_is_not_proof_of_save_ownership(remote, repair):
+    game = legacy_install(remote, remote.LEGACY_SOURCE_COMMIT)
+    (game / 'config.toml').write_text('[paths]\ndata = %s\nsaves = %s\n'
+        % (json.dumps(str(game)), json.dumps(str(remote.save_root()))))
+    remote.save_root().mkdir(parents=True)
+    (remote.save_root() / 'checkpoint.sav').write_bytes(b'played after the interrupted upgrade')
+    with pytest.raises(ValueError, match='interrupted upgrade could not be verified'):
+        remote.existing_install(repair=repair)
+    assert (remote.save_root() / 'checkpoint.sav').read_bytes() == b'played after the interrupted upgrade'
+
+
+@pytest.mark.parametrize('repair', [False, True])
+def test_foreign_save_destination_still_refused_during_migration(remote, repair):
+    game = legacy_install(remote, remote.LEGACY_SOURCE_COMMIT)
+    (game / 'config.toml').write_text('[paths]\ndata = %s\nsaves = %s\n'
+        % (json.dumps(str(game)), json.dumps(str(game / 'save'))))
+    remote.save_root().mkdir(parents=True)
+    (remote.save_root() / 'foreign.sav').write_bytes(b'not ours')
+    with pytest.raises(ValueError, match='save destination already contains files'):
+        remote.existing_install(repair=repair)
+
+
 @pytest.mark.parametrize('repair', [False, True])
 @pytest.mark.parametrize('unsafe', ['legacy-save-config', 'copied-experimental-config', 'symlinked-save-directory', 'missing-paths'])
 def test_new_reuse_and_repair_guard_save_format_and_keep_experimental_instance(remote, repair, unsafe):
@@ -898,6 +938,238 @@ def built_run(remote, manifest, identifier, *, existing=True):
         (build / name).write_bytes(header + b"new native program")
     (build / "brokers.txt").write_text("broker.example.org:1883\n")
     return directory
+
+
+@pytest.mark.parametrize("repair", [False, True])
+@pytest.mark.parametrize("config", ['[paths\nsaves = "save"\n', 'paths = 7\n'])
+def test_upgrade_config_validation_keeps_malformed_legacy_installs(remote, repair, config):
+    native_install(remote)
+    (remote.GAME / "config.toml").write_text(config)
+    before = {path: path.read_bytes() for path in remote.GAME.rglob("*") if path.is_file()}
+    match = "original contents and saves were kept" if config.startswith("[paths") else "paths"
+    with pytest.raises(ValueError, match=match):
+        remote.existing_install(repair=repair)
+    assert {path: path.read_bytes() for path in before} == before
+
+
+def hard_exit_finalizer(remote, identifier):
+    """Kill the real scratch finalizer before marker publication, bypassing rollback."""
+    directory = remote.CACHE / "runs" / identifier
+    metadata = remote.read_marker(directory / remote.MARKER)
+    metadata["repair"] = True
+    (directory / remote.MARKER).write_text(json.dumps(metadata))
+    script = '''
+import importlib.util, os, pathlib, sys, types
+if sys.platform == "win32":
+    sys.modules["pwd"] = types.SimpleNamespace()
+spec = importlib.util.spec_from_file_location("scratch_remote", sys.argv[1])
+remote = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(remote)
+remote.HOME = pathlib.Path(sys.argv[2])
+remote.GAME = remote.HOME / "Games/HaloCENativeVR"
+remote.CACHE = remote.HOME / "cache"
+remote.os.getuid = lambda: remote.HOME.stat().st_uid
+remote.game_closed = lambda: None
+remote.command = lambda *args, **kwargs: "native libraries resolved"
+marker = remote.CACHE / "runs" / sys.argv[3] / "stage" / remote.MARKER
+replace = remote.os.replace
+def interrupt(source, target):
+    if pathlib.Path(source) == marker:
+        os._exit(72)
+    replace(source, target)
+remote.os.replace = interrupt
+remote.finalize(sys.argv[3], repair=True)
+'''
+    result = subprocess.run([sys.executable, "-c", script, remote.__file__, str(remote.HOME), identifier],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 72, result.stdout + result.stderr
+    return directory
+
+
+def interrupted_native_upgrade(remote, *, save_path=None, guided=False):
+    manifest, previous = native_install(remote, save_path=save_path)
+    old = remote.read_marker(remote.GAME / remote.MARKER)
+    if guided:
+        old["owner"] = "codex-halo-native-frame-20261005"
+        old["build"] = {"sourceCommit": old.pop("sourceCommit")}
+        (remote.GAME / remote.MARKER).unlink()
+        (remote.GAME / ".codex-halo-native-install.json").write_text(json.dumps(old))
+    directory = built_run(remote, manifest, "1" * 32)
+    hard_exit_finalizer(remote, "1" * 32)
+    marker = remote.GAME / (".codex-halo-native-install.json" if guided else remote.MARKER)
+    assert remote.read_marker(marker, old["owner"]) == old
+    assert remote.digest(remote.GAME / "halo") != old["files"]["halo"]
+    assert remote.configured_save_path(remote.tomllib.loads((remote.GAME / "config.toml").read_text())) == str(remote.save_root())
+    (remote.save_root() / "checkpoint").write_bytes(b"played after the interrupted upgrade")
+    return manifest, previous, directory
+
+
+def interrupt_upgrade_retry(remote, manifest, identifier="2" * 32):
+    directory = built_run(remote, manifest, identifier)
+    for name in ("halo", "libSDL3.so.0"):
+        with (directory / "src/build/linux_arm64" / name).open("ab") as stream:
+            stream.write(b"different rebuilt bytes on retry " + identifier.encode())
+    return hard_exit_finalizer(remote, identifier)
+
+
+def test_unrelated_unsafe_run_does_not_block_verified_upgrade_recovery(remote, monkeypatch):
+    _, previous, _ = interrupted_native_upgrade(remote, save_path=remote.GAME / "profiles/custom")
+    unrelated = remote.CACHE / "runs" / ("0" * 32)
+    unrelated.mkdir()
+    original = remote.beneath
+    def refuse_link(path, parent):
+        if path == unrelated:
+            raise ValueError("Symbolic links are not accepted in installation paths.")
+        return original(path, parent)
+    monkeypatch.setattr(remote, "beneath", refuse_link)
+    assert remote.existing_install()["previousSavePaths"] == [str(previous)]
+
+
+@pytest.mark.parametrize("repair", [False, True])
+@pytest.mark.parametrize("guided", [False, True])
+@pytest.mark.parametrize("partial_library", [False, True])
+def test_repeated_interruption_carries_original_save_ancestry_without_a_chain(remote, monkeypatch, repair, guided, partial_library):
+    manifest, previous, first = interrupted_native_upgrade(remote, save_path=remote.GAME / "profiles/custom", guided=guided)
+    initial_hash = remote.digest(remote.GAME / "halo")
+    second = interrupt_upgrade_retry(remote, manifest)
+    if partial_library:
+        # Also represent stopping after the new engine, before the retry's library:
+        # its prior verified 1.4 library has a third hash, distinct from legacy/B.
+        live = remote.GAME / "libSDL3.so.0"
+        (second / "stage/libSDL3.so.0").write_bytes(live.read_bytes())
+        live.write_bytes((second / "previous-program-files/libSDL3.so.0").read_bytes())
+    assert remote.digest(remote.GAME / "halo") != initial_hash
+    assert (second / "previous-program-files/upgrade-origin/config.toml").read_bytes() == (first / "previous-program-files/config.toml").read_bytes()
+    assert remote.existing_install(repair=repair)["previousSavePaths"] == [str(previous)]
+    monkeypatch.setattr(remote, "command", lambda *args, **kwargs: "native libraries resolved")
+    for identifier in ("3" * 32, "4" * 32):
+        built_run(remote, manifest, identifier)
+        response = remote.finalize(identifier, repair=True)
+        assert response["previousSavePaths"] == [str(previous)]
+        assert (previous / "checkpoint").read_bytes() == b"incompatible previous checkpoint"
+        assert (remote.save_root() / "checkpoint").read_bytes() == b"played after the interrupted upgrade"
+    selected, _ = remote.uninstall_save_files(remote.uninstall_inventory(remote.GAME))
+    assert str(Path("profiles/custom/checkpoint")) in selected
+    assert str(Path("save-v1.4/checkpoint")) in selected
+    origin = remote.CACHE / "runs" / ("3" * 32) / "previous-program-files/upgrade-origin"
+    assert all(path.is_file() for path in origin.iterdir())
+
+
+@pytest.mark.parametrize("damage", ["journal", "oversize-journal", "hardlinked-journal", "original-config",
+                                    "original-program", "previous-program", "missing-origin"])
+def test_repeated_interruption_refuses_damaged_carried_evidence(remote, damage):
+    manifest, previous, _ = interrupted_native_upgrade(remote, save_path=remote.GAME / "profiles/custom")
+    directory = interrupt_upgrade_retry(remote, manifest)
+    backup = directory / "previous-program-files"
+    if damage in ("journal", "oversize-journal", "hardlinked-journal"):
+        journal = backup / ".upgrade-recovery.json"
+        if damage == "oversize-journal":
+            journal.write_text(" " * (remote.MAX_MANIFEST_BYTES + 1))
+        elif damage == "hardlinked-journal":
+            (backup / "journal-link").hardlink_to(journal)
+        else:
+            value = json.loads(journal.read_text())
+            value["previousFiles"]["halo"] = "0" * 64
+            journal.write_text(json.dumps(value))
+    elif damage == "missing-origin":
+        (backup / "upgrade-origin/config.toml").unlink()
+    else:
+        target = {"original-config": backup / "upgrade-origin/config.toml",
+                  "original-program": backup / "upgrade-origin/halo", "previous-program": backup / "halo"}[damage]
+        with target.open("ab") as stream:
+            stream.write(b"tampered evidence")
+    for repair in (False, True):
+        with pytest.raises(ValueError, match="interrupted upgrade could not be verified"):
+            remote.existing_install(repair=repair)
+    assert (previous / "checkpoint").read_bytes() == b"incompatible previous checkpoint"
+    assert (remote.save_root() / "checkpoint").read_bytes() == b"played after the interrupted upgrade"
+
+
+@pytest.mark.parametrize("failure", ["copy", "changed-source"])
+def test_recovery_snapshot_failure_leaves_the_installed_game_untouched(remote, monkeypatch, failure):
+    manifest, _, first = interrupted_native_upgrade(remote, save_path=remote.GAME / "profiles/custom")
+    built_run(remote, manifest, "2" * 32)
+    before = {path: path.read_bytes() for path in remote.GAME.rglob("*") if path.is_file()}
+    original = remote.shutil.copy2
+    def fail_origin(source, target, *args, **kwargs):
+        if failure == "copy" and Path(target).parent.name == "upgrade-origin":
+            raise OSError("injected origin snapshot copy failure")
+        return original(source, target, *args, **kwargs)
+    def before_backup(*args, **kwargs):
+        if failure == "changed-source":
+            with (first / "previous-program-files/halo").open("ab") as stream:
+                stream.write(b"source changed after verification")
+        return "native libraries resolved"
+    monkeypatch.setattr(remote.shutil, "copy2", fail_origin)
+    monkeypatch.setattr(remote, "command", before_backup)
+    with pytest.raises((OSError, ValueError), match="origin snapshot copy failure|original upgrade backup changed"):
+        remote.finalize("2" * 32, repair=True)
+    assert {path: path.read_bytes() for path in before} == before
+
+
+@pytest.mark.parametrize("repair", [False, True])
+@pytest.mark.parametrize("kind", ["default", "custom-internal", "external"])
+def test_real_interrupted_upgrade_recovers_hashes_and_original_save_locations(remote, monkeypatch, repair, kind):
+    path = {"default": remote.GAME / "save", "custom-internal": remote.GAME / "profiles/custom",
+            "external": remote.HOME / "external-checkpoints"}[kind]
+    manifest, previous, directory = interrupted_native_upgrade(remote, save_path=path)
+    saved = {previous / "checkpoint": b"incompatible previous checkpoint",
+             remote.save_root() / "checkpoint": b"played after the interrupted upgrade"}
+    signatures = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in saved}
+    verified = remote.existing_install(repair=repair)
+    assert verified["needsUpgrade"] and verified["mapsVerified"]
+    assert verified["previousSavePaths"] == [str(previous)]
+    # Install promotes the verified needsUpgrade response to repair, as the host does.
+    monkeypatch.setattr(remote, "command", lambda argv, **kwargs: "native libraries resolved")
+    for identifier in ("2" * 32, "3" * 32):
+        built_run(remote, manifest, identifier)
+        response = remote.finalize(identifier, repair=True)
+        assert response["previousSavePaths"] == [str(previous)]
+        assert remote.read_marker(remote.GAME / remote.MARKER)["previousSavePaths"] == [str(previous)]
+        assert not remote.existing_install()["needsUpgrade"]
+        assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in saved} == signatures
+    selected, external = remote.uninstall_save_files(remote.uninstall_inventory(remote.GAME))
+    assert str(Path("save-v1.4/checkpoint")) in selected
+    if kind == "external":
+        assert external == [str(previous)]
+    else:
+        assert str((previous / "checkpoint").relative_to(remote.GAME)) in selected
+    assert (directory / "previous-program-files/config.toml").exists()
+
+
+@pytest.mark.parametrize("repair", [False, True])
+@pytest.mark.parametrize("damage", ["missing-stage-marker", "unrelated-run", "old-marker", "old-program",
+                                    "live-program", "legacy-engine", "new-hash", "previous-paths", "original-config"])
+def test_interrupted_upgrade_refuses_unrelated_or_tampered_evidence(remote, repair, damage):
+    _, previous, directory = interrupted_native_upgrade(remote, save_path=remote.GAME / "profiles/custom")
+    backup, stage = directory / "previous-program-files", directory / "stage"
+    if damage == "missing-stage-marker":
+        (stage / remote.MARKER).unlink()
+    elif damage in ("unrelated-run", "old-marker", "new-hash", "previous-paths"):
+        target = {"unrelated-run": directory / remote.MARKER, "old-marker": backup / remote.MARKER,
+                  "new-hash": stage / remote.MARKER, "previous-paths": stage / remote.MARKER}[damage]
+        metadata = json.loads(target.read_text())
+        if damage in ("unrelated-run", "old-marker"):
+            metadata["sourceCommit"] = "unrelated-revision"
+        elif damage == "new-hash":
+            metadata["files"]["halo"] = "0" * 64
+        else:
+            metadata["previousSavePaths"] = [str(remote.GAME / "save")]
+        target.write_text(json.dumps(metadata))
+    elif damage == "original-config":
+        (backup / "config.toml").write_text('[paths]\nsaves = "save"\n')
+    elif damage == "legacy-engine":
+        (stage / "halo").write_bytes((remote.GAME / "halo").read_bytes())
+        (remote.GAME / "halo").write_bytes((backup / "halo").read_bytes())
+    else:
+        target = backup / "halo" if damage == "old-program" else remote.GAME / "halo"
+        with target.open("ab") as stream:
+            stream.write(b"tampered program")
+    before = {path: path.read_bytes() for path in (previous / "checkpoint", remote.save_root() / "checkpoint",
+                                                  remote.GAME / "halo", remote.GAME / "config.toml", remote.GAME / remote.MARKER)}
+    with pytest.raises(ValueError, match="interrupted upgrade could not be verified.*previous-program-files"):
+        remote.existing_install(repair=repair)
+    assert {path: path.read_bytes() for path in before} == before
 
 
 @pytest.mark.parametrize("kind", ["default", "custom-internal", "external"])

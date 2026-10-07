@@ -236,6 +236,141 @@ def validate_save_paths(settings, require_explicit=False):
             raise ValueError("Version 1.4 must use its own game folder and save-v1.4 subfolder. Existing saves were kept.")
 
 
+def interrupted_upgrade_record(metadata):
+    """Corroborate a redirected legacy install against its unpublished transaction."""
+    failure = ("The interrupted upgrade could not be verified. Existing games and saves were kept. "
+               "Keep the game folder and installer cache; review the original configuration and "
+               "program files in the run's previous-program-files backup before retrying.")
+    try:
+        if metadata.get("owner") not in (OWNER, "codex-halo-native-frame-20261005"):
+            raise ValueError(failure)
+        cache = private_json(CACHE / MARKER, HOME)
+        if cache.get("owner") != OWNER:
+            raise ValueError(failure)
+        runs = beneath(CACHE / "runs", HOME)
+        matches = []
+        with os.scandir(runs) as entries:
+            for index, entry in enumerate(entries):
+                if index >= MAX_RETRY_ENTRIES:
+                    raise ValueError(failure)
+                if not re.fullmatch(r"[a-f0-9]{32}", entry.name):
+                    continue
+                try:
+                    directory = beneath(runs / entry.name, HOME)
+                    for folder in (directory, directory / "stage", directory / "previous-program-files"):
+                        beneath(folder, HOME)
+                        if not folder.is_dir() or folder.stat().st_uid != os.getuid():
+                            raise ValueError("Not an owned upgrade directory.")
+                    run = private_json(directory / MARKER, directory)
+                    backup = directory / "previous-program-files"
+                    backup_owner = private_json(backup / ".backup-owner.json", backup)
+                    staged = private_json(directory / "stage" / MARKER, directory)
+                    if (run.get("owner") != OWNER or run.get("sourceCommit") != SOURCE_COMMIT
+                            or run.get("repair") is not True
+                            or backup_owner != {"owner": OWNER, "sourceCommit": SOURCE_COMMIT}
+                            or staged.get("owner") != OWNER or staged.get("sourceCommit") != SOURCE_COMMIT
+                            or staged.get("sourceUrl") != SOURCE_URL or staged.get("saveRoot") != str(save_root())):
+                        raise ValueError("Not a matching interrupted upgrade.")
+                    if metadata["owner"] == OWNER:
+                        if private_json(backup / MARKER, backup) != metadata:
+                            raise ValueError("The original native marker does not match its backup.")
+                    elif (backup / MARKER).exists():
+                        raise ValueError("The manual native marker does not match this upgrade.")
+                    old_files, new_files = metadata.get("files"), staged.get("files")
+                    required = {"halo", "libSDL3.so.0", "brokers.txt", "frame-controls.patch"}
+                    if (not isinstance(old_files, dict) or not isinstance(new_files, dict)
+                            or set(new_files) != required):
+                        raise ValueError("The interrupted upgrade has incomplete verification hashes.")
+                    origin, previous_files = backup, old_files
+                    journal = beneath(backup / ".upgrade-recovery.json", backup)
+                    carried = None
+                    if journal.exists():
+                        carried = private_json(journal, backup)
+                        previous_files = carried.get("previousFiles")
+                        if (set(carried) != {"owner", "sourceCommit", "previousFiles", "originFiles"}
+                                or carried.get("owner") != OWNER or carried.get("sourceCommit") != SOURCE_COMMIT
+                                or not isinstance(previous_files, dict) or set(previous_files) != required):
+                            raise ValueError("The carried upgrade recovery record is invalid.")
+                        for name, expected in previous_files.items():
+                            if expected is not None and (not isinstance(expected, str)
+                                    or not re.fullmatch(r"[a-f0-9]{64}", expected)):
+                                raise ValueError("A carried previous program hash is invalid.")
+                            saved = beneath(backup / name, backup)
+                            actual = digest(ordinary(saved)) if saved.exists() else None
+                            if actual != expected:
+                                raise ValueError("The retry's program backup does not match its verified predecessor.")
+                        original_config = ordinary(beneath(backup / "config.toml", backup))
+                        if (original_config.stat().st_size > MAX_MANIFEST_BYTES
+                                or configured_save_path(tomllib.loads(original_config.read_text())) != str(save_root())):
+                            raise ValueError("The retry's configuration does not match its interrupted predecessor.")
+                        origin = beneath(backup / "upgrade-origin", backup)
+                        if not origin.is_dir() or origin.stat().st_uid != os.getuid():
+                            raise ValueError("The carried original backup is not an owned directory.")
+                        if metadata["owner"] == OWNER:
+                            if private_json(origin / MARKER, origin) != metadata:
+                                raise ValueError("The carried original native marker does not match.")
+                        elif (origin / MARKER).exists():
+                            raise ValueError("The carried original manual marker does not match.")
+                    for name in ("halo", "libSDL3.so.0"):
+                        expected = old_files.get(name)
+                        if (not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected)
+                                or digest(ordinary(beneath(origin / name, origin))) != expected):
+                            raise ValueError("The original native program backup failed verification.")
+                    current_files = {}
+                    for name, expected in new_files.items():
+                        if not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected):
+                            raise ValueError("The replacement program hashes are invalid.")
+                        live = beneath(GAME / name, GAME)
+                        fresh = beneath(directory / "stage" / name, directory)
+                        if fresh.exists():
+                            if digest(ordinary(fresh)) != expected:
+                                raise ValueError("A staged replacement failed verification.")
+                            # A file still staged has not necessarily replaced its legacy copy.
+                            old_hash = previous_files.get(name)
+                            if live.exists() and digest(ordinary(live)) not in (expected, old_hash):
+                                raise ValueError("An installed program file does not match this upgrade.")
+                        elif not live.exists() or digest(ordinary(live)) != expected:
+                            raise ValueError("An installed replacement failed verification.")
+                        current_files[name] = digest(ordinary(live)) if live.exists() else None
+                    # A redirect with the legacy engine still installed is not evidence
+                    # that checkpoints in this destination use the new save format.
+                    if digest(ordinary(GAME / "halo")) != new_files["halo"]:
+                        raise ValueError("The redirected save destination has no verified new engine.")
+                    config = beneath(origin / "config.toml", origin)
+                    if config.exists():
+                        details = ordinary(config).stat()
+                        if (details.st_uid != os.getuid() or details.st_nlink != 1
+                                or details.st_size > MAX_MANIFEST_BYTES):
+                            raise ValueError("The original configuration backup is not a private bounded file.")
+                        original = configured_save_path(tomllib.loads(config.read_text()))
+                    else:
+                        original = str(GAME / "save")
+                    previous = previous_save_paths(metadata)
+                    if original not in previous:
+                        previous.append(original)
+                    if (original == str(save_root()) or len(previous) > 32
+                            or staged.get("previousSavePaths") != previous):
+                        raise ValueError("The original save locations do not match the staged marker.")
+                    origin_files = {}
+                    for name in ("halo", "libSDL3.so.0", "config.toml", MARKER):
+                        path = beneath(origin / name, origin)
+                        origin_files[name] = digest(ordinary(path)) if path.exists() else None
+                    if carried is not None and carried.get("originFiles") != origin_files:
+                        raise ValueError("The carried original files do not match their verification record.")
+                    matches.append({"files": new_files, "previousSavePaths": previous,
+                                    "originPath": str(origin), "originFiles": origin_files,
+                                    "currentFiles": current_files})
+                except (OSError, ValueError, KeyError, TypeError):
+                    continue
+        if not matches or any(any(value[key] != matches[0][key] for key in
+                                   ("files", "previousSavePaths", "originFiles", "currentFiles"))
+                              for value in matches[1:]):
+            raise ValueError(failure)
+        return matches[0]
+    except (OSError, ValueError, KeyError, TypeError):
+        raise ValueError(failure) from None
+
+
 def existing_install(repair=False, adopt=False):
     beneath(GAME, HOME)
     if not GAME.exists():
@@ -272,15 +407,30 @@ def existing_install(repair=False, adopt=False):
     previous_paths = previous_save_paths(value)
     migrating = source != SOURCE_COMMIT
     beneath(save_root(), GAME)
+    recovered = None
+    config_path = GAME / "config.toml"
+    if migrating and config_path.exists():
+        try:
+            settings = tomllib.loads(ordinary(config_path).read_text())
+        except tomllib.TOMLDecodeError as error:
+            raise ValueError("The existing game configuration is not valid TOML. Its original contents and saves "
+                             "were kept. Fix the config.toml syntax before retrying.") from error
+        if configured_save_path(settings) == str(save_root()):
+            if not needs_upgrade:
+                raise ValueError("The save destination cannot establish an interrupted legacy upgrade. Existing saves were kept.")
+            recovered = interrupted_upgrade_record(value)
+            previous_paths = recovered["previousSavePaths"]
     if save_root().exists() and (not save_root().is_dir() or (migrating and any(save_root().iterdir()))):
-        raise ValueError("The version 1.4 save destination already contains files or is not a directory. Existing saves were kept.")
+        if not recovered or not save_root().is_dir():
+            raise ValueError("The version 1.4 save destination already contains files or is not a directory. Existing saves were kept.")
     if (GAME / "config.toml").exists():
         ordinary(GAME / "config.toml")
         settings = parse_config((GAME / "config.toml").read_text())
         if migrating:
-            previous = configured_save_path(settings)
-            if previous not in previous_paths:
-                previous_paths.append(previous)
+            if not recovered:
+                previous = configured_save_path(settings)
+                if previous not in previous_paths:
+                    previous_paths.append(previous)
         else:
             validate_save_paths(settings, require_explicit=not repair)
         if repair:
@@ -303,6 +453,9 @@ def existing_install(repair=False, adopt=False):
         if isinstance(expected, str):
             path = beneath(GAME / relative, GAME)
             if not path.exists() or digest(ordinary(path)) != expected:
+                if (recovered and relative in recovered["currentFiles"] and path.exists()
+                        and digest(ordinary(path)) == recovered["currentFiles"][relative]):
+                    continue
                 # Runtime rewrites config comments/defaults, so its stored hash can differ.
                 if relative != "config.toml" and not repair:
                     raise ValueError("An existing native game file failed verification: " + relative)
@@ -314,9 +467,12 @@ def existing_install(repair=False, adopt=False):
         if not repair:
             raise
         maps_verified = False
-    return {"gamePath": str(GAME), "reused": True, "owner": value["owner"], "sourceCommit": source,
+    response = {"gamePath": str(GAME), "reused": True, "owner": value["owner"], "sourceCommit": source,
             "mapsVerified": maps_verified, "needsImage": not maps_verified, "programIssues": issues,
             "needsUpgrade": needs_upgrade, "previousSavePaths": previous_paths}
+    if recovered:
+        response["upgradeRecovery"] = recovered
+    return response
 
 
 def os_release():
@@ -1008,7 +1164,7 @@ def merge_config(original, migrate=False):
     return combined
 
 
-def repair_program_files(stage, directory, names, check_cancelled):
+def repair_program_files(stage, directory, names, check_cancelled, recovery=None):
     """Back up then atomically replace each selected file; roll back on any failure."""
     game_closed()
     backup = beneath(directory / "previous-program-files", directory)
@@ -1030,6 +1186,34 @@ def repair_program_files(stage, directory, names, check_cancelled):
             if digest(saved) != old_hash:
                 raise ValueError("The existing game changed while backing up: " + relative)
         snapshot.append((relative, old_hash, digest(fresh)))
+    if recovery is not None:
+        # Carry one verified original snapshot forward, not an unbounded chain of
+        # references to earlier runs. Publish its record before any replacement.
+        old_hashes = {relative: old_hash for relative, old_hash, _ in snapshot}
+        if any(old_hashes.get(name) != expected for name, expected in recovery["currentFiles"].items()):
+            raise ValueError("The interrupted installation changed while preparing its recovery backup.")
+        source = beneath(pathlib.Path(recovery["originPath"]), CACHE)
+        origin = beneath(backup / "upgrade-origin", backup)
+        origin.mkdir(mode=0o700, exist_ok=False)
+        for name, expected in recovery["originFiles"].items():
+            check_cancelled()
+            original = beneath(source / name, source)
+            if expected is None:
+                if original.exists():
+                    raise ValueError("The original upgrade backup changed during recovery.")
+                continue
+            if digest(ordinary(original)) != expected:
+                raise ValueError("The original upgrade backup changed during recovery.")
+            target = beneath(origin / name, origin)
+            shutil.copy2(original, target)
+            if digest(ordinary(target)) != expected:
+                raise ValueError("The original upgrade backup failed copy verification.")
+        journal = {"owner": OWNER, "sourceCommit": SOURCE_COMMIT,
+                   "previousFiles": recovery["currentFiles"], "originFiles": recovery["originFiles"]}
+        with (backup / ".upgrade-recovery.json").open("x", encoding="utf-8") as stream:
+            stream.write(json.dumps(journal) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
     applied = []
     try:
         for relative, old_hash, new_hash in snapshot:
@@ -1164,7 +1348,7 @@ def finalize(value, repair=False, adopt=False):
             names += [item["path"] for item in manifest["files"]]
         # Publish the ownership/provenance marker last; saves and all other files stay put.
         names.append(MARKER)
-        backup = repair_program_files(stage, directory, names, check_cancelled)
+        backup = repair_program_files(stage, directory, names, check_cancelled, existing.get("upgradeRecovery"))
         return {"gamePath": str(GAME), "reused": False, "repaired": True,
                 "sourceCommit": SOURCE_COMMIT, "backupPath": backup, "mapsReinstalled": not reuse_maps,
                 "previousSavePaths": existing.get("previousSavePaths", [])}
