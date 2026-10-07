@@ -691,6 +691,46 @@ def test_new_reuse_and_repair_guard_save_format_and_keep_experimental_instance(r
     assert (experimental / 'save/checkpoint').read_bytes() == b'experimental checkpoint'
 
 
+def test_config_repair_rejects_unusual_value_shapes_without_a_traceback(remote):
+    with pytest.raises(ValueError, match="unsupported setting shape"):
+        remote.merge_config('vr = 5\n[update]\nauto = false\n')
+    with pytest.raises(ValueError, match="unsupported setting shape"):
+        remote.merge_config('update = 5\n[vr]\nenabled = true\n')
+    with pytest.raises(ValueError, match="unsupported setting shape"):
+        remote.merge_config('vr = true\n')
+    with pytest.raises(ValueError, match="unsupported setting shape"):
+        remote.merge_config('[[update]]\nauto = false\n')
+    with pytest.raises(ValueError, match="not valid TOML"):
+        remote.merge_config('update.auto = false\n[update]\nauto = true\n')
+    with pytest.raises(ValueError, match="not valid TOML"):
+        remote.merge_config('vr = [unclosed\n')
+    with pytest.raises(ValueError, match="updated configuration could not be parsed"):
+        remote.merge_config('update.auto = false\n[vr]\nenabled = true\n')
+
+
+@pytest.mark.parametrize('repair', [False, True])
+@pytest.mark.parametrize('original, diagnostic', [
+    ('vr = [unclosed\n', 'not valid TOML'),
+    ('update.auto = false\n[update]\nauto = true\n', 'not valid TOML'),
+    ('vr = 5\n', 'unsupported setting shape'),
+    ('update = 5\n', 'unsupported setting shape'),
+    ('network = []\n', 'unsupported setting shape'),
+    ('paths = true\n', 'unsupported setting shape'),
+])
+def test_existing_install_reports_config_errors_before_merge_without_writes(remote, repair, original, diagnostic):
+    native_install(remote, source=remote.SOURCE_COMMIT)
+    config = remote.GAME / 'config.toml'
+    config.write_text(original)
+    before = {path.relative_to(remote.GAME): path.read_bytes()
+              for path in remote.GAME.rglob('*') if path.is_file()}
+    with pytest.raises(ValueError, match=diagnostic) as failure:
+        remote.existing_install(repair=repair)
+    assert 'Your original configuration was kept.' in str(failure.value)
+    assert not isinstance(failure.value, remote.tomllib.TOMLDecodeError)
+    assert {path.relative_to(remote.GAME): path.read_bytes()
+            for path in remote.GAME.rglob('*') if path.is_file()} == before
+
+
 def test_repair_backup_and_replacements_preserve_saves_and_unrelated_files(remote):
     game = remote.GAME
     game.mkdir(parents=True)

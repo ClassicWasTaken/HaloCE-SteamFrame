@@ -276,7 +276,7 @@ def existing_install(repair=False, adopt=False):
         raise ValueError("The version 1.4 save destination already contains files or is not a directory. Existing saves were kept.")
     if (GAME / "config.toml").exists():
         ordinary(GAME / "config.toml")
-        settings = tomllib.loads((GAME / "config.toml").read_text())
+        settings = parse_config((GAME / "config.toml").read_text())
         if migrating:
             previous = configured_save_path(settings)
             if previous not in previous_paths:
@@ -942,9 +942,20 @@ def cancel(value):
     return {"cancelled": True}
 
 
+def parse_config(original):
+    """Reject unsupported input consistently before preflight or rewriting."""
+    try:
+        settings = tomllib.loads(original) if original.strip() else {}
+    except tomllib.TOMLDecodeError:
+        raise ValueError("The game configuration is not valid TOML. Your original configuration was kept.") from None
+    if any(not isinstance(settings.get(section, {}), dict) for section in ("vr", "update", "network", "paths")):
+        raise ValueError("The game configuration has an unsupported setting shape. Your original configuration was kept.")
+    return settings
+
+
 def merge_config(original, migrate=False):
     """Restore required native controls while preserving unrelated TOML settings."""
-    settings = tomllib.loads(original) if original.strip() else {}
+    settings = parse_config(original)
     if migrate:
         configured_save_path(settings)
     else:
@@ -980,7 +991,10 @@ def merge_config(original, migrate=False):
                 lines[i] = key + " = " + json.dumps(remaining.pop(key))
         lines[end:end] = [key + " = " + json.dumps(val) for key, val in remaining.items()]
     combined = "\n".join(lines) + "\n"
-    updated = tomllib.loads(combined)
+    try:
+        updated = tomllib.loads(combined)
+    except tomllib.TOMLDecodeError:
+        raise ValueError("The updated configuration could not be parsed. Your original configuration was kept.") from None
     if any(updated.get(section, {}).get(key) != value for section, changes in required.items() for key, value in changes.items()):
         raise ValueError("This TOML formatting cannot be safely updated automatically. Your original configuration was kept.")
     for section, value in settings.items():
