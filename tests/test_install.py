@@ -39,6 +39,44 @@ def test_shortcut_roundtrip_preserves_foreign_entry_and_is_idempotent():
     assert steam.update_shortcut(first, "/home/steamos/Games/HaloCENativeVR/halo", "/home/steamos/Games/HaloCENativeVR") == (first, appid)
 
 
+def test_shortcut_update_preserves_user_library_choices():
+    steam = load_resource("steam_shortcut")
+    executable = "/home/steamos/Games/HaloCENativeVR/halo"
+    directory = "/home/steamos/Games/HaloCENativeVR"
+    first, appid = steam.update_shortcut(None, executable, directory)
+    root = steam.loads(first)
+    fields = next(iter(root["shortcuts"].value.values())).value
+    for key, value in {"IsHidden": 1, "AllowDesktopConfig": 0, "AllowOverlay": 0,
+                       "OpenVR": 0, "Devkit": 1, "DevkitOverrideAppID": 480}.items():
+        fields[key] = steam.Value(2, value)
+    fields["LaunchOptions"] = steam.Value(1, "user-modified --mods")
+    updated, same = steam.update_shortcut(steam.dumps(root), executable, directory)
+    after = next(iter(steam.loads(updated)["shortcuts"].value.values())).value
+    assert after["IsHidden"].value == 1 and after["AllowDesktopConfig"].value == 0
+    assert after["AllowOverlay"].value == 0
+    assert after["Devkit"].value == 1 and after["DevkitOverrideAppID"].value == 480
+    assert after["OpenVR"].value == 1  # required for the VR library; still managed
+    assert after["LaunchOptions"].value == steam.LAUNCH_OPTIONS  # identity fields still refreshed
+    assert after["Exe"].value == f'"{executable}"'
+    assert same == appid
+
+
+def test_shortcut_update_keeps_case_variant_choices_and_repairs_damaged_flags():
+    steam = load_resource("steam_shortcut")
+    executable = "/home/steamos/Games/HaloCENativeVR/halo"
+    directory = "/home/steamos/Games/HaloCENativeVR"
+    first, _ = steam.update_shortcut(None, executable, directory)
+    root = steam.loads(first)
+    fields = next(iter(root["shortcuts"].value.values())).value
+    del fields["IsHidden"], fields["Devkit"]
+    fields["ishidden"] = steam.Value(2, 1)        # old-format casing keeps the choice
+    fields["Devkit"] = steam.Value(1, "damaged")  # wrong value kind cannot be a choice
+    updated, _ = steam.update_shortcut(steam.dumps(root), executable, directory)
+    after = next(iter(steam.loads(updated)["shortcuts"].value.values())).value
+    assert after["ishidden"].value == 1 and "IsHidden" not in after
+    assert after["Devkit"].kind == 2 and after["Devkit"].value == 0
+
+
 def test_shortcut_rejects_unknown_types_or_duplicate_fields():
     steam = load_resource("steam_shortcut")
     with pytest.raises(ValueError, match="Unsupported"):

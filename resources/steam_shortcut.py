@@ -298,9 +298,19 @@ def update_shortcut(data: bytes | None, executable: str, directory: str) -> tupl
     for key in ("icon", "ShortcutPath"):
         if key not in fields:
             fields[key] = Value(1, "")
+    # Library choices the user made on an existing entry, such as hiding it,
+    # are theirs; only new entries get the defaults, and a choice is only
+    # kept when it is a real integer flag. OpenVR stays managed: the live
+    # registration path sets and verifies the VR flag as well, and the game
+    # needs it to appear in the headset's library.
     for key, value in {"IsHidden": 0, "AllowDesktopConfig": 1, "AllowOverlay": 1,
                        "OpenVR": 1, "Devkit": 0, "DevkitOverrideAppID": 0}.items():
-        fields[key] = Value(2, value)
+        existing = next((old for old in fields if old.lower() == key.lower()), None)
+        if existing is not None and key != "OpenVR" and fields[existing].kind == 2:
+            continue
+        # Assign through any existing slot so field order, and therefore the
+        # written bytes, stay stable across repeated registrations.
+        fields[existing if existing is not None else key] = Value(2, value)
     if "LastPlayTime" not in fields:
         fields["LastPlayTime"] = Value(2, 0)
     if "tags" not in fields:
