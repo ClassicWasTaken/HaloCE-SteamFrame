@@ -3,6 +3,8 @@ import ast
 import importlib.util
 import os
 from pathlib import Path
+import re
+import tomllib
 
 import pytest
 
@@ -135,18 +137,78 @@ def test_recipe_accepts_and_checks_local_delegated_cli_options(recipe_projection
 
 
 def test_public_release_documentation_names_the_single_installer_download():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    download = re.search(
+        r"https://github\.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/[^\s\"<>)]*",
+        readme,
+    )
+    assert download is not None, "README is missing its primary installer download"
+    identity = re.fullmatch(
+        r"https://github\.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/"
+        r"v(?P<version>\d+\.\d+\.\d+)/Halo-Steam-Frame-Mod-Setup-(?P=version)\.exe",
+        download.group(),
+    )
+    assert identity is not None, "README installer tag and filename must share a stable version"
+    version = identity["version"]
+    filename = f"Halo-Steam-Frame-Mod-Setup-{version}.exe"
+    package_version = literal_assignment(ROOT / "src/halo_frame_installer/__init__.py", "__version__")
+    build_version = literal_assignment(ROOT / "scripts/build_release.py", "VERSION")
+    assert package_version == build_version
+    if re.fullmatch(r"\d+\.\d+\.\d+", package_version):
+        assert version == package_version, "Stable builds must document their own release download"
+        assert tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"] == version
+    # Private candidates retain the previous public download until publication.
     for name in ("README.md", "docs/SETUP.md", "docs/RELEASE_NOTES.md"):
         text = (ROOT / name).read_text(encoding="utf-8")
-        assert "1.4.2" in text and "Halo-Steam-Frame-Mod-Setup-1.4.2.exe" in text
+        assert version in text and filename in text and download.group() in text
         assert "has not been published" not in text and "local experimental preview" not in text
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "https://github.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/v1.4.2/Halo-Steam-Frame-Mod-Setup-1.4.2.exe" in readme
     notes = (ROOT / "docs/RELEASE_NOTES.md").read_text(encoding="utf-8")
     assert "cannot load old checkpoints" in notes and "save-v1.4" in notes
     sd_guide = (ROOT / "docs/SD_CARD.md").read_text(encoding="utf-8")
     assert "Halo: Combat Evolved VR (Native, SD card)" in sd_guide
     assert "Refresh storage" in readme and "ext4 or f2fs" in sd_guide
     assert "BUILD_PROVENANCE.md" in readme and "BUILD_PROVENANCE.md" in notes
+
+
+@pytest.fixture
+def release_documentation_projection(tmp_path, monkeypatch):
+    for relative in ("README.md", "docs/SETUP.md", "docs/RELEASE_NOTES.md", "docs/SD_CARD.md",
+                     "src/halo_frame_installer/__init__.py", "scripts/build_release.py", "pyproject.toml"):
+        destination = tmp_path / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes((ROOT / relative).read_bytes())
+    public_version = re.search(r"/releases/download/v(\d+\.\d+\.\d+)/", (tmp_path / "README.md").read_text(encoding="utf-8")).group(1)
+    for relative, name in (("src/halo_frame_installer/__init__.py", "__version__"),
+                           ("scripts/build_release.py", "VERSION")):
+        path = tmp_path / relative
+        old = literal_assignment(path, name)
+        path.write_text(path.read_text(encoding="utf-8").replace('"' + old + '"', '"' + public_version + '"'), encoding="utf-8")
+    project = tmp_path / "pyproject.toml"
+    old = tomllib.loads(project.read_text(encoding="utf-8"))["project"]["version"]
+    project.write_text(project.read_text(encoding="utf-8").replace('version = "' + old + '"',
+                                                                 'version = "' + public_version + '"', 1), encoding="utf-8")
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    return tmp_path
+
+
+def test_public_release_documentation_rejects_a_stale_download_for_a_stable_build(release_documentation_projection):
+    readme = release_documentation_projection / "README.md"
+    version = literal_assignment(release_documentation_projection / "scripts/build_release.py", "VERSION")
+    text = readme.read_text(encoding="utf-8")
+    readme.write_text(text.replace("/v" + version + "/Halo-Steam-Frame-Mod-Setup-" + version + ".exe",
+                                   "/v0.0.1/Halo-Steam-Frame-Mod-Setup-0.0.1.exe"), encoding="utf-8")
+    with pytest.raises(AssertionError, match="Stable builds must document their own release"):
+        test_public_release_documentation_names_the_single_installer_download()
+
+
+def test_private_candidate_keeps_the_existing_public_download(release_documentation_projection):
+    for relative, name in (("src/halo_frame_installer/__init__.py", "__version__"),
+                           ("scripts/build_release.py", "VERSION")):
+        path = release_documentation_projection / relative
+        version = literal_assignment(path, name)
+        path.write_text(path.read_text(encoding="utf-8").replace('"' + version + '"',
+                                                                '"' + version + '-Test"'), encoding="utf-8")
+    test_public_release_documentation_names_the_single_installer_download()
 
 
 def test_actual_exact_pinned_engine_and_shipped_patch_when_checkout_is_supplied():
