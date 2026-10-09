@@ -1866,3 +1866,20 @@ def test_installer_workers_distinguish_cancel_from_failures(app, monkeypatch, op
     if cleanup_fails:
         assert 'USB forward could not be removed' in '\n'.join(app.log_lines)
     assert 'offline-secret' not in '\n'.join(app.log_lines)
+
+
+@WINDOWS_GUI
+def test_uninstall_names_a_remaining_install_on_other_storage(app):
+    from halo_frame_installer.install import UninstallResult
+    card = 'sd:' + 'a' * 32
+    path = '/run/media/steamos/card-a/Games/HaloCENativeVR'
+    result = UninstallResult('/home/steamos/Games/HaloCENativeVR', False, True, None,
+                             {'status': 'already-absent'}, None, remaining_installs=((card, path),))
+    app.events.put(('uninstall_complete', result))
+    _drain_events(app)
+    assert 'still installed on another storage location' in app.status.get()
+    assert 'Remaining install: ' + path + ' (storage ' + card + ')' in app.status.get()
+    assert 'Select that storage under Install location' in app.status.get()
+    assert 'Uninstall checks are complete' not in app.status.get()
+    assert app.phase.get() == 'Uninstall needs attention'
+    assert app._test_dialogs[-1] == ('Uninstall needs attention', app.status.get())

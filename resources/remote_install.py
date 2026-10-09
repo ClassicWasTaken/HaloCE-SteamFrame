@@ -114,6 +114,12 @@ def storage_fields():
             "gamePath": str(GAME)}
 
 
+def other_installed_destinations():
+    """Every operation targets one selected destination; report the others."""
+    return [item for item in storage_module().discover_storage(HOME)["destinations"]
+            if item["id"] != STORAGE_ID and item["installed"]]
+
+
 def progress(stage, message, percent=None):
     value = {"stage": stage, "message": message}
     if percent is not None:
@@ -627,8 +633,7 @@ def preflight(repair=False, adopt=False):
             "pcVersionDetected": (HOME / "Games/HaloCEVR").is_dir(),
             "steamOSVersion": system.get("VERSION_ID", "unknown"),
             "storage": STORAGE_DESCRIPTOR,
-            "alternateInstalls": [item for item in storage_module().discover_storage(HOME)["destinations"]
-                                  if item["id"] != STORAGE_ID and item["installed"]],
+            "alternateInstalls": other_installed_destinations(),
             "containerStorageNote": "Podman's image and temporary container storage may still use internal storage; only the selected game and build workspace use the SD card." if STORAGE_ID != "internal" else None}
 
 
@@ -654,8 +659,10 @@ def preflight_uninstall():
             details = ordinary(path).stat()
             if details.st_uid != os.getuid() or details.st_nlink != 1:
                 raise ValueError("An uninstall helper resource is not a private ordinary file.")
+    # Uninstall can only remove the selected destination, so the host is told
+    # which other destinations still hold the managed game.
     return {"home": str(HOME), "cachePath": str(CACHE), "gamePath": str(GAME), "uninstallSupported": True,
-            "storage": STORAGE_DESCRIPTOR}
+            "storage": STORAGE_DESCRIPTOR, "alternateInstalls": other_installed_destinations()}
 
 
 def preflight_library():
@@ -2162,6 +2169,12 @@ def uninstall(value, close_steam=False, keep_saves=False):
                                  + str(error)[:500] + ".")
             response = {"gamePath": str(GAME), "uninstalled": True, "alreadyAbsent": not recovered["removed"],
                         "savedBackupPath": existing_saved, "steam": steam}
+            remaining = [{"storageId": item["id"], "path": item["gamePath"]}
+                         for item in other_installed_destinations()]
+            if remaining:
+                # This run cleared only the selected destination; the managed
+                # installs on other storage need their own selected uninstall.
+                response["remainingInstalls"] = remaining
             return uninstall_recovery_result(response, recovered, notes)
         game_closed()
         no_active_build()

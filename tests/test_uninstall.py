@@ -791,12 +791,15 @@ def test_uninstall_preflight_needs_no_game_maps_space_vr_or_compiler(installatio
         raise AssertionError("Install-only prerequisite was used")
     monkeypatch.setattr(remote, "existing_install", forbidden)
     monkeypatch.setattr(remote, "elf_arm64", forbidden)
-    monkeypatch.setattr(remote.shutil, "disk_usage", forbidden)
+    # Storage discovery reports each destination's free space but uninstall
+    # never gates removal on it.
+    monkeypatch.setattr(remote.shutil, "disk_usage", lambda path: types.SimpleNamespace(free=0))
     monkeypatch.setattr(remote.shutil, "which", forbidden)
     monkeypatch.setattr(remote, "command", forbidden)
     result = remote.preflight_uninstall()
     assert result == {"home": str(remote.HOME), "cachePath": str(remote.CACHE),
-                      "gamePath": str(remote.GAME), "uninstallSupported": True, "storage": None}
+                      "gamePath": str(remote.GAME), "uninstallSupported": True, "storage": None,
+                      "alternateInstalls": []}
 
 
 @pytest.mark.parametrize("failure", ["space", "config"])
@@ -827,3 +830,69 @@ def test_completed_removal_is_not_reported_as_failed_if_operation_bookkeeping_fa
     result = remote.uninstall(RUN_ID)
     assert result["uninstalled"] is True and not remote.GAME.exists()
     assert "operation record" in result["warning"]
+
+
+def sd_card_destination(*, installed=True):
+    return {"id": "sd:" + "a" * 32, "kind": "sd", "label": "SD card · frame-card", "installed": installed,
+            "mountPath": "/run/media/steamos/frame-card",
+            "gamePath": "/run/media/steamos/frame-card/Games/HaloCENativeVR",
+            "cachePath": "/run/media/steamos/frame-card/.halo-frame-installer"}
+
+
+def internal_destination(remote, *, installed=False):
+    return {"id": "internal", "kind": "internal", "label": "Internal storage", "installed": installed,
+            "mountPath": str(remote.HOME), "gamePath": str(remote.GAME), "cachePath": str(remote.CACHE)}
+
+
+def stub_storage_discovery(monkeypatch, destinations):
+    """Serve fixed discovered destinations, including the validator hooks."""
+    storage = types.SimpleNamespace(
+        discover_storage=lambda home=None: {"home": str(home or "/home/steamos"), "destinations": list(destinations)},
+        validate_game_path=lambda home, game: next(item for item in destinations if item["gamePath"] == str(game)))
+    monkeypatch.setitem(sys.modules, "frame_storage", storage)
+    return storage
+
+
+def test_uninstall_preflight_reports_an_install_left_on_other_storage(installation, monkeypatch):
+    remote, _, _, _, _ = installation
+    card = sd_card_destination()
+    stub_storage_discovery(monkeypatch, [internal_destination(remote), card])
+    result = remote.preflight_uninstall()
+    assert result["alternateInstalls"] == [card]
+
+
+def test_uninstall_with_an_install_left_on_sd_names_it_instead_of_clean_absence(installation, monkeypatch):
+    import shutil
+    remote, steam, configs, _, _ = installation
+    card = sd_card_destination()
+    stub_storage_discovery(monkeypatch, [internal_destination(remote), card])
+    # The only native Steam entry belongs to the SD install; the selected
+    # internal destination holds no game, matching a returning SD-card user.
+    for config in configs:
+        root = steam.loads((config / "shortcuts.vdf").read_bytes())
+        for entry in root["shortcuts"].value.values():
+            exe = entry.value.get("Exe")
+            if exe is not None and str(exe.value).strip('"') == str(remote.GAME / "halo"):
+                entry.value["Exe"] = steam.Value(1, '"' + card["gamePath"] + '/halo"')
+        (config / "shortcuts.vdf").write_bytes(steam.dumps(root))
+    shutil.rmtree(remote.GAME)
+    result = remote.uninstall(RUN_ID, keep_saves=True)
+    assert result["uninstalled"] and result["alreadyAbsent"] and not result["removalPending"]
+    assert result["steam"]["status"] == "already-absent"
+    assert result["remainingInstalls"] == [{"storageId": card["id"], "path": card["gamePath"]}]
+    # The SD install's own Steam entry and files are untouched.
+    for config in configs:
+        root = steam.loads((config / "shortcuts.vdf").read_bytes())
+        assert set(root["shortcuts"].value) == {"0", "1", "2"}
+        assert root["shortcuts"].value["1"].value["Exe"].value == '"' + card["gamePath"] + '/halo"'
+        assert not list(config.glob("shortcuts.vdf.halo-frame-uninstall-*.bak"))
+
+
+def test_uninstall_without_other_installs_keeps_the_existing_result_contract(installation, monkeypatch):
+    remote, _, _, _, _ = installation
+    stub_storage_discovery(monkeypatch, [internal_destination(remote, installed=True)])
+    result = remote.uninstall(RUN_ID, keep_saves=True)
+    assert result["uninstalled"] and not result.get("alreadyAbsent", False) and not result["removalPending"]
+    assert set(result) == {"gamePath", "uninstalled", "savedBackupPath", "steam",
+                           "externalSavePathsPreserved", "removalPending", "retainedQuarantinePaths",
+                           "recoveredSaveBackupPaths"}

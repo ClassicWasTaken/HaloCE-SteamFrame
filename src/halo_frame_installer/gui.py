@@ -1464,8 +1464,9 @@ class App(tk.Tk):
                     self.last_uninstall_result = result
                     steam_pending = bool(getattr(result, "requires_manual_steam_step", False))
                     removal_pending = bool(getattr(result, "removal_pending", False))
+                    remaining = tuple(getattr(result, "remaining_installs", ()))
                     cleanup_warning = self._redact(getattr(result, "cleanup_warning", None) or "")
-                    pending = steam_pending or removal_pending or bool(cleanup_warning)
+                    pending = steam_pending or removal_pending or bool(remaining) or bool(cleanup_warning)
                     self.progress_state.finish(pending=pending)
                     self._display_progress()
                     if steam_pending:
@@ -1477,6 +1478,15 @@ class App(tk.Tk):
                         done = "Native Halo VR was already absent. Uninstall checks are complete."
                     else:
                         done = "Native Halo VR has been uninstalled from your Frame."
+                    if remaining:
+                        # Uninstall removes one selected storage destination; the
+                        # others can only be removed after the user selects them.
+                        done = ("Native Halo VR was not present on the selected storage, but it is still installed on another storage location of your Frame."
+                                if result.already_absent else
+                                "Native Halo VR has been uninstalled from the selected storage, but it is still installed on another storage location of your Frame.")
+                        done += "\n" + "\n".join("Remaining install: " + path + " (storage " + identifier + ")"
+                                                 for identifier, path in remaining)
+                        done += "\nSelect that storage under Install location, then run Uninstall again to remove it."
                     if result.saved_backup_path:
                         done += "\n\nCampaign save backup: " + result.saved_backup_path
                     if getattr(result, "removal_warning", None):

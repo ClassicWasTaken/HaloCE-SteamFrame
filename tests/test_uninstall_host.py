@@ -250,3 +250,35 @@ def test_uninstall_failure_is_not_masked_by_disconnect_failure():
     with pytest.raises(SSHError, match='game was kept') as error:
         Installer(lambda settings: fake, RESOURCES).uninstall(fake.settings)
     assert 'private' not in str(error.value)
+
+
+def test_remaining_install_on_other_storage_is_reported_instead_of_bare_absence():
+    card_id = 'sd:' + 'a' * 32
+    card_path = '/run/media/steamos/card-a/Games/HaloCENativeVR'
+    fake = UninstallConnection(Settings('frame', 'private'), already_absent=True)
+    host_response(fake, remainingInstalls=[{'storageId': card_id, 'path': card_path}])
+    events = []
+    result = Installer(lambda settings: fake, RESOURCES).uninstall(fake.settings,
+        lambda *event: events.append(event))
+    assert result.already_absent and not result.uninstalled and fake.closed
+    assert result.remaining_installs == ((card_id, card_path),)
+    assert ('detail', 'Native Halo VR remains installed on other storage: ' + card_path, None) in events
+
+
+@pytest.mark.parametrize('entries', [
+    ['sd:' + 'a' * 32],
+    [{'storageId': 'internal', 'path': '/home/steamos/Games/HaloCENativeVR'}],
+    [{'storageId': 'sd:' + 'a' * 32, 'path': '/run/media/steamos/card/Games/HaloCENativeVR'}] * 9,
+    [{'storageId': 'sd:bad', 'path': '/run/media/steamos/card/Games/HaloCENativeVR'}],
+    [{'storageId': 'sd:' + 'a' * 32, 'path': '/run/media/steamos/card/../Games/HaloCENativeVR'}],
+    [{'storageId': 'sd:' + 'a' * 32, 'path': '/run/media/steamos/card/Games/Other'}],
+    [{'storageId': 'sd:' + 'a' * 32, 'path': '/run/media/steamos/card/Games/HaloCENativeVR', 'label': 'extra'}],
+])
+def test_invalid_remaining_install_reports_never_claim_success(entries):
+    fake = UninstallConnection(Settings('frame', 'private'), already_absent=True)
+    host_response(fake, remainingInstalls=entries)
+    stages = []
+    with pytest.raises(SSHError, match='invalid remaining-install'):
+        Installer(lambda settings: fake, RESOURCES).uninstall(fake.settings,
+            lambda stage, message, percent=None: stages.append(stage))
+    assert 'complete' not in stages and fake.closed
