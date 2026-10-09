@@ -228,3 +228,35 @@ def test_actual_exact_pinned_engine_and_shipped_patch_when_checkout_is_supplied(
     assert result["vrTutorialIntegration"] and result["freshFullPoseTrackingIntegration"]
     assert result["renderRateUnarmedFlashlightIntegration"]
     assert not result["arm64LinkedBuild"] and not result["hardwareValidated"]
+
+
+def test_built_executable_name_matches_the_documented_download_and_attestation_target():
+    build_spec = importlib.util.spec_from_file_location("release_build_name", ROOT / "scripts/build_release.py")
+    release_build = importlib.util.module_from_spec(build_spec)
+    build_spec.loader.exec_module(release_build)
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    download = re.search(
+        r"https://github\.com/ClassicWasTaken/HaloSteamFrameMod/releases/download/"
+        r"v(?P<version>\d+\.\d+\.\d+)/(?P<filename>[^\s\"<>)]*\.exe)",
+        readme,
+    )
+    assert download is not None, "README is missing its primary installer download"
+    documented = download["filename"]
+    provenance = (ROOT / "docs/BUILD_PROVENANCE.md").read_text(encoding="utf-8")
+    verify = re.search(r"gh attestation verify (?P<asset>\S+\.exe)", provenance)
+    assert verify is not None, "BUILD_PROVENANCE is missing its attestation verify command"
+    assert verify["asset"] == documented, (
+        "Attestation target " + verify["asset"] + " is not the documented download " + documented)
+    if re.fullmatch(r"\d+\.\d+\.\d+", release_build.VERSION):
+        assert release_build.EXE_NAME == documented, (
+            "Built executable " + release_build.EXE_NAME + " is not the documented download " + documented)
+    # Private candidates retain the previous public download until publication, so past a
+    # stable build the name around each file's own version, not the exact filename, is pinned.
+    assert release_build.EXE_NAME.count(release_build.VERSION) == 1, (
+        "Built name " + release_build.EXE_NAME + " must embed the build version "
+        + release_build.VERSION + " exactly once")
+    assert documented.count(download["version"]) == 1, (
+        "Documented download " + documented + " must embed its release version "
+        + download["version"] + " exactly once")
+    assert release_build.EXE_NAME.replace(release_build.VERSION, "<version>") == documented.replace(download["version"], "<version>"), (
+        "Built executable " + release_build.EXE_NAME + " does not name the documented download " + documented)
