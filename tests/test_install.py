@@ -1428,3 +1428,40 @@ def test_recognized_codex_legacy_marker_upgrades_without_changing_old_checkpoint
     assert (previous / "checkpoint").read_bytes() == b"incompatible previous checkpoint"
     assert remote.read_marker(remote.GAME / remote.MARKER)["sourceCommit"] == remote.SOURCE_COMMIT
     assert not remote.existing_install()["needsUpgrade"]
+
+
+def test_shortcut_device_authored_text_is_capped_before_reaching_the_host():
+    class FloodedShortcutConnection(FakeConnection):
+        def run(self, argv, **kwargs):
+            if argv[1] != "-c" and argv[2] == "shortcut":
+                self.commands.append(argv)
+                return "HFI_RESULT " + json.dumps({"status": "manual",
+                    "reason": "r" * 50000, "instructions": "i" * 50000,
+                    "launchOptions": "l" * 50000})
+            return super().run(argv, **kwargs)
+
+    fake = FloodedShortcutConnection(Settings("frame", "private", close_steam_for_shortcut=True))
+    result = Installer(lambda settings: fake, RESOURCES).add_to_steam(fake.settings)
+    assert len(result.steam["reason"]) <= 4100
+    assert len(result.steam["instructions"]) <= 4100
+    assert len(result.steam["launchOptions"]) <= 4100
+    assert result.steam["reason"].endswith("...")
+    assert result.steam["reason"].startswith("rrr")
+
+
+def test_shortcut_short_device_authored_text_passes_through_unchanged():
+    class NotedShortcutConnection(FakeConnection):
+        def run(self, argv, **kwargs):
+            if argv[1] != "-c" and argv[2] == "shortcut":
+                self.commands.append(argv)
+                return "HFI_RESULT " + json.dumps({"status": "manual",
+                    "reason": "Steam was busy.",
+                    "instructions": "Add the shortcut yourself.",
+                    "launchOptions": "SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=0 %command%"})
+            return super().run(argv, **kwargs)
+
+    fake = NotedShortcutConnection(Settings("frame", "private", close_steam_for_shortcut=True))
+    result = Installer(lambda settings: fake, RESOURCES).add_to_steam(fake.settings)
+    assert result.steam["reason"] == "Steam was busy."
+    assert result.steam["instructions"] == "Add the shortcut yourself."
+    assert result.steam["launchOptions"] == "SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=0 %command%"

@@ -608,6 +608,13 @@ class Installer:
             check_cancel()
             progress("steam", "Updating Halo's Steam entry, artwork and game Notes while keeping Steam Home running...", None)
             steam = step("shortcut", timeout=150)
+            # reason/instructions/launchOptions are device-authored display
+            # text headed for dialogs, the status line and the shareable saved
+            # log; a hostile or broken Frame cannot flood the host with them.
+            for field in ("reason", "instructions", "launchOptions"):
+                text = steam.get(field)
+                if isinstance(text, str) and len(text) > 4096:
+                    steam[field] = text[:4093] + "..."
             # Keep the result's public fingerprint before releasing the client.
             host_fingerprint = connection.host_fingerprint
             progress("disconnect", "Closing the setup SSH connection...", None)
