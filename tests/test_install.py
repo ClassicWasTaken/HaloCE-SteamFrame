@@ -1428,3 +1428,58 @@ def test_recognized_codex_legacy_marker_upgrades_without_changing_old_checkpoint
     assert (previous / "checkpoint").read_bytes() == b"incompatible previous checkpoint"
     assert remote.read_marker(remote.GAME / remote.MARKER)["sourceCommit"] == remote.SOURCE_COMMIT
     assert not remote.existing_install()["needsUpgrade"]
+
+
+@pytest.mark.parametrize("guided", [False, True])
+@pytest.mark.parametrize("deleted", ["runs", "cache"])
+def test_interrupted_upgrade_recovers_from_a_deleted_installer_cache(remote, monkeypatch, guided, deleted):
+    manifest, previous, _ = interrupted_native_upgrade(remote, save_path=remote.GAME / "profiles/custom",
+                                                       guided=guided)
+    import shutil
+    shutil.rmtree(remote.CACHE if deleted == "cache" else remote.CACHE / "runs")
+    saved = {previous / "checkpoint": b"incompatible previous checkpoint",
+             remote.save_root() / "checkpoint": b"played after the interrupted upgrade"}
+    signatures = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in saved}
+    verified = remote.existing_install(repair=True)
+    assert verified["needsUpgrade"] and verified["mapsVerified"]
+    assert verified["previousSavePaths"] == [str(remote.save_root())]
+    assert "run history was unavailable" in verified["recoveryNote"]
+    assert sorted(verified["programIssues"]) == ["halo", "libSDL3.so.0"]
+    # The on-disk evidence lets Repair finish the upgrade without the run ledger.
+    monkeypatch.setattr(remote, "command", lambda argv, **kwargs: "native libraries resolved")
+    built_run(remote, manifest, "5" * 32)
+    result = remote.finalize("5" * 32, repair=True)
+    assert result["repaired"] and "run history was unavailable" in result["recoveryNote"]
+    assert remote.read_marker(remote.GAME / remote.MARKER)["previousSavePaths"] == [str(remote.save_root())]
+    assert not remote.existing_install()["needsUpgrade"]
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in saved} == signatures
+
+
+@pytest.mark.parametrize("fillers", [256, 257])
+@pytest.mark.parametrize("repair", [False, True])
+def test_interrupted_upgrade_recovery_wins_over_a_full_run_ledger(remote, repair, fillers):
+    _, previous, directory = interrupted_native_upgrade(remote, save_path=remote.GAME / "profiles/custom")
+    runs = remote.CACHE / "runs"
+    for index in range(fillers):
+        # Recognized run names sorting behind the verified run, each failing its checks.
+        (runs / ("f" * 29 + f"{index:03d}")).mkdir()
+    verified = remote.existing_install(repair=repair)
+    # The verified ledger match answers, not the deleted-history fallback.
+    assert verified["previousSavePaths"] == [str(previous)]
+    assert verified["upgradeRecovery"]["originPath"] == str(directory / "previous-program-files")
+    assert "recoveryNote" not in verified
+    assert len(list(runs.iterdir())) == fillers + 1
+
+
+@pytest.mark.parametrize("repair", [False, True])
+def test_foreign_install_with_deleted_cache_is_still_refused(remote, repair):
+    import shutil
+    game = legacy_install(remote, remote.LEGACY_SOURCE_COMMIT)
+    (game / "config.toml").write_text('[paths]\ndata = %s\nsaves = %s\n'
+        % (json.dumps(str(game)), json.dumps(str(game / "save"))))
+    remote.save_root().mkdir(parents=True)
+    (remote.save_root() / "foreign.sav").write_bytes(b"not ours")
+    shutil.rmtree(remote.CACHE, ignore_errors=True)
+    with pytest.raises(ValueError, match="save destination already contains files"):
+        remote.existing_install(repair=repair)
+    assert (remote.save_root() / "foreign.sav").read_bytes() == b"not ours"

@@ -312,6 +312,35 @@ def validate_save_paths(settings, require_explicit=False):
             raise ValueError("Version 1.4 must use its own game folder and save-v1.4 subfolder. Existing saves were kept.")
 
 
+def upgrade_recovery_without_history(metadata):
+    """Decide an interrupted upgrade from the game folder when the cache is gone."""
+    # The run ledger and its previous-program-files backup are the only verified
+    # evidence, and both live in the installer cache. When that cache no longer
+    # exists, the folder's own marker hashes going stale beside the redirect the
+    # upgrade published is the last on-disk evidence that the transaction began.
+    note = ("Upgrade recovery used the game folder's on-disk evidence because the installer "
+            "run history was unavailable. Existing games and saves were kept.")
+    files = metadata.get("files", {})
+    if not isinstance(files, dict):
+        return None
+    replaced = False
+    for name in ("halo", "libSDL3.so.0"):
+        expected = files.get(name)
+        if not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected):
+            return None
+        if digest(ordinary(GAME / name)) != expected:
+            replaced = True
+    if not replaced:
+        # A folder that still matches its legacy marker never began publishing the
+        # upgrade; its redirecting configuration alone is not proof of one.
+        return None
+    previous = previous_save_paths(metadata)
+    if str(save_root()) not in previous:
+        previous.append(str(save_root()))
+    # No live program hash is verified without the ledger, so none is carried.
+    return {"previousSavePaths": previous, "currentFiles": {}, "recoveryNote": note}
+
+
 def interrupted_upgrade_record(metadata):
     """Corroborate a redirected legacy install against its unpublished transaction."""
     failure = ("The interrupted upgrade could not be verified. Existing games and saves were kept. "
@@ -322,27 +351,42 @@ def interrupted_upgrade_record(metadata):
         check_storage_record(metadata)
         if metadata.get("owner") not in (OWNER, "codex-halo-native-frame-20261005"):
             raise ValueError(failure)
+        if not (CACHE / MARKER).exists() or not beneath(CACHE / "runs", CACHE).exists():
+            recovered = upgrade_recovery_without_history(metadata)
+            if recovered is None:
+                raise ValueError(failure)
+            return recovered
         cache = private_json(CACHE / MARKER, CACHE)
         check_storage_record(cache)
         if cache.get("owner") != OWNER:
             raise ValueError(failure)
         runs = beneath(CACHE / "runs", CACHE)
         matches = []
+        evidence = False
+        # Run directories are kept for every attempt and never pruned, so the ledger
+        # can outgrow its bound. Stop scanning there, as reuse_upload does, instead
+        # of discarding a match this attempt already verified.
         with os.scandir(runs) as entries:
             for index, entry in enumerate(entries):
                 assert_storage_active()
                 if index >= MAX_RETRY_ENTRIES:
-                    raise ValueError(failure)
+                    break
                 if not re.fullmatch(r"[a-f0-9]{32}", entry.name):
                     continue
                 try:
                     directory = beneath(runs / entry.name, CACHE)
-                    for folder in (directory, directory / "stage", directory / "previous-program-files"):
+                    backup = directory / "previous-program-files"
+                    if not beneath(backup, CACHE).is_dir():
+                        # Without its program backup a run never carried upgrade
+                        # evidence; a fresh retry looks like this until its own
+                        # backup is published.
+                        continue
+                    evidence = True
+                    for folder in (directory, directory / "stage", backup):
                         beneath(folder, CACHE)
                         if not folder.is_dir() or folder.stat().st_uid != os.getuid():
                             raise ValueError("Not an owned upgrade directory.")
                     run = private_json(directory / MARKER, directory)
-                    backup = directory / "previous-program-files"
                     backup_owner = private_json(backup / ".backup-owner.json", backup)
                     staged = private_json(directory / "stage" / MARKER, directory)
                     # Old evidence may survive a reboot of this same card.
@@ -449,6 +493,13 @@ def interrupted_upgrade_record(metadata):
                                     "currentFiles": current_files})
                 except (OSError, ValueError, KeyError, TypeError):
                     continue
+        if not evidence:
+            # A cleared or partially deleted cache can leave the ledger with no
+            # run directories at all; the game folder is all that remains.
+            recovered = upgrade_recovery_without_history(metadata)
+            if recovered is None:
+                raise ValueError(failure)
+            return recovered
         if not matches or any(any(value[key] != matches[0][key] for key in
                                    ("files", "previousSavePaths", "originFiles", "currentFiles"))
                               for value in matches[1:]):
@@ -561,7 +612,12 @@ def existing_install(repair=False, adopt=False):
             "mapsVerified": maps_verified, "needsImage": not maps_verified, "programIssues": issues,
             "needsUpgrade": needs_upgrade, "previousSavePaths": previous_paths}
     if recovered:
-        response["upgradeRecovery"] = recovered
+        if "recoveryNote" in recovered:
+            # Without the ledger there is no evidence to carry into the next
+            # retry's backup; only the note explains how this was decided.
+            response["recoveryNote"] = recovered["recoveryNote"]
+        else:
+            response["upgradeRecovery"] = recovered
     return response
 
 
@@ -1613,9 +1669,12 @@ def finalize(value, repair=False, adopt=False):
         # Publish the ownership/provenance marker last; saves and all other files stay put.
         names.append(MARKER)
         backup = repair_program_files(stage, directory, names, check_cancelled, existing.get("upgradeRecovery"))
-        return {"gamePath": str(GAME), "reused": False, "repaired": True,
-                "sourceCommit": SOURCE_COMMIT, "backupPath": backup, "mapsReinstalled": not reuse_maps,
-                "previousSavePaths": existing.get("previousSavePaths", [])}
+        repaired = {"gamePath": str(GAME), "reused": False, "repaired": True,
+                    "sourceCommit": SOURCE_COMMIT, "backupPath": backup, "mapsReinstalled": not reuse_maps,
+                    "previousSavePaths": existing.get("previousSavePaths", [])}
+        if existing.get("recoveryNote"):
+            repaired["recoveryNote"] = existing["recoveryNote"]
+        return repaired
     beneath(GAME.parent, storage_root()).mkdir(exist_ok=True)
     if GAME.exists() or GAME.is_symlink():
         raise ValueError("The game destination appeared during installation. It was not modified.")
