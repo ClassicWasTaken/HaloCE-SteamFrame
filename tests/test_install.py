@@ -1428,3 +1428,109 @@ def test_recognized_codex_legacy_marker_upgrades_without_changing_old_checkpoint
     assert (previous / "checkpoint").read_bytes() == b"incompatible previous checkpoint"
     assert remote.read_marker(remote.GAME / remote.MARKER)["sourceCommit"] == remote.SOURCE_COMMIT
     assert not remote.existing_install()["needsUpgrade"]
+
+
+def hard_exit_before_file(remote, identifier, name):
+    """Kill the real scratch finalizer immediately before it replaces one file."""
+    directory = remote.CACHE / "runs" / identifier
+    metadata = remote.read_marker(directory / remote.MARKER)
+    metadata["repair"] = True
+    (directory / remote.MARKER).write_text(json.dumps(metadata))
+    script = '''
+import importlib.util, json, os, pathlib, sys, types
+if sys.platform == "win32":
+    sys.modules["pwd"] = types.SimpleNamespace()
+spec = importlib.util.spec_from_file_location("scratch_remote", sys.argv[1])
+remote = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(remote)
+remote.HOME = pathlib.Path(sys.argv[2])
+remote.GAME = pathlib.Path(sys.argv[4])
+remote.CACHE = pathlib.Path(sys.argv[5])
+remote.os.getuid = lambda: remote.HOME.stat().st_uid
+descriptor = json.loads(sys.argv[6])
+if descriptor is not None:
+    remote.STORAGE_ID = descriptor["id"]
+    remote.STORAGE_DESCRIPTOR = descriptor
+    remote.storage_module().resolve_storage = lambda identifier, home: descriptor
+remote.game_closed = lambda: None
+remote.command = lambda *args, **kwargs: "native libraries resolved"
+victim = remote.CACHE / "runs" / sys.argv[3] / "stage" / sys.argv[7]
+replace = remote.os.replace
+def interrupt(source, target):
+    if pathlib.Path(source) == victim:
+        os._exit(72)
+    replace(source, target)
+remote.os.replace = interrupt
+remote.finalize(sys.argv[3], repair=True)
+'''
+    result = subprocess.run([sys.executable, "-c", script, remote.__file__, str(remote.HOME), identifier,
+                             str(remote.GAME), str(remote.CACHE), json.dumps(remote.STORAGE_DESCRIPTOR), name],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 72, result.stdout + result.stderr
+    return directory
+
+
+def killed_retry_mixed_folder(remote):
+    """A hard-killed recovery retry: one rebuilt file replaced, the engine still the first build's."""
+    manifest, previous, first = interrupted_native_upgrade(remote)
+    staged = json.loads((first / "stage" / remote.MARKER).read_text())["files"]
+    second = built_run(remote, manifest, "5" * 32)
+    for name in ("halo", "libSDL3.so.0", "brokers.txt"):
+        with (second / "src/build/linux_arm64" / name).open("ab") as stream:
+            stream.write(b"differing rebuilt bytes on retry " + name.encode())
+    hard_exit_before_file(remote, "5" * 32, "halo")
+    assert remote.digest(remote.GAME / "halo") == staged["halo"]
+    assert remote.digest(remote.GAME / "brokers.txt") != staged["brokers.txt"]
+    return manifest, previous, staged
+
+
+def test_repair_rebuilds_a_mixed_folder_a_killed_retry_can_no_longer_verify(remote, monkeypatch):
+    manifest, previous, staged = killed_retry_mixed_folder(remote)
+    verified = remote.existing_install(repair=True)
+    assert verified["needsUpgrade"] and verified["recoveryUnverified"] is True
+    assert verified["programIssues"] == ["halo", "libSDL3.so.0"]
+    monkeypatch.setattr(remote, "command", lambda argv, **kwargs: "native libraries resolved")
+    built_run(remote, manifest, "6" * 32)
+    result = remote.finalize("6" * 32, repair=True)
+    assert result["repaired"] is True and result["recoveryUnverified"] is True
+    marker = remote.read_marker(remote.GAME / remote.MARKER)
+    assert marker["sourceCommit"] == remote.SOURCE_COMMIT
+    for name in ("halo", "libSDL3.so.0", "brokers.txt", "frame-controls.patch"):
+        assert marker["files"][name] == remote.digest(remote.GAME / name)
+    assert remote.digest(Path(result["backupPath"]) / "halo") == staged["halo"]
+    assert (previous / "checkpoint").read_bytes() == b"incompatible previous checkpoint"
+    assert (remote.save_root() / "checkpoint").read_bytes() == b"played after the interrupted upgrade"
+    assert not remote.existing_install()["needsUpgrade"]
+
+
+def test_repair_rebuilds_a_damaged_replaced_program_file_after_interruption(remote, monkeypatch):
+    manifest, previous, _ = interrupted_native_upgrade(remote)
+    with (remote.GAME / "libSDL3.so.0").open("ab") as stream:
+        stream.write(b"damaged after the interrupted upgrade")
+    verified = remote.existing_install(repair=True)
+    assert verified["recoveryUnverified"] is True and "libSDL3.so.0" in verified["programIssues"]
+    monkeypatch.setattr(remote, "command", lambda argv, **kwargs: "native libraries resolved")
+    built_run(remote, manifest, "7" * 32)
+    result = remote.finalize("7" * 32, repair=True)
+    assert result["repaired"] is True and result["recoveryUnverified"] is True
+    marker = remote.read_marker(remote.GAME / remote.MARKER)
+    assert marker["files"]["libSDL3.so.0"] == remote.digest(remote.GAME / "libSDL3.so.0")
+    assert (previous / "checkpoint").read_bytes() == b"incompatible previous checkpoint"
+    assert (remote.save_root() / "checkpoint").read_bytes() == b"played after the interrupted upgrade"
+    assert not remote.existing_install()["needsUpgrade"]
+
+
+@pytest.mark.parametrize("adopt", [False, True])
+@pytest.mark.parametrize("mixed", ["killed-retry", "damaged-file"])
+def test_plain_reuse_and_adoption_still_refuse_an_unverifiable_mixed_folder(remote, mixed, adopt):
+    if mixed == "killed-retry":
+        killed_retry_mixed_folder(remote)
+    else:
+        interrupted_native_upgrade(remote)
+        with (remote.GAME / "libSDL3.so.0").open("ab") as stream:
+            stream.write(b"damaged after the interrupted upgrade")
+    before = {path: path.read_bytes() for path in (remote.GAME / "halo", remote.GAME / "libSDL3.so.0",
+                                                  remote.GAME / "config.toml", remote.GAME / remote.MARKER)}
+    with pytest.raises(ValueError, match="interrupted upgrade could not be verified"):
+        remote.existing_install(repair=False, adopt=adopt)
+    assert {path: path.read_bytes() for path in before} == before

@@ -312,6 +312,14 @@ def validate_save_paths(settings, require_explicit=False):
             raise ValueError("Version 1.4 must use its own game folder and save-v1.4 subfolder. Existing saves were kept.")
 
 
+class UnverifiedUpgrade(ValueError):
+    """A failed evidence scan, with the engine hashes its valid runs still staged."""
+
+    def __init__(self, message, witnessed=()):
+        super().__init__(message)
+        self.witnessed = frozenset(witnessed)
+
+
 def interrupted_upgrade_record(metadata):
     """Corroborate a redirected legacy install against its unpublished transaction."""
     failure = ("The interrupted upgrade could not be verified. Existing games and saves were kept. "
@@ -327,7 +335,7 @@ def interrupted_upgrade_record(metadata):
         if cache.get("owner") != OWNER:
             raise ValueError(failure)
         runs = beneath(CACHE / "runs", CACHE)
-        matches = []
+        matches, witnessed = [], []
         with os.scandir(runs) as entries:
             for index, entry in enumerate(entries):
                 assert_storage_active()
@@ -404,6 +412,7 @@ def interrupted_upgrade_record(metadata):
                                 or digest(ordinary(beneath(origin / name, origin))) != expected):
                             raise ValueError("The original native program backup failed verification.")
                     current_files = {}
+                    unfinished = False
                     for name, expected in new_files.items():
                         if not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected):
                             raise ValueError("The replacement program hashes are invalid.")
@@ -415,14 +424,14 @@ def interrupted_upgrade_record(metadata):
                             # A file still staged has not necessarily replaced its legacy copy.
                             old_hash = previous_files.get(name)
                             if live.exists() and digest(ordinary(live)) not in (expected, old_hash):
-                                raise ValueError("An installed program file does not match this upgrade.")
+                                unfinished = True
                         elif not live.exists() or digest(ordinary(live)) != expected:
-                            raise ValueError("An installed replacement failed verification.")
+                            unfinished = True
                         current_files[name] = digest(ordinary(live)) if live.exists() else None
                     # A redirect with the legacy engine still installed is not evidence
                     # that checkpoints in this destination use the new save format.
                     if digest(ordinary(GAME / "halo")) != new_files["halo"]:
-                        raise ValueError("The redirected save destination has no verified new engine.")
+                        unfinished = True
                     config = beneath(origin / "config.toml", origin)
                     if config.exists():
                         details = ordinary(config).stat()
@@ -444,6 +453,12 @@ def interrupted_upgrade_record(metadata):
                         origin_files[name] = digest(ordinary(path)) if path.exists() else None
                     if carried is not None and carried.get("originFiles") != origin_files:
                         raise ValueError("The carried original files do not match their verification record.")
+                    if unfinished:
+                        # Every hash this run recorded still verified; only its live
+                        # replacements never finished. Its staged engine build remains
+                        # proof of the save format that wrote the redirected destination.
+                        witnessed.append(new_files["halo"])
+                        continue
                     matches.append({"files": new_files, "previousSavePaths": previous,
                                     "originPath": str(origin), "originFiles": origin_files,
                                     "currentFiles": current_files})
@@ -452,9 +467,11 @@ def interrupted_upgrade_record(metadata):
         if not matches or any(any(value[key] != matches[0][key] for key in
                                    ("files", "previousSavePaths", "originFiles", "currentFiles"))
                               for value in matches[1:]):
-            raise ValueError(failure)
+            raise UnverifiedUpgrade(failure, witnessed)
         assert_storage_active(force=True)
         return matches[0]
+    except UnverifiedUpgrade:
+        raise
     except (OSError, ValueError, KeyError, TypeError):
         raise ValueError(failure) from None
 
@@ -498,6 +515,7 @@ def existing_install(repair=False, adopt=False):
     migrating = source != SOURCE_COMMIT
     beneath(save_root(), GAME)
     recovered = None
+    unverified_rebuild = False
     config_path = GAME / "config.toml"
     if migrating and config_path.exists():
         try:
@@ -508,10 +526,28 @@ def existing_install(repair=False, adopt=False):
         if configured_save_path(settings) == str(save_root()):
             if not needs_upgrade:
                 raise ValueError("The save destination cannot establish an interrupted legacy upgrade. Existing saves were kept.")
-            recovered = interrupted_upgrade_record(value)
-            previous_paths = recovered["previousSavePaths"]
+            try:
+                recovered = interrupted_upgrade_record(value)
+            except ValueError as error:
+                # A hard-killed retry, or later damage to one replaced program file,
+                # leaves a folder no run's evidence can re-verify. Repair rebuilds
+                # every program file from the pinned source, so it may continue once
+                # the installed engine is still one this scan verified staging: only
+                # that engine can have written this destination's new save format.
+                witnessed = error.witnessed if isinstance(error, UnverifiedUpgrade) else frozenset()
+                try:
+                    engine = digest(ordinary(beneath(GAME / "halo", GAME)))
+                except (OSError, ValueError):
+                    engine = None
+                if not repair or engine not in witnessed:
+                    raise
+                unverified_rebuild = True
+            else:
+                previous_paths = recovered["previousSavePaths"]
     if save_root().exists() and (not save_root().is_dir() or (migrating and any(save_root().iterdir()))):
-        if not recovered or not save_root().is_dir():
+        # An unverified rebuild keeps these checkpoints only because its witnessed
+        # engine already proved this destination uses the version 1.4 save format.
+        if not (recovered or unverified_rebuild) or not save_root().is_dir():
             raise ValueError("The version 1.4 save destination already contains files or is not a directory. Existing saves were kept.")
     if (GAME / "config.toml").exists():
         ordinary(GAME / "config.toml")
@@ -519,7 +555,9 @@ def existing_install(repair=False, adopt=False):
         if migrating:
             if not recovered:
                 previous = configured_save_path(settings)
-                if previous not in previous_paths:
+                # A redirect no evidence verifies declares today's destination,
+                # not a save location an earlier engine used.
+                if previous not in previous_paths and previous != str(save_root()):
                     previous_paths.append(previous)
         else:
             validate_save_paths(settings, require_explicit=not repair)
@@ -562,6 +600,8 @@ def existing_install(repair=False, adopt=False):
             "needsUpgrade": needs_upgrade, "previousSavePaths": previous_paths}
     if recovered:
         response["upgradeRecovery"] = recovered
+    if unverified_rebuild:
+        response["recoveryUnverified"] = True
     return response
 
 
@@ -1607,15 +1647,21 @@ def finalize(value, repair=False, adopt=False):
         if existing.get("previousSavePaths"):
             progress("upgrade", "Previous checkpoints remain in " + ", ".join(existing["previousSavePaths"])
                      + ". Version 1.4 uses fresh campaign saves in " + str(save_root()) + ".")
+        if existing.get("recoveryUnverified"):
+            progress("upgrade", "This game folder's interrupted upgrade could not be verified; "
+                     "its program files were rebuilt from the pinned source.")
         names = [item.name for item in stage.iterdir() if item.is_file() and item.name != MARKER]
         if not reuse_maps:
             names += [item["path"] for item in manifest["files"]]
         # Publish the ownership/provenance marker last; saves and all other files stay put.
         names.append(MARKER)
         backup = repair_program_files(stage, directory, names, check_cancelled, existing.get("upgradeRecovery"))
-        return {"gamePath": str(GAME), "reused": False, "repaired": True,
-                "sourceCommit": SOURCE_COMMIT, "backupPath": backup, "mapsReinstalled": not reuse_maps,
-                "previousSavePaths": existing.get("previousSavePaths", [])}
+        repaired = {"gamePath": str(GAME), "reused": False, "repaired": True,
+                    "sourceCommit": SOURCE_COMMIT, "backupPath": backup, "mapsReinstalled": not reuse_maps,
+                    "previousSavePaths": existing.get("previousSavePaths", [])}
+        if existing.get("recoveryUnverified"):
+            repaired["recoveryUnverified"] = True
+        return repaired
     beneath(GAME.parent, storage_root()).mkdir(exist_ok=True)
     if GAME.exists() or GAME.is_symlink():
         raise ValueError("The game destination appeared during installation. It was not modified.")
