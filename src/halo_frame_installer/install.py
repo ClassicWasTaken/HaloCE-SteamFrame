@@ -238,6 +238,7 @@ class UninstallResult:
     removal_warning: str | None = None
     recovered_save_backup_paths: tuple[str, ...] = ()
     retained_quarantine_paths: tuple[str, ...] = ()
+    remaining_installs: tuple[tuple[str, str], ...] = ()
     storage_id: str = "internal"
 
     @property
@@ -302,6 +303,28 @@ def uninstall_history(data: dict, game_path="/home/steamos/Games/HaloCENativeVR"
     if warning is not None and (not isinstance(warning, str) or not 0 < len(warning) <= 4096):
         raise SSHError("The Frame returned an invalid uninstall warning.")
     return tuple(backups), tuple(retained), warning
+
+
+def remaining_install_entries(data: dict, selected_path: str, selected_id: str) -> tuple[tuple[str, str], ...]:
+    """Validate where an uninstall left the game installed on other storage."""
+    entries = data.get("remainingInstalls", [])
+    if not isinstance(entries, list) or len(entries) > 8:
+        raise SSHError("The Frame returned an invalid remaining-install report.")
+    remaining = []
+    for entry in entries:
+        if (not isinstance(entry, dict) or set(entry) != {"storageId", "path"}
+                or not isinstance(entry["storageId"], str)
+                or not re.fullmatch(r"internal|sd:[a-f0-9]{32}", entry["storageId"])
+                or entry["storageId"] == selected_id
+                or not isinstance(entry["path"], str) or len(entry["path"]) > 400
+                or any(ord(c) < 32 or ord(c) == 127 or c in "\"'`$\\;|&<>:" for c in entry["path"])
+                or str(PurePosixPath(entry["path"])) != entry["path"]
+                or ".." in PurePosixPath(entry["path"]).parts
+                or not entry["path"].endswith("/Games/HaloCENativeVR")
+                or entry["path"] == selected_path):
+            raise SSHError("The Frame returned an invalid remaining-install report.")
+        remaining.append((entry["storageId"], entry["path"]))
+    return tuple(remaining)
 
 
 class Installer:
@@ -721,6 +744,9 @@ class Installer:
                     or steam.get("status") not in ("removed", "already-absent")
                     or (saved is not None and saved != str(PurePosixPath(destination["gamePath"]).parent) + "/HaloCENativeVR-saves-" + run_identifier)):
                 raise SSHError("The Frame returned an invalid uninstall result.")
+            remaining = remaining_install_entries(data, info["gamePath"], settings.storage_id)
+            for identifier, path in remaining:
+                progress("detail", "Native Halo VR remains installed on other storage: " + path, None)
             host_fingerprint = connection.host_fingerprint
             progress("disconnect", "Closing the setup SSH connection...", None)
             cleanup_warning = close_connection(connection, progress)
@@ -736,7 +762,8 @@ class Installer:
             return UninstallResult(info["gamePath"], uninstalled, absent, saved, steam, host_fingerprint,
                                    cleanup_warning=cleanup_warning, removal_pending=pending,
                                    removal_warning=warning, recovered_save_backup_paths=recovered,
-                                   retained_quarantine_paths=retained, storage_id=settings.storage_id)
+                                   retained_quarantine_paths=retained, remaining_installs=remaining,
+                                   storage_id=settings.storage_id)
         finally:
             if not cleanup_attempted:
                 cleanup_activity(progress, "Closing the setup SSH connection...")

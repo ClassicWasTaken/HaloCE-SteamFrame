@@ -538,7 +538,9 @@ def test_library_preflight_does_not_require_compiler_or_build_space(remote, monk
     monkeypatch.setattr(remote, 'os_release', lambda: {'ID': 'steamos'})
     build_tools = Mock(side_effect=AssertionError('Library info must not require build tools'))
     monkeypatch.setattr(remote.shutil, 'which', build_tools)
-    monkeypatch.setattr(remote.shutil, 'disk_usage', build_tools)
+    # Storage discovery reports each destination's free space; library updates
+    # never gate on it.
+    monkeypatch.setattr(remote.shutil, 'disk_usage', lambda path: types.SimpleNamespace(free=0))
     monkeypatch.setattr(remote, 'command', build_tools)
     verified = {'gamePath': str(remote.GAME), 'mapsVerified': True, 'sourceCommit': SOURCE_COMMIT}
     monkeypatch.setattr(remote, 'existing_install', lambda: verified)
