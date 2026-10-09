@@ -30,6 +30,19 @@ def load_resource(name):
     return module
 
 
+def test_shortcut_result_shapes_are_validated_before_reaching_the_gui():
+    class HostileShortcut(FakeConnection):
+        def run(self, argv, **kwargs):
+            result = super().run(argv, **kwargs)
+            if argv[1] != '-c' and argv[2] == 'shortcut':
+                return 'HFI_RESULT {"status":"added","reason":{"detail":"boom"}}'
+            return result
+
+    fake = HostileShortcut(Settings("frame", "private"))
+    with pytest.raises(SSHError, match="invalid Steam registration response"):
+        Installer(lambda settings: fake, RESOURCES).add_to_steam(fake.settings)
+
+
 def test_shortcut_roundtrip_preserves_foreign_entry_and_is_idempotent():
     steam = load_resource("steam_shortcut")
     other = OrderedDict([("appid", steam.Value(2, 2147483650)), ("AppName", steam.Value(1, "Other game")),
