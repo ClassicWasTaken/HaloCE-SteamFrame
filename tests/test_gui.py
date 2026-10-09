@@ -1866,3 +1866,41 @@ def test_installer_workers_distinguish_cancel_from_failures(app, monkeypatch, op
     if cleanup_fails:
         assert 'USB forward could not be removed' in '\n'.join(app.log_lines)
     assert 'offline-secret' not in '\n'.join(app.log_lines)
+
+
+@WINDOWS_GUI
+def test_activity_log_keeps_only_the_most_recent_lines(app):
+    from halo_frame_installer.gui import LOG_LINE_LIMIT
+    appended = LOG_LINE_LIMIT + 1000
+    for index in range(appended):
+        app._append(f'compile: task {index}')
+    assert len(app.log_lines) == LOG_LINE_LIMIT
+    assert app.log_lines[0] == f'compile: task {appended - LOG_LINE_LIMIT}'
+    assert app.log_lines[-1] == f'compile: task {appended - 1}'
+    # Tk always keeps one trailing display line past the content.
+    widget_lines = int(app.log.index('end-1c').split('.')[0]) - 1
+    assert widget_lines == LOG_LINE_LIMIT
+    assert 'compile: task 0' not in '\n'.join(app.log_lines)
+
+
+@WINDOWS_GUI
+def test_detail_event_flood_is_dropped_while_the_queue_backs_up(app):
+    from halo_frame_installer.gui import LOG_LINE_LIMIT, EVENT_QUEUE_DETAIL_LIMIT
+    # Fixture setup reselects game data, which posts one music notice after
+    # its own queue clear; start from a known empty backlog.
+    app.events.queue.clear()
+    flooded = EVENT_QUEUE_DETAIL_LIMIT + 2000
+    for index in range(flooded):
+        app._post_event(('progress', 'detail', f'compile: task {index}', None))
+    assert app.events.qsize() == EVENT_QUEUE_DETAIL_LIMIT + 1
+    app._post_event(('progress', 'detail', 'compile: dropped tail line', None))
+    assert app.events.qsize() == EVENT_QUEUE_DETAIL_LIMIT + 1
+    app._post_event(('progress', 'compile', 'Completed 40 of 100 build tasks.', 40))
+    assert app.events.qsize() == EVENT_QUEUE_DETAIL_LIMIT + 2
+    _drain_events(app)
+    assert app.status.get() == 'Completed 40 of 100 build tasks.'
+    assert app.log_lines[-1] == 'compile: Completed 40 of 100 build tasks.'
+    assert len(app.log_lines) == LOG_LINE_LIMIT
+    assert app.log_lines[0] == 'compile: task 2'
+    assert 'compile: dropped tail line' not in '\n'.join(app.log_lines)
+    assert f'compile: task {flooded - 1}' not in '\n'.join(app.log_lines)
